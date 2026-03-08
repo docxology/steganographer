@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steganographer Dashboard — Live Round-Trip Verification</title>
+    <meta name="description" content="Real-time steganography encoding and verification dashboard">
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/style.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <header id="dashboard-header">
+        <div class="header-left">
+            <h1 id="app-title">
+                <span class="icon">🔏</span>
+                Steganographer
+            </h1>
+            <span class="version-badge" id="version-badge">v0.1.0</span>
+        </div>
+        <div class="header-center">
+            <div class="backend-selector" id="backend-selector">
+                <label for="signing-backend">Signing:</label>
+                <select id="signing-backend">
+                    <option value="ed25519" selected>Ed25519</option>
+                    <option value="ethereum">Ethereum (secp256k1)</option>
+                </select>
+            </div>
+            <button class="metamask-btn" id="metamask-btn" title="Connect MetaMask wallet for Ethereum signing">
+                <span class="metamask-icon">🦊</span>
+                <span class="metamask-label" id="metamask-label">Connect MetaMask</span>
+            </button>
+            <div class="identity-display" id="identity-display">
+                <span class="identity-label">Identity:</span>
+                <code id="identity-value">connecting...</code>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="connection-status" id="connection-status">
+                <span class="status-dot disconnected" id="status-dot"></span>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ═══ TAB BAR ═══ -->
+    <nav class="tab-bar" id="tab-bar">
+        <button class="tab-btn active" id="tab-btn-video" data-tab="video" aria-label="Video Steganography Tab">
+            <span class="tab-icon">📹</span> Video
+        </button>
+        <button class="tab-btn" id="tab-btn-audio" data-tab="audio" aria-label="Audio Steganography Tab">
+            <span class="tab-icon">🎤</span> Audio
+        </button>
+        <button class="tab-btn" id="tab-btn-docs" data-tab="docs" aria-label="Documentation Tab"
+            title="Browse all project documentation — algorithms, API reference, security, and more">
+            <span class="tab-icon">📄</span> Docs
+        </button>
+    </nav>
+
+    <!-- ═══ VIDEO TAB ═══ -->
+    <main id="tab-video" class="tab-content dashboard-main">
+        <!-- LEFT: Live webcam feed -->
+        <div class="panel encode-panel" id="encode-panel">
+            <div class="panel-header">
+                <h2 id="encode-title">🔒 Encode — Live Feed</h2>
+                <span class="panel-badge encode" id="encode-badge">EMBEDDING</span>
+            </div>
+            <div class="crypto-pipeline-info">
+                <span class="pipeline-step">📷 Raw Frame</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">🔑 BLAKE3 Hash</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">✍️ Sign</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">📦 LSB Embed</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">📊 QR Overlay</span>
+                <span class="help-icon">?<span class="help-tooltip"><strong>Encode Pipeline</strong><br>
+                        Each video frame is: (1) hashed with BLAKE3, (2) cryptographically signed with
+                        Ed25519 or secp256k1, (3) the signature payload is embedded into the least
+                        significant bits of the pixel data, and (4) a QR data matrix overlay is
+                        rendered on top for visual verification.</span></span>
+            </div>
+            <div class="canvas-container" id="encode-canvas-container">
+                <video id="webcam-video" autoplay muted></video>
+                <canvas id="encode-canvas" width="640" height="480"></canvas>
+                <div class="canvas-overlay" id="encode-overlay">
+                    <div class="overlay-text">📹 Camera Required</div>
+                    <div class="overlay-subtext">Click below to start your webcam feed</div>
+                    <button class="start-camera-btn" id="start-camera-btn">
+                        <span>▶</span> Start Camera <kbd class="kbd-hint">Space</kbd>
+                    </button>
+                </div>
+                <div class="sign-indicator hidden" id="sign-indicator">
+                    <span class="sign-pulse"></span>
+                    <span>Signing...</span>
+                </div>
+            </div>
+            <div class="panel-stats" id="encode-stats">
+                <div class="stat" id="stat-frames"
+                    title="Total number of video frames cryptographically signed since session start">
+                    <span class="stat-label">Signed</span>
+                    <span class="stat-value" id="val-frames">0</span>
+                </div>
+                <div class="stat" id="stat-fps"
+                    title="Cryptographic signatures generated per second — higher = more tamper-evident frames">
+                    <span class="stat-label">Sign/s</span>
+                    <span class="stat-value" id="val-fps">0.0</span>
+                </div>
+                <div class="stat" id="stat-sign-latency"
+                    title="Time in microseconds to compute BLAKE3 hash + Ed25519/Ethereum signature per frame">
+                    <span class="stat-label">Sign μs</span>
+                    <span class="stat-value" id="val-sign-latency">0.0</span>
+                </div>
+                <div class="stat stat-record" id="stat-record-video">
+                    <button class="record-btn" id="record-video-btn"
+                        title="Record steganographically signed video to a file. Each frame contains embedded integrity data.">
+                        <span class="record-dot"></span>
+                        <span id="record-video-label">Record</span> <kbd class="kbd-hint">R</kbd>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-divider" id="panel-divider">
+            <div class="divider-arrow" id="divider-arrow">
+                <span>→</span>
+                <span class="divider-label">VERIFY</span>
+                <span>→</span>
+            </div>
+        </div>
+
+        <!-- RIGHT: Verification data + live config controls -->
+        <div class="panel decode-panel" id="decode-panel">
+            <div class="panel-header">
+                <h2 id="decode-title">🔓 Verify — Extracted Data</h2>
+                <span class="panel-badge decode" id="decode-badge">VERIFYING</span>
+            </div>
+            <div class="crypto-pipeline-info verify-pipeline">
+                <span class="pipeline-step">📦 Extract LSB</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">🔍 Parse Signature</span>
+                <span class="pipeline-arrow">→</span>
+                <span class="pipeline-step">✅ Verify Pubkey</span>
+                <span class="help-icon">?<span class="help-tooltip"><strong>Verify Pipeline</strong><br>
+                        The decode side: (1) extracts the LSB-embedded payload from the received
+                        frame, (2) deserializes the frame index, BLAKE3 hash, and cryptographic
+                        signature, then (3) verifies the signature against the known public key.
+                        A green ✅ means the frame is authentic and untampered.</span></span>
+            </div>
+            <div class="verify-data-container" id="verify-data-container">
+                <!-- Waiting state -->
+                <div class="verify-waiting" id="verify-waiting">
+                    <div class="overlay-text">Awaiting verification...</div>
+                    <div class="overlay-subtext">Start camera to begin round-trip</div>
+                </div>
+
+                <!-- Live verification result -->
+                <div class="verify-result hidden" id="verify-result">
+                    <div class="verify-status-banner" id="verify-status-banner">
+                        <span class="verify-status-icon" id="verify-status-icon">✅</span>
+                        <span class="verify-status-text" id="verify-status-text">Signature Verified</span>
+                    </div>
+
+                    <div class="verify-fields">
+                        <div class="verify-field">
+                            <span class="field-label">Frame Index</span>
+                            <code class="field-value" id="field-frame-index">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">BLAKE3 Hash</span>
+                            <code class="field-value field-hash" id="field-hash">—</code>
+                            <button class="copy-btn" data-copy-target="field-hash" title="Copy full hash">📋</button>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">Signature Preview</span>
+                            <code class="field-value field-hash" id="field-sig-preview">—</code>
+                            <button class="copy-btn" data-copy-target="field-sig-preview"
+                                title="Copy signature">📋</button>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">Backend</span>
+                            <code class="field-value" id="field-backend">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">Verify Latency</span>
+                            <code class="field-value" id="field-verify-latency">—</code>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ LIVE CONFIG CONTROLS ═══ -->
+                <div class="config-section-header">⚙ Steganography Config</div>
+                <div class="config-controls">
+                    <!-- Overlay Opacity -->
+                    <div class="config-row">
+                        <span class="config-label">Overlay Opacity
+                            <span class="help-icon">?<span class="help-tooltip">Controls how visible the QR watermark
+                                    overlay is on the video. 0% = invisible (data still embedded in LSB), 100% = fully
+                                    visible. The cryptographic signature is always embedded regardless of overlay
+                                    visibility.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="cfg-opacity" min="0" max="100" value="100"
+                                step="5" aria-label="Overlay Opacity">
+                            <span class="config-slider-value" id="cfg-opacity-val">1.0</span>
+                        </div>
+                    </div>
+                    <!-- Embed Depth (LSB) -->
+                    <div class="config-row">
+                        <span class="config-label">Embed Depth (LSB)
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Least Significant Bits</strong>
+                                    — how many of the lowest bits of each pixel are used to hide data.<br><br><strong>1
+                                        bit</strong> = imperceptible, recommended for security<br><strong>2
+                                        bits</strong> = slightly more capacity<br><strong>3–4 bits</strong> = maximum
+                                    capacity but may create visible artifacts and be detectable by
+                                    steganalysis</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="cfg-lsb-bits" min="1" max="4" value="1"
+                                step="1" aria-label="Embed Depth (LSB)">
+                            <span class="config-slider-value" id="cfg-lsb-bits-val">1</span>
+                        </div>
+                        <div class="preset-row">
+                            <button class="preset-btn" data-preset="low" id="preset-low">Low</button>
+                            <button class="preset-btn" data-preset="medium" id="preset-medium">Medium</button>
+                            <button class="preset-btn" data-preset="high" id="preset-high">High</button>
+                        </div>
+                    </div>
+                    <!-- Signing Backend -->
+                    <div class="config-row">
+                        <span class="config-label">Sign Backend
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Ed25519</strong> = fast,
+                                    lightweight digital signatures (128-bit security). Recommended for most use
+                                    cases.<br><br><strong>Ethereum</strong> = secp256k1 signatures compatible with
+                                    blockchain wallets like MetaMask for on-chain identity verification.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="cfg-sign-backend" aria-label="Signing Backend">
+                                <option value="ed25519" selected>Ed25519</option>
+                                <option value="ethereum">Ethereum</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Overlay Text -->
+                    <div class="config-row">
+                        <span class="config-label">Overlay Text
+                            <span class="help-icon">?<span class="help-tooltip">Custom text displayed above the QR data
+                                    matrix overlay. Labels the feed with classification level, organization name, or
+                                    session identifier. This text is burned into the video as a visible watermark.
+                                    Supports {timestamp}, {frame_index} placeholders.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="text" class="config-input" id="cfg-overlay-text" value="CONFIDENTIAL"
+                                placeholder="Overlay text...">
+                        </div>
+                    </div>
+                    <!-- Sign Interval -->
+                    <div class="config-row">
+                        <span class="config-label">Sign Rate
+                            <span class="help-icon">?<span class="help-tooltip">How often frames are cryptographically
+                                    signed. Higher rate = more frames verified for tampering but more CPU. At 1/s, one
+                                    frame per second gets a full BLAKE3 hash + digital signature embedded.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="cfg-sign-rate" min="200" max="5000"
+                                value="1000" step="100" aria-label="Sign Rate">
+                            <span class="config-slider-value" id="cfg-sign-rate-val">1/s</span>
+                        </div>
+                    </div>
+                    <!-- QR Scale -->
+                    <div class="config-row">
+                        <span class="config-label">QR Scale
+                            <span class="help-icon">?<span class="help-tooltip">Size of the QR data matrix overlay.
+                                    5–15% = discreet corner badge. 80–100% = full-frame coverage for maximum
+                                    machine-readability. The QR encodes cryptographic hash, frame index, timestamp, and
+                                    signature metadata.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="cfg-qr-scale" min="5" max="100" value="10"
+                                step="5" aria-label="QR Overlay Scale">
+                            <span class="config-slider-value" id="cfg-qr-scale-val">10%</span>
+                        </div>
+                    </div>
+                    <!-- Video Resolution -->
+                    <div class="config-row">
+                        <span class="config-label">Resolution
+                            <span class="help-icon">?<span class="help-tooltip">Camera capture resolution. Higher = more
+                                    pixels for embedding (higher capacity) but more bandwidth and CPU. 640×480 is a good
+                                    balance. Restarts the camera when changed.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="cfg-resolution" aria-label="Video Resolution">
+                                <option value="320x240">320×240</option>
+                                <option value="640x480" selected>640×480</option>
+                                <option value="800x600">800×600</option>
+                                <option value="1280x720">1280×720 (HD)</option>
+                                <option value="1920x1080">1920×1080 (FHD)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stego Info -->
+                <div class="config-section-header">📊 Embedded Data</div>
+                <div class="stego-info">
+                    <div class="stego-info-row">
+                        <span class="stego-info-label">Payload Size</span>
+                        <span class="stego-info-value" id="info-payload-size">104 bytes</span>
+                    </div>
+                    <div class="stego-info-row">
+                        <span class="stego-info-label">Hash Algorithm</span>
+                        <span class="stego-info-value" id="info-hash-algo">BLAKE3 (256-bit)</span>
+                    </div>
+                    <div class="stego-info-row">
+                        <span class="stego-info-label">Signature</span>
+                        <span class="stego-info-value" id="info-sig-algo">Ed25519 (512-bit)</span>
+                    </div>
+                    <div class="stego-info-row">
+                        <span class="stego-info-label">Capacity</span>
+                        <span class="stego-info-value" id="info-capacity">—</span>
+                    </div>
+                    <div class="stego-info-row">
+                        <span class="stego-info-label">Utilization</span>
+                        <span class="stego-info-value" id="info-utilization">—</span>
+                    </div>
+                </div>
+
+                <!-- Verification Log -->
+                <div class="verify-log-header">Recent Verifications</div>
+                <div class="verify-log" id="verify-log"></div>
+            </div>
+            <div class="panel-stats" id="decode-stats">
+                <div class="stat stat-ok" id="stat-verified-ok">
+                    <span class="stat-label">✅ Verified</span>
+                    <span class="stat-value" id="val-verified-ok">0</span>
+                </div>
+                <div class="stat stat-fail" id="stat-verified-fail">
+                    <span class="stat-label">❌ Failed</span>
+                    <span class="stat-value" id="val-verified-fail">0</span>
+                </div>
+                <div class="stat" id="stat-verify-latency">
+                    <span class="stat-label">Verify μs</span>
+                    <span class="stat-value" id="val-verify-latency">0.0</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ═══ AUDIO TAB ═══ -->
+    <main id="tab-audio" class="tab-content dashboard-main hidden">
+        <!-- LEFT: Audio waveform -->
+        <div class="panel encode-panel" id="audio-encode-panel">
+            <div class="panel-header">
+                <h2 id="audio-encode-title">🔒 Encode — Audio Feed</h2>
+                <span class="panel-badge encode" id="audio-encode-badge">EMBEDDING</span>
+            </div>
+            <div class="canvas-container audio-canvas-container" id="audio-canvas-container">
+                <canvas id="audio-waveform-canvas" width="640" height="240"></canvas>
+                <canvas id="audio-spectrum-canvas" width="640" height="120"></canvas>
+                <div class="canvas-overlay" id="audio-overlay">
+                    <div class="overlay-text">🎤 Microphone Required</div>
+                    <div class="overlay-subtext">Click below to start audio capture</div>
+                    <button class="start-camera-btn" id="start-mic-btn">
+                        <span>▶</span> Start Microphone
+                    </button>
+                </div>
+            </div>
+            <div class="panel-stats" id="audio-encode-stats">
+                <div class="stat" id="stat-audio-chunks"
+                    title="Total number of PCM audio chunks cryptographically signed since microphone started">
+                    <span class="stat-label">Chunks</span>
+                    <span class="stat-value" id="val-audio-chunks">0</span>
+                </div>
+                <div class="stat" id="stat-audio-rate"
+                    title="Audio samples processed per second (e.g., 44100 = CD quality)">
+                    <span class="stat-label">Sample/s</span>
+                    <span class="stat-value" id="val-audio-rate">0</span>
+                </div>
+                <div class="stat" id="stat-audio-sign-latency"
+                    title="Time in microseconds to compute BLAKE3 hash + digital signature per audio chunk">
+                    <span class="stat-label">Sign μs</span>
+                    <span class="stat-value" id="val-audio-sign-latency">0.0</span>
+                </div>
+                <div class="stat stat-record" id="stat-record-audio">
+                    <button class="record-btn" id="record-audio-btn"
+                        title="Record steganographically signed audio to a WAV file. Each chunk contains embedded integrity data via LSB.">
+                        <span class="record-dot"></span>
+                        <span id="record-audio-label">Record</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-divider" id="audio-panel-divider">
+            <div class="divider-arrow">
+                <span>→</span>
+                <span class="divider-label">LSB</span>
+                <span>→</span>
+            </div>
+        </div>
+
+        <!-- RIGHT: Audio verification + config -->
+        <div class="panel decode-panel" id="audio-decode-panel">
+            <div class="panel-header">
+                <h2 id="audio-decode-title">🔓 Decode — Audio Verification</h2>
+                <span class="panel-badge decode" id="audio-decode-badge">VERIFYING</span>
+            </div>
+            <div class="verify-data-container" id="audio-verify-container">
+                <!-- Waiting state -->
+                <div class="verify-waiting" id="audio-verify-waiting">
+                    <div class="overlay-text">Awaiting audio verification...</div>
+                    <div class="overlay-subtext">Start microphone to begin round-trip</div>
+                </div>
+
+                <!-- Live verification result -->
+                <div class="verify-result hidden" id="audio-verify-result">
+                    <div class="verify-status-banner" id="audio-verify-status-banner">
+                        <span class="verify-status-icon" id="audio-verify-status-icon">✅</span>
+                        <span class="verify-status-text" id="audio-verify-status-text">Signature Verified</span>
+                    </div>
+                    <div class="verify-fields">
+                        <div class="verify-field">
+                            <span class="field-label">Chunk Index</span>
+                            <code class="field-value" id="audio-field-chunk-index">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">BLAKE3 Hash</span>
+                            <code class="field-value field-hash" id="audio-field-hash">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label"
+                                title="First 16 bytes of the Ed25519/secp256k1 signature extracted from the LSB-embedded audio payload">Signature
+                                Preview</span>
+                            <code class="field-value field-hash" id="audio-field-sig-preview">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">Backend</span>
+                            <code class="field-value" id="audio-field-backend">—</code>
+                        </div>
+                        <div class="verify-field">
+                            <span class="field-label">Verify Latency</span>
+                            <code class="field-value" id="audio-field-verify-latency">—</code>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- What's being signed explainer -->
+                <div class="config-section-header"
+                    title="Explains the full encode/decode pipeline for audio steganography">🔐 What's Being Signed
+                </div>
+                <div class="config-controls">
+                    <div class="stego-explainer">
+                        <strong>Encode:</strong> PCM audio samples → BLAKE3 hash (32 B) → Ed25519 signature (64 B) →
+                        104-byte payload embedded in LSB of audio samples using keyed PRNG index selection.<br>
+                        <strong>Decode:</strong> Extract LSB payload from audio → deserialize frame_index + hash +
+                        signature → verify signature matches the extracted hash.<br>
+                        <strong>Round-trip:</strong> If the decoded hash + signature match, the audio chunk has not been
+                        tampered with since signing.
+                    </div>
+                </div>
+                <!-- ═══ AUDIO CONFIG CONTROLS ═══ -->
+                <div class="config-section-header">⚙ Audio Steganography Config</div>
+                <div class="config-controls">
+                    <!-- Audio LSB Bits -->
+                    <div class="config-row">
+                        <span class="config-label">Embed Depth (LSB)
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Least Significant Bits</strong>
+                                    — how many of the lowest bits of each audio sample are used to hide
+                                    data.<br><br><strong>1 bit</strong> = inaudible, recommended<br><strong>2–3
+                                        bits</strong> = more capacity<br><strong>4 bits</strong> = maximum capacity but
+                                    may introduce faint noise on quiet passages</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="audio-cfg-lsb-bits" min="1" max="4" value="1"
+                                step="1" aria-label="Audio Embed Depth (LSB)">
+                            <span class="config-slider-value" id="audio-cfg-lsb-bits-val">1</span>
+                        </div>
+                    </div>
+                    <!-- Audio Sign Backend -->
+                    <div class="config-row">
+                        <span class="config-label">Sign Backend
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Ed25519</strong> = fast elliptic
+                                    curve signatures (128-bit security).<br><br><strong>Ethereum</strong> = secp256k1
+                                    signatures compatible with blockchain wallets (MetaMask) for on-chain identity
+                                    verification.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="audio-cfg-sign-backend"
+                                aria-label="Audio Signing Backend">
+                                <option value="ed25519" selected>Ed25519</option>
+                                <option value="ethereum">Ethereum</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Audio Sign Rate -->
+                    <div class="config-row">
+                        <span class="config-label">Sign Rate
+                            <span class="help-icon">?<span class="help-tooltip">How often audio chunks are
+                                    cryptographically signed. Higher rate = more tamper detection but more CPU. At 1/s,
+                                    one chunk per second gets a full BLAKE3 hash + digital signature embedded via
+                                    LSB.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <input type="range" class="config-slider" id="audio-cfg-sign-rate" min="200" max="5000"
+                                value="1000" step="100" aria-label="Audio Sign Rate">
+                            <span class="config-slider-value" id="audio-cfg-sign-rate-val">1/s</span>
+                        </div>
+                    </div>
+                    <!-- Buffer Size -->
+                    <div class="config-row">
+                        <span class="config-label">Buffer Size
+                            <span class="help-icon">?<span class="help-tooltip">Number of PCM samples per audio
+                                    processing chunk. Larger buffers = more embedding capacity per chunk but higher
+                                    latency.<br><br><strong>1024</strong> = low latency<br><strong>2048</strong> =
+                                    balanced (recommended)<br><strong>4096–8192</strong> = maximum
+                                    capacity</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="audio-cfg-buffer-size" aria-label="Audio Buffer Size">
+                                <option value="1024">1024 samples</option>
+                                <option value="2048" selected>2048 samples</option>
+                                <option value="4096">4096 samples</option>
+                                <option value="8192">8192 samples</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Sample Rate -->
+                    <div class="config-row">
+                        <span class="config-label">Sample Rate
+                            <span class="help-icon">?<span class="help-tooltip">Audio capture sample rate. Higher = more
+                                    samples for embedding.<br><br><strong>22050 Hz</strong> = AM radio
+                                    quality<br><strong>44100 Hz</strong> = CD quality (recommended)<br><strong>48000
+                                        Hz</strong> = professional broadcast</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="audio-cfg-sample-rate" aria-label="Audio Sample Rate">
+                                <option value="22050">22050 Hz</option>
+                                <option value="44100" selected>44100 Hz</option>
+                                <option value="48000">48000 Hz</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Audio Stego Info -->
+                <div class="config-section-header"
+                    title="Real-time information about the steganographic data embedded in the audio stream">📊 Audio
+                    Embedded Data</div>
+                <div class="stego-info">
+                    <div class="stego-info-row"
+                        title="Size of the cryptographic payload (hash + signature + frame index) embedded in each signed audio chunk">
+                        <span class="stego-info-label">Payload Size</span>
+                        <span class="stego-info-value" id="audio-info-payload-size">104 bytes</span>
+                    </div>
+                    <div class="stego-info-row"
+                        title="BLAKE3 produces a 256-bit hash of the raw PCM samples, ensuring any modification to the audio data is detected">
+                        <span class="stego-info-label">Hash Algorithm</span>
+                        <span class="stego-info-value" id="audio-info-hash-algo">BLAKE3 (256-bit)</span>
+                    </div>
+                    <div class="stego-info-row"
+                        title="Digital signature algorithm used to sign the hash, proving authenticity. Ed25519 = 64-byte signature, Ethereum = 65-byte secp256k1 signature">
+                        <span class="stego-info-label">Signature</span>
+                        <span class="stego-info-value" id="audio-info-sig-algo">Ed25519 (512-bit)</span>
+                    </div>
+                    <div class="stego-info-row"
+                        title="Maximum bits available for embedding per chunk = buffer_size × channels × lsb_bits. This determines how much data can be hidden in each audio chunk.">
+                        <span class="stego-info-label">Capacity</span>
+                        <span class="stego-info-value" id="audio-info-capacity">—</span>
+                    </div>
+                    <div class="stego-info-row"
+                        title="Percentage of available LSB capacity used by the payload. Lower = less detectable by steganalysis. Above 50% may be detectable.">
+                        <span class="stego-info-label">Utilization</span>
+                        <span class="stego-info-value" id="audio-info-utilization">—</span>
+                    </div>
+                    <div class="stego-info-row"
+                        title="Number of audio channels. Mono = 1 channel, Stereo = 2 channels. More channels = more embedding capacity.">
+                        <span class="stego-info-label">Channels</span>
+                        <span class="stego-info-value" id="audio-info-channels">— (mono/stereo)</span>
+                    </div>
+                </div>
+
+                <!-- Audio Verification Log -->
+                <div class="verify-log-header">Recent Audio Verifications</div>
+                <div class="verify-log" id="audio-verify-log"></div>
+            </div>
+            <div class="panel-stats" id="audio-decode-stats">
+                <div class="stat stat-ok" id="stat-audio-verified-ok">
+                    <span class="stat-label">✅ Verified</span>
+                    <span class="stat-value" id="val-audio-verified-ok">0</span>
+                </div>
+                <div class="stat stat-fail" id="stat-audio-verified-fail">
+                    <span class="stat-label">❌ Failed</span>
+                    <span class="stat-value" id="val-audio-verified-fail">0</span>
+                </div>
+                <div class="stat" id="stat-audio-verify-latency">
+                    <span class="stat-label">Verify μs</span>
+                    <span class="stat-value" id="val-audio-verify-latency">0.0</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer id="dashboard-footer">
+        <div class="footer-section" id="footer-backend">
+            <span class="footer-label">Backend:</span>
+            <span class="footer-value" id="footer-backend-value">—</span>
+        </div>
+        <div class="footer-section" id="footer-uptime">
+            <span class="footer-label">Uptime:</span>
+            <span class="footer-value" id="footer-uptime-value">0s</span>
+        </div>
+        <div class="footer-section" id="footer-resolution">
+            <span class="footer-label">Resolution:</span>
+            <span class="footer-value" id="footer-resolution-value">—</span>
+        </div>
+        <div class="footer-section" id="footer-payload">
+            <span class="footer-label">Payload:</span>
+            <span class="footer-value" id="footer-payload-value">104 bytes (BLAKE3 + Ed25519)</span>
+        </div>
+        <div class="footer-section" id="footer-verified">
+            <span class="footer-label">Verified:</span>
+            <span class="footer-value" id="footer-verified-value">✅ 0 / ❌ 0</span>
+        </div>
+        <div class="footer-section" id="footer-export">
+            <button class="export-btn" id="session-export-btn" title="Download session report as JSON">📥 Export <kbd
+                    class="kbd-hint">E</kbd></button>
+        </div>
+    </footer>
+
+    <!-- ═══ DOCS TAB ═══ -->
+    <section id="tab-docs" class="tab-content docs-tab hidden">
+        <!-- LEFT: Document sidebar -->
+        <aside class="docs-sidebar" id="docs-sidebar">
+            <div class="docs-sidebar-header">
+                <h3 class="docs-sidebar-title">📚 Documentation</h3>
+                <input type="search" id="docs-search" class="docs-search" placeholder="Filter docs…"
+                    title="Type to filter the document list by name or topic" autocomplete="off">
+            </div>
+            <ul class="docs-file-list" id="docs-file-list">
+                <li class="docs-loading-item">Loading docs…</li>
+            </ul>
+            <div class="docs-sidebar-footer">
+                <span id="docs-word-count">—</span>
+            </div>
+        </aside>
+        <!-- RIGHT: Rendered documentation -->
+        <div class="docs-content-panel">
+            <div class="docs-content-header">
+                <h2 id="docs-content-title">📖 Select a document</h2>
+            </div>
+            <article class="docs-content" id="docs-content">
+                <p class="docs-placeholder">← Select a document from the sidebar to view it here.</p>
+            </article>
+        </div>
+    </section>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'dark',
+            themeVariables: {
+                darkMode: true,
+                background: '#1a1a1a',
+                primaryColor: '#e53935',
+                primaryTextColor: '#e0e0e0',
+                primaryBorderColor: '#444',
+                lineColor: '#888',
+                secondaryColor: '#333',
+                tertiaryColor: '#2a2a2a',
+                fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+                fontSize: '13px',
+            },
+            securityLevel: 'loose',
+            flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
+            sequence: { useMaxWidth: true },
+            gantt: { useMaxWidth: true },
+        });
+    </script>
+    <script src="/app.js"></script>
+    <script src="/audio_tab.js"></script>
+    <script src="/docs_tab.js"></script>
+</body>
+
+</html>

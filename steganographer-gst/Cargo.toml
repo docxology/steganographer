@@ -1,0 +1,15 @@
+[package]
+name = "steganographer-gst"
+description = "GStreamer integration: AppSrc/AppSink helpers and plugin skeletons for steganographer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+steganographer-core = { path = "../steganographer-core" }
+gstreamer = { version = "0.23", features = ["v1_22"] }
+gstreamer-video = "0.23"
+gstreamer-audio = "0.23"
+gstreamer-app = "0.23"
+anyhow = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "steganographer-cli"
+description = "CLI binary for the steganographer toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "steganographer"
+path = "src/main.rs"
+
+[features]
+default = []
+ethereum = ["steganographer-core/ethereum"]
+
+[dependencies]
+steganographer-core = { path = "../steganographer-core" }
+steganographer-gst = { path = "../steganographer-gst" }
+steganographer-dashboard = { path = "../steganographer-dashboard" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+gstreamer = { version = "0.23", features = ["v1_22"] }

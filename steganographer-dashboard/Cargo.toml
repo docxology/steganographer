@@ -1,0 +1,23 @@
+[package]
+name = "steganographer-dashboard"
+description = "Web-based live dashboard for round-trip steganography verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+steganographer-core = { path = "../steganographer-core" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
