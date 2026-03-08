@@ -1,0 +1,141 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Steganographer — Master Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Full-featured configuration for all steganographic functions.
+# Place this file in the project root and reference it with:
+#   steganographer --config steganographer.toml <command>
+#
+# All options documented inline. Uncomment to activate.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[global]
+# Logging verbosity: "trace" | "debug" | "info" | "warn" | "error"
+log_level = "info"
+
+# ─── Video Pipeline ───────────────────────────────────────────────────────────
+#
+# Real-time video capture → steganographic embedding → output.
+# Supports V4L2 (Linux), AVFoundation (macOS), file I/O, and test sources.
+
+[video]
+
+# ─── Video Pipeline Settings ──────────────────────────────────────────────────
+# Controls the GStreamer pipeline parameters: resolution, framerate, opacity.
+# These values are read by run.sh for live pipeline construction.
+
+[video.pipeline]
+# Video resolution (width × height in pixels).
+# Common values: 640×480 (VGA), 1280×720 (HD), 1920×1080 (Full HD)
+width = 640
+height = 480
+# Target framerate in frames per second.
+# Common values: 15, 24, 25, 30, 60
+framerate = 30
+# Overlay opacity / steganographic intensity (0.0 – 1.0).
+#   1.0 = full intensity (default)
+#   0.5 = half intensity / semi-transparent overlays
+#   0.0 = overlays disabled (LSB still active)
+opacity = 1.0
+
+[video.pipeline.payload]
+# Payload type embedded per frame: "signature" (default) | "custom"
+type = "signature"
+# Payload size in bytes. Default: 104 (8 frame_index + 32 BLAKE3 + 64 Ed25519)
+size = 104
+# Signing backend: "ed25519" (default, BLAKE3+Ed25519) | "ethereum" (Keccak-256+secp256k1 EIP-191)
+# The "ethereum" backend requires building with --features ethereum
+signing_backend = "ed25519"
+
+[video.input]
+# Endpoint type: "device" | "file" | "network"
+type = "device"
+# Backend: "v4l2" (Linux), "avfoundation" (macOS), omit for test source
+# backend = "v4l2"
+# device = "/dev/video0"
+# backend = "avfoundation"
+# device = "FaceTime HD Camera"
+# For file input:
+# type = "file"
+# path = "input_video.raw"
+
+[video.output]
+# Output endpoint
+type = "device"
+# For virtual camera output (Linux):
+# backend = "v4l2loopback"
+# device = "/dev/video42"
+# For file output:
+# type = "file"
+# path = "output_video.raw"
+
+[video.stego]
+# Ordered list of stego modules applied per frame.
+# Available: "lsb_signature", "overlay"
+# Order matters: LSB embeds first, overlay renders on top.
+pipeline = ["lsb_signature", "overlay"]
+
+[video.stego.lsb_signature]
+# Number of least-significant bits to use per pixel byte.
+# Range: 1–4. Lower = less visible distortion, higher = more capacity.
+#   1 bit: imperceptible (±1/256 per channel), needs 864 bytes minimum
+#   2 bit: barely visible (±3/256), needs 432 bytes minimum
+#   3 bit: slightly visible (±7/256), needs 288 bytes minimum
+#   4 bit: noticeable (±15/256), needs 216 bytes minimum
+bits = 1
+# 32-byte hex-encoded key (64 hex characters).
+# Used for PRNG index permutation in audio; included for config consistency.
+# Generate with: steganographer keygen --output mykey
+key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[video.stego.overlay]
+# Visible text watermark burned into the video frame.
+# Static text string rendered via built-in 8×8 bitmap font.
+text = "CONFIDENTIAL"
+# Position on frame: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center"
+position = "bottom-right"
+# Font size in pixels (scale multiplier × 8px base). 16 = 2× scale.
+font_size = 16
+
+# ─── Audio Pipeline ───────────────────────────────────────────────────────────
+#
+# Real-time audio capture → steganographic embedding → output.
+# Supports PulseAudio, PipeWire (Linux), Core Audio (macOS), and test sources.
+
+[audio]
+
+[audio.input]
+type = "device"
+# Linux:
+# backend = "pulseaudio"
+# backend = "pipewire"
+# macOS:
+# backend = "coreaudio"
+# For file input:
+# type = "file"
+# path = "input_audio.raw"
+
+[audio.output]
+type = "device"
+# backend = "pulseaudio"
+# backend = "pipewire"
+# For file output:
+# type = "file"
+# path = "output_audio.raw"
+
+[audio.stego]
+# Available audio stego modules: "lsb_signature"
+pipeline = ["lsb_signature"]
+
+[audio.stego.lsb_signature]
+# Number of LSBs per 16-bit audio sample.
+# Range: 1–4. At 1 bit: ~90 dB SNR (completely inaudible).
+#   1 bit: inaudible, needs 864 samples minimum
+#   2 bit: inaudible, needs 432 samples minimum
+#   3 bit: barely audible in silence, needs 288 samples minimum
+#   4 bit: faint noise in quiet passages, needs 216 samples minimum
+bits = 1
+# 32-byte hex-encoded key for pseudo-random sample index permutation.
+# Each frame uses: seed = key XOR frame_index → ChaCha8 PRNG → Fisher-Yates shuffle.
+# This makes the embedding pattern unpredictable without the key.
+key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"

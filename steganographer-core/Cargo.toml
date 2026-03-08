@@ -1,0 +1,28 @@
+[package]
+name = "steganographer-core"
+description = "Media-agnostic steganography algorithms, cryptographic binding, and configuration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+ethereum = ["k256", "sha3"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+k256 = { workspace = true, optional = true }
+sha3 = { workspace = true, optional = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+qrcode = "0.14"
+chrono = "0.4"
+
+[dev-dependencies]
+rand = { workspace = true }

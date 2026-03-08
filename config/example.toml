@@ -1,0 +1,77 @@
+# Steganographer — Example Configuration
+#
+# This file configures the steganographer pipeline for both video and audio.
+# Copy to your working directory and customize as needed.
+
+[global]
+# Log level: "trace", "debug", "info", "warn", "error"
+log_level = "info"
+
+# ─── Video Pipeline ───────────────────────────────────────────────────────────
+
+[video]
+
+[video.pipeline]
+width = 640
+height = 480
+framerate = 30
+opacity = 1.0
+
+[video.pipeline.payload]
+type = "signature"
+size = 104
+# Signing backend: "ed25519" (default) or "ethereum" (requires --features ethereum)
+signing_backend = "ed25519"
+
+[video.input]
+# Input type: "device", "file", "network"
+type = "device"
+# Backend: "v4l2" (Linux), "avfoundation" (macOS), or omit for test source
+# backend = "v4l2"
+# device = "/dev/video0"
+
+[video.output]
+type = "device"
+# backend = "v4l2loopback"
+# device = "/dev/video42"
+
+[video.stego]
+# Ordered list of stego modules to apply per frame
+pipeline = ["lsb_signature", "overlay"]
+
+[video.stego.lsb_signature]
+# Number of LSBs per pixel byte (1-4). Lower = less visible distortion.
+bits = 1
+# 32-byte hex key for embedding (used by audio; video uses sequential)
+key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[video.stego.overlay]
+# Text watermark (supports static text; future: {timestamp}, {frame})
+text = "CONFIDENTIAL"
+# Position: "top-left", "top-right", "bottom-left", "bottom-right", "center"
+position = "bottom-right"
+# Font size in pixels (rendered via built-in 8x8 bitmap font, scaled)
+font_size = 16
+
+# ─── Audio Pipeline ───────────────────────────────────────────────────────────
+
+[audio]
+
+[audio.input]
+type = "device"
+# backend = "pulseaudio"
+# backend = "pipewire"
+
+[audio.output]
+type = "device"
+# backend = "pulseaudio"
+
+[audio.stego]
+# Ordered list of stego modules
+pipeline = ["lsb_signature"]
+
+[audio.stego.lsb_signature]
+# Number of LSBs per 16-bit sample (1-4)
+bits = 1
+# 32-byte hex key for pseudo-random index permutation
+key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
