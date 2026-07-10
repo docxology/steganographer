@@ -14,7 +14,7 @@ brew install gstreamer
 
 # Build and test
 cargo build --workspace
-cargo test --workspace  # All 132 tests
+cargo test --workspace  # All 190 tests
 ```
 
 ---
@@ -129,13 +129,13 @@ Add comprehensive tests covering:
 ### Run All Workspace Tests
 
 ```bash
-cargo test --workspace  # 132 tests across all crates
+cargo test --workspace  # 190 tests across all crates
 ```
 
 ### Run Core Tests Only
 
 ```bash
-cargo test -p steganographer-core  # 114 tests (56 unit + 58 integration)
+cargo test -p steganographer-core  # 167 tests (108 unit + 59 integration)
 ```
 
 ### Test Structure

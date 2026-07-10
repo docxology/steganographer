@@ -228,7 +228,7 @@ Unlike steganography (which hides data) or simple text overlays, the Info Bar pr
 The Info Bar dynamically generates and renders four components per frame:
 
 1. **Timestamp**: ISO 8601 UTC timestamp of the exact rendering moment
-2. **Details String**: A summary of the applied steganography (e.g., `STEGO: LSB-1 | KEY: 8E78... | PAYLOAD: 104B`)
+2. **Details String**: A summary of the applied steganography (e.g., `STEGO: LSB-1 | KEY: 8E78... | PAYLOAD: 109B`)
 3. **1D Barcode (Code-128)**: A machine-readable encoding of the core signature or payload identifier
 4. **2D QR Code**: A dense square code linking to the verification portal or containing the full public key/hash
 
@@ -401,7 +401,7 @@ Wrap Meta's Video Seal (MIT-licensed) as a `VideoStegoModule` for neural-network
 
 ### LSB Video (Sequential)
 
-Sequential LSB replacement is vulnerable to classical steganalysis attacks. However, Steganographer's extremely low embedding rate (~104 bytes in a 921,600-byte frame = 0.09%) provides significant inherent resistance:
+Sequential LSB replacement is vulnerable to classical steganalysis attacks. However, Steganographer's extremely low embedding rate (~109 bytes in a 921,600-byte frame = 0.09%) provides significant inherent resistance:
 
 | Attack | Applicability | Notes |
 | --- | --- | --- |

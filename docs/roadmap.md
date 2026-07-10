@@ -21,7 +21,7 @@ gantt
 - **LSB Audio Steganography** — Keyed PRNG permutation, 1–4 bits, length prefix extraction
 - **Text Overlay** — Built-in 8×8 bitmap font, configurable position/color/scale
 - **Info Bar** — Exoteric QR code, Code-128 barcode, and metadata overlay
-- **BLAKE3 + Ed25519** — Per-frame hashing and signing with 104-byte payload
+- **BLAKE3 + Ed25519** — Per-frame hashing and signing with 109-byte payload
 - **GStreamer Integration** — AppSink/AppSrc video/audio pipelines
 - **CLI** — 6 subcommands (video, audio, encode, verify, keygen, dashboard)
 - **Configuration** — Full TOML config with modular pipeline chains

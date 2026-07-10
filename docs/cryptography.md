@@ -36,15 +36,18 @@ Steganography and cryptography serve complementary purposes:
 
 | Layer | Purpose | Steganographer Component |
 | --- | --- | --- |
-| **Cryptographic signing** | Ensures authenticity and integrity | Ed25519 signature over BLAKE3 hash |
-| **Steganographic embedding** | Hides the signed payload from observers | LSB embedding in pixel/sample data |
+| **Cryptographic signing** | Ensures authenticity and integrity | Ed25519/Ethereum signature over hash |
+| **Payload encryption (optional)** | Ensures confidentiality of embedded data | ChaCha20-Poly1305 AEAD |
+| **Steganographic embedding** | Hides the signed payload from observers | LSB / Spread-Spectrum / DCT embedding |
 | **Exoteric overlay** | Provides visible, machine-readable proof | Info Bar with QR code and barcode |
 
 The composition `Stego(Sign(Hash(frame)))` provides defense in depth:
 
 1. Even if the steganographic layer is broken (data extracted), the payload is a cryptographic signature — meaningless without context
-2. Even if the overlay is visible, the LSB layer provides a hidden backup channel
-3. Even if the LSB data is destroyed (re-encoding), the overlay survives
+2. With encryption enabled, even extracted data is unreadable without the encryption key
+3. Even if the overlay is visible, the LSB layer provides a hidden backup channel
+4. Even if the LSB data is destroyed (re-encoding), the overlay survives
+5. Even if sequential LSB is detected, spread-spectrum and DCT alternatives are available
 
 ---
 
@@ -75,7 +78,7 @@ The BLAKE3 hash covers a deterministic concatenation of frame metadata and raw m
 
 ```mermaid
 flowchart LR
-    IDX["frame_index\n8 bytes (u64 LE)"] --> HASHER["🔑 BLAKE3\nHasher"]
+    IDX["frame_index\n8 bytes (u64 LE)"] --> HASHER["🔑 Hasher\n(BLAKE3 / SHA-256 / SHA-3)"]
     VID["video_bytes\nRaw pixel data"] --> HASHER
     AUD["audio_bytes\n(optional PCM)"] -.-> HASHER
     HASHER --> HASH["256-bit Hash\n(32 bytes)"]
@@ -286,7 +289,7 @@ sequenceDiagram
 
 | Threat | Protection |
 | --- | --- |
-| Frame content modification | BLAKE3 hash will mismatch |
+| Frame content modification | Hash (BLAKE3/SHA-256/SHA-3) will mismatch |
 | Frame index manipulation (replay/reorder) | Frame index is included in the hash domain |
 | Signature forgery | Ed25519 requires the private key |
 | Audio-video desynchronization | Combined hash covers both streams |

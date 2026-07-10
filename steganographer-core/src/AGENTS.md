@@ -20,7 +20,7 @@ Entry point. Declares and re-exports: `video`, `audio`, `crypto`, `config`, `lsb
 
 ### crypto.rs
 
-- `SignaturePayload` — 104 bytes: `frame_index(8) + hash(32) + signature(64)`, with `from_bytes()` / `to_bytes()`
+- `SignaturePayload` — 109 bytes: `magic(4) + version(1) + frame_index(8) + hash(32) + signature(64)`, with `from_bytes()` / `to_bytes()`, magic header validation
 - `Signer` — `generate()`, `from_bytes()`, `sign_frame()`, `signing_key_bytes()`, `verifying_key()`
 - `Verifier` — `new()`, `from_bytes()`, `verify()` — recomputes BLAKE3 hash, checks Ed25519 signature
 

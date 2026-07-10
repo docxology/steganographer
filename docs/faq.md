@@ -12,7 +12,7 @@ Digital watermarking is a subset of steganography focused on marking ownership o
 
 ### Can I hide arbitrary messages in video/audio?
 
-The current implementation only embeds `SignaturePayload` structs (104 bytes: frame index + BLAKE3 hash + Ed25519 signature). Extending to embed arbitrary data would require modifying `lsb_video.rs` or `lsb_audio.rs` to accept custom payloads.
+The current implementation only embeds `SignaturePayload` structs (109 bytes: frame index + BLAKE3 hash + Ed25519 signature). Extending to embed arbitrary data would require modifying `lsb_video.rs` or `lsb_audio.rs` to accept custom payloads.
 
 ### Is the hidden data visible/audible?
 
@@ -156,7 +156,7 @@ BLAKE3 is ~6× faster than SHA-256 on modern CPUs and supports tree hashing for 
 | Signature size   | 64 bytes  | 256 bytes  |
 | Sign speed       | ~50 µs    | ~1 ms      |
 | Verify speed     | ~100 µs   | ~30 µs     |
-| Payload overhead | 104 bytes | 520+ bytes |
+| Payload overhead | 109 bytes | 520+ bytes |
 
 Ed25519's compact signatures (64 bytes vs 256+ for RSA) are critical for steganography — every byte of payload requires more carrier capacity.
 
@@ -189,7 +189,7 @@ Possible causes:
 
 ### `Capacity error: frame too small`
 
-The frame doesn't have enough bytes to embed the 104-byte payload. Minimum sizes:
+The frame doesn't have enough bytes to embed the 109-byte payload. Minimum sizes:
 
 - 1-bit LSB: 864 pixel bytes (288 RGB pixels, ~17×17)
 - 2-bit LSB: 432 pixel bytes (144 RGB pixels, ~12×12)

@@ -19,9 +19,9 @@
 
 ## File Counts
 
-- **Root files**: 10 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
-- **Source files**: 22 Rust source files + 6 static web assets across 4 crates
-- **Test files**: 2 integration test files (58 tests) + inline unit tests (56 tests) + dashboard tests (12) = **132 total tests**
+- **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
+- **Source files**: 27 Rust source files + 6 static web assets across 4 crates
+- **Test files**: 2 integration test files (59 tests) + inline unit tests (115 tests) + dashboard tests (12) = **187 total tests**
 - **Doc files**: 17 markdown documentation files + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -29,10 +29,10 @@
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 114 tests (Ed25519 default)
+cargo test -p steganographer-core              # 174 tests (Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 132 total tests
-./run.sh                                       # Interactive menu (press 'a' for run-all)
+cargo test --workspace                         # 187 total tests
+./run.sh                                       # Interactive menu
 ```
 
 ## Key Dependencies
@@ -40,9 +40,12 @@ cargo test --workspace                         # 132 total tests
 | Dependency | Version | Purpose |
 | ---------- | ------- | ------- |
 | `blake3` | 1.5 | BLAKE3 hashing |
+| `sha2` | 0.10 | SHA-256 hashing |
 | `ed25519-dalek` | 2.x | Ed25519 signatures (default) |
 | `k256` | 0.13 | secp256k1/Ethereum signing (feature-gated) |
 | `sha3` | 0.10 | Keccak-256 for EIP-191 |
+| `chacha20poly1305` | 0.10 | ChaCha20-Poly1305 AEAD payload encryption |
+| `subtle` | 2 | Constant-time comparisons |
 | `axum` | 0.8 | Dashboard web server |
 | `tokio` | 1.x | Async runtime |
 | `gstreamer` | 0.23.x | Media pipeline |
@@ -50,3 +53,9 @@ cargo test --workspace                         # 132 total tests
 | `serde` + `toml` | 1.x / 0.8 | Configuration |
 | `serde_json` | 1.x | JSON output for verify command |
 | `chrono` | 0.4 | Timestamp template expansion |
+| `qrcode` | 0.14 | QR code generation for info bar |
+| `image` | 0.25 | Image processing for dashboard |
+| `tower-http` | 0.6 | HTTP static file serving + CORS |
+| `anyhow` | 1.x | Error handling |
+| `thiserror` | 1.x | Custom error types |
+| `rand` | 0.8 | Random number generation |

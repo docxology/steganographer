@@ -140,7 +140,7 @@ graph TD
 flowchart TD
     CAM["📷 Physical Camera/Mic"] --> GST_SRC["GStreamer Source\n(v4l2src, avfvideosrc, pulsesrc)\n→ AppSink"]
     GST_SRC -->|"Raw GstBuffer"| CONV["Buffer Conversion\n(steganographer-gst)\nVideoFrameRef → VideoFrame"]
-    CONV --> CRYPTO["🔐 BLAKE3 + Ed25519\n(crypto.rs)\n→ SignaturePayload (104 bytes)"]
+    CONV --> CRYPTO["🔐 BLAKE3 + Ed25519\n(crypto.rs)\n→ SignaturePayload (109 bytes)"]
     CRYPTO --> STEGO["📦 Stego Module Chain\nLSB embed → text overlay → InfoBar\nModifies pixels in-place"]
     STEGO --> GST_SINK["GStreamer Sink\n(v4l2sink, autovideosink, filesink)\n← AppSrc"]
     GST_SINK --> OUT["🖥️ Virtual Camera / Output File"]
@@ -153,7 +153,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    INPUT["📂 Input File/Stream"] --> EXTRACT["📦 Stego Extract\n→ SignaturePayload (104 bytes)"]
+    INPUT["📂 Input File/Stream"] --> EXTRACT["📦 Stego Extract\n→ SignaturePayload (109 bytes)"]
     EXTRACT --> HASH["🔑 Recompute BLAKE3\nhash of frame data"]
     HASH --> VERIFY["✍️ Ed25519 Verify\n(public_key, hash, signature)"]
     VERIFY --> VALID["✅ VALID"]

@@ -62,7 +62,7 @@ Every frame goes through a **four-stage pipeline**:
 
 1. **Hash** — [BLAKE3](docs/cryptography.md#blake3-hashing) computes a 256-bit digest over `frame_index ∥ video_bytes ∥ audio_bytes`
 2. **Sign** — [Ed25519 or Ethereum/secp256k1](docs/cryptography.md#ed25519-signing) signs the hash for tamper detection
-3. **Embed** — [LSB steganography](docs/algorithms.md#lsb-video-protocol) hides the 104-byte payload in pixel/sample least-significant bits
+3. **Embed** — [LSB steganography](docs/algorithms.md#lsb-video-protocol) hides the 109-byte payload in pixel/sample least-significant bits
 4. **Overlay** — [QR code + text watermark](docs/algorithms.md#qr--info-bar-overlay) burns visible provenance into the frame
 
 > 🔐 Deep dive: [**Cryptography**](docs/cryptography.md) · [**Algorithms**](docs/algorithms.md) · [**Steganography Theory**](docs/steganography-theory.md) · [**Threat Model**](docs/threat-model.md)

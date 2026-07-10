@@ -11,7 +11,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
 ### Tests
 
-- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 190)
+- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 187)
 - [ ] `cargo build --workspace` — **clean build**, no warnings
 - [ ] `cargo clippy --workspace` — no new warnings introduced
 - [ ] Any new feature has at least one corresponding test

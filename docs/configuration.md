@@ -20,10 +20,14 @@ The `run.sh` interactive menu reads these values to construct GStreamer pipeline
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `log_level` | String | `"info"` | Logging verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `hash_algorithm` | String | `"blake3"` | Hash algorithm: `"blake3"`, `"sha256"`, `"sha3-256"` (also accepts `"sha-256"`, `"sha3"`, `"sha-3"`) |
+| `key_file` | String | — | Path to a file containing the LSB embedding key (hex, 64 chars = 32 bytes). Overrides inline `key` fields in LSB configs. |
 
 ```toml
 [global]
 log_level = "info"
+hash_algorithm = "blake3"
+# key_file = "/path/to/lsb.key"
 ```
 
 ---
@@ -330,7 +334,7 @@ The dashboard dynamically calculates and displays:
 
 | Metric | Example Value | Formula |
 | --- | --- | --- |
-| **Payload Size** | 104 bytes | 8 (frame_index) + 32 (BLAKE3) + 64 (Ed25519) |
+| **Payload Size** | 109 bytes | 8 (frame_index) + 32 (BLAKE3) + 64 (Ed25519) |
 | **Hash Algorithm** | BLAKE3 (256-bit) | Fixed |
 | **Signature** | Ed25519 (512-bit) | Depends on backend |
 | **Capacity** | 112.5 KB | width × height × 3 × lsb_bits / 8 |
@@ -342,7 +346,7 @@ The Audio tab also dynamically calculates and displays:
 
 | Metric | Example Value | Formula |
 | --- | --- | --- |
-| **Payload Size** | 104 bytes | 8 (chunk_index) + 32 (BLAKE3) + 64 (Ed25519) |
+| **Payload Size** | 109 bytes | 8 (chunk_index) + 32 (BLAKE3) + 64 (Ed25519) |
 | **Hash Algorithm** | BLAKE3 (256-bit) | Fixed |
 | **Signature** | Ed25519 (512-bit) | Depends on backend |
 | **Capacity** | 256 B (2048 bits) | buffer_size × channels × lsb_bits / 8 |

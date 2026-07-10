@@ -272,7 +272,7 @@ Steganographer currently embeds in every frame (intra-frame LSB), which maximize
 
 ### Capacity vs. Robustness per Frame
 
-Steganographer's 104-byte payload requires only 864 pixels at 1-bit LSB. A single 640×480 RGB frame provides 921,600 bytes — providing a **1,067× capacity surplus**. This surplus is a design choice: using fewer embedding locations reduces detectability.
+Steganographer's 109-byte payload requires only 904 pixels at 1-bit LSB. A single 640×480 RGB frame provides 921,600 bytes — providing a **1,067× capacity surplus**. This surplus is a design choice: using fewer embedding locations reduces detectability.
 
 ---
 
