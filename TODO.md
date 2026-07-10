@@ -11,7 +11,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
 ### Tests
 
-- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 246)
+- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 271)
 - [ ] `cargo build --workspace` — **clean build**, no warnings
 - [ ] `cargo clippy --workspace` — no new warnings introduced
 - [ ] Any new feature has at least one corresponding test
@@ -62,6 +62,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **Secure keygen** — private key files have 0600 permissions
 - [x] **Key derivation** — BLAKE3 `derive_key` from master secret (`kdf.rs`)
 - [x] **Session key rotation** — per-session keys from master + counter
+- [x] **Hash chain streaming auth** — Merkle tree for segment-level tamper detection (`hash_chain.rs`)
 
 ### Power
 
@@ -73,7 +74,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **Steganalysis** — chi-squared, sample-pair, RS analysis (`steganalysis.rs`)
 - [x] **Combined analysis** — multi-detector summary with confidence
 - [x] **Adaptive embedding** — content-aware pixel selection (`adaptive.rs`)
-- [x] **Hash chain streaming auth** — Merkle tree for segment-level tamper detection (`hash_chain.rs`)
+- [x] **Multi-frame video file support** — encode/verify multi-frame raw RGB files
 
 ### Flexibility
 
@@ -87,6 +88,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **New CLI commands** — `analyze` (chi-squared), `derive` (key derivation)
 - [x] **Batch processing** — `--dir` flag for directory encoding
 - [x] **PNG/WAV format I/O** — image + hound crates for file format support
+- [x] **Container format I/O** — GStreamer decodebin/encodebin for MP4/MKV/WAV (`process_video_file`, `process_audio_file`)
 
 ### Platform & Distribution
 
@@ -97,16 +99,23 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **Shell completions** — bash/zsh/fish via clap_complete (build.rs)
 - [x] **Man pages** — `steganographer.1` via clap_mangen (build.rs)
 - [x] **Criterion benchmarks** — sign, LSB, spread-spectrum, DCT, audio
+- [x] **Fuzz targets** — extraction robustness and payload parsing (`fuzz/fuzz_targets.rs`)
+
+### Dashboard
+
+- [x] **Mutex lock recovery** — `expect()` replaced with `.unwrap_or_else(|e| e.into_inner())`
+- [x] **Dark/light theme toggle** — persisted in localStorage
+- [x] **Mobile-responsive layout** — media queries for ≤768px viewport
 
 ---
 
 ## 🔜 Upcoming (Minor Improvements)
 
-- [ ] **JPEG round-trip DCT test** — verify DCT extraction survives JPEG quantization at Q=75/85/95
-- [ ] **Replace expect() calls** — dashboard `expect("lock poisoned")` → graceful recovery
-- [ ] **Dark/light theme toggle** — dashboard theme persistence in localStorage
-- [ ] **Mobile-responsive layout** — media queries for ≤768px viewport
-- [ ] **Frame diff viewer** — side-by-side original vs. watermarked with pixel diff
+- [ ] **Frame diff viewer** — side-by-side original vs. watermarked with pixel diff (subagent in progress)
+- [ ] **Historical metrics charts** — FPS, latency, verify rate over time (subagent in progress)
+- [ ] **Multi-camera support** — device selector dropdown (subagent in progress)
+- [ ] **MDCT audio embedding** — frequency-domain audio steganography for MP3/AAC resistance (subagent in progress)
+- [ ] **Berlekamp-Massey decoder** — full multi-error RS correction (subagent in progress)
 
 ---
 
@@ -115,17 +124,6 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 Larger items requiring design work or architecture changes.
 
 ### Core Improvements
-
-- [ ] **Berlekamp-Massey decoder** — full multi-error RS correction (brute force works for single errors)
-- [ ] **MDCT audio embedding** — frequency-domain audio steganography for MP3/AAC resistance
-
-### Robustness & Formats
-
-- [ ] **Container format I/O via GStreamer** — read/write MP4, MKV, WAV via decodebin/encodebin
-- [ ] **Multi-frame video file support** — read/encode/write multi-frame raw video files
-- [ ] **Fuzz targets** — `cargo fuzz` for extraction robustness
-
-### Cryptography
 
 - [ ] **Post-quantum signatures** — ML-DSA (FIPS 204) as Ed25519 alternative
 - [ ] **Hybrid signing** — Ed25519 + ML-DSA via multi-frame spreading
@@ -141,8 +139,6 @@ Larger items requiring design work or architecture changes.
 
 ### Dashboard Enhancements
 
-- [ ] **Metrics dashboard** — historical charts of latency, frame rate, capacity
-- [ ] **Multi-camera support** — select from available video devices
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC
 
 ### Documentation & Tooling
