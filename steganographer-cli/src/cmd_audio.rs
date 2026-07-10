@@ -22,8 +22,15 @@ pub fn run(
 
     let mut stego = build_audio_stego(&audio_cfg.stego)?;
 
+    let hash_algo = steganographer_core::crypto::HashAlgorithm::parse(
+        cfg.global.hash_algorithm_name()
+    );
     let signer = if audio_cfg.stego.lsb_signature.is_some() {
-        let s = steganographer_core::crypto::Signer::generate();
+        let s = steganographer_core::crypto::Signer::with_hash_algorithm(
+            ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+            hash_algo,
+        );
+        log::info!("Hash algorithm: {}", hash_algo.name());
         log::info!(
             "Generated signing key. Public key (hex): {}",
             hex_encode(&s.verifying_key().to_bytes())
@@ -87,6 +94,16 @@ fn build_audio_stego(
             let lsb = steganographer_core::lsb_audio::LsbAudio::new(lsb_cfg.bits, key);
             log::info!("Using LSB audio module ({} bits)", lsb_cfg.bits);
             return Ok(Box::new(lsb));
+        }
+        if step == "spread_spectrum" {
+            let lsb_cfg = stego_cfg
+                .lsb_signature
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'spread_spectrum' but no [lsb_signature] config for key"))?;
+            let key = lsb_cfg.key_bytes()?;
+            let ss = steganographer_core::spread_spectrum::SpreadSpectrumAudio::with_key(key);
+            log::info!("Using spread-spectrum audio module");
+            return Ok(Box::new(ss));
         }
     }
     anyhow::bail!("No supported audio stego module in pipeline config")
