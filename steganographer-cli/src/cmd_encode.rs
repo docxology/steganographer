@@ -10,7 +10,8 @@ use serde::Serialize;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Signer};
 use steganographer_core::encryption::{self, EncryptionKey};
 use steganographer_core::error_correction;
-use steganographer_core::video::{VideoFormat, VideoFrame};
+use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+use steganographer_core::lsb_video::LsbVideo;
 
 // ─── Options & Results ──────────────────────────────────────────────
 
@@ -1030,5 +1031,109 @@ pub fn batch_process(
     if error_count > 0 {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Encode a multi-frame raw video file.
+///
+/// Reads a raw RGB file containing multiple frames (each frame = width × height × 3 bytes),
+/// signs each frame, embeds a signature in each, and writes the output.
+pub fn encode_multi_frame_file(
+    config_path: &str,
+    input: &str,
+    output: &str,
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    bits: u8,
+    format: &str,
+    opts: &EncodeOptions,
+) -> anyhow::Result<()> {
+    log::info!("Multi-frame encode: {} ({}x{}x{} frames) -> {}", input, width, height, frame_count, output);
+
+    let frame_size = (width * height * 3) as usize;
+    let data = std::fs::read(input)?;
+    let expected_size = frame_size * frame_count as usize;
+    if data.len() < expected_size {
+        anyhow::bail!("Input file too small: expected {} bytes ({} frames × {} bytes), got {}",
+            expected_size, frame_count, frame_size, data.len());
+    }
+
+    let hash_algo = opts.hash_algorithm.as_deref()
+        .map(HashAlgorithm::parse)
+        .unwrap_or(HashAlgorithm::Blake3);
+
+    let signer = match &opts.signing_key {
+        Some(path) => {
+            let key_hex = std::fs::read_to_string(path)?.trim().to_string();
+            let key_bytes = hex_decode(&key_hex)?;
+            if key_bytes.len() != 32 {
+                anyhow::bail!("Signing key must be 32 bytes");
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&key_bytes);
+            Signer::from_bytes_with_algo(&arr, hash_algo)
+        }
+        None => Signer::with_hash_algorithm(
+            ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+            hash_algo,
+        ),
+    };
+    let pub_hex = hex_encode(&signer.verifying_key().to_bytes());
+
+    let mut output_data = Vec::with_capacity(expected_size);
+
+    for frame_idx in 0..frame_count as u64 {
+        let start = frame_idx as usize * frame_size;
+        let end = start + frame_size;
+        let mut frame_data = data[start..end].to_vec();
+
+        let payload = signer.sign_frame(frame_idx, &frame_data, None);
+
+        let mut lsb = LsbVideo::new(bits);
+        let mut frame = VideoFrame {
+            width, height, stride: width * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: frame_idx,
+        };
+        lsb.embed(&mut frame, Some(&payload))?;
+
+        output_data.extend_from_slice(&frame_data);
+
+        if (frame_idx + 1) % 30 == 0 {
+            log::info!("Encoded frame {}/{}", frame_idx + 1, frame_count);
+        }
+    }
+
+    std::fs::write(output, &output_data)?;
+    log::info!("Wrote {} bytes ({} frames) to {}", output_data.len(), frame_count, output);
+
+    match format {
+        "json" => {
+            let result = EncodeResult {
+                stego_type: "lsb_video_multi".to_string(),
+                input: input.to_string(),
+                output: output.to_string(),
+                bytes_written: output_data.len(),
+                public_key: pub_hex,
+                hash: String::new(),
+                signature_preview: String::new(),
+                bits,
+                encrypted: None,
+                encryption_key_hex: None,
+                error_correction: None,
+                audio_key_hex: None,
+                spread: None,
+                hash_algorithm: Some(hash_algo.name().to_string()),
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        _ => {
+            println!("Public key: {}", pub_hex);
+            println!("Encoded {} frames to {}", frame_count, output);
+        }
+    }
+
     Ok(())
 }

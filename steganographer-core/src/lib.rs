@@ -33,6 +33,7 @@ pub mod info_bar;
 pub mod kdf;
 pub mod lsb_audio;
 pub mod lsb_video;
+pub mod mdct_audio;
 pub mod metrics;
 pub mod multi_frame;
 pub mod overlay;

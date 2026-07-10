@@ -104,6 +104,12 @@
                     <span>Signing...</span>
                 </div>
             </div>
+            <div class="camera-selector-row" id="camera-selector-row">
+                <label for="camera-select" class="camera-selector-label">📹 Camera:</label>
+                <select id="camera-select" class="camera-select" aria-label="Select camera device">
+                    <option value="">Default Camera</option>
+                </select>
+            </div>
             <div class="panel-stats" id="encode-stats">
                 <div class="stat" id="stat-frames"
                     title="Total number of video frames cryptographically signed since session start">
@@ -142,7 +148,12 @@
         <div class="panel decode-panel" id="decode-panel">
             <div class="panel-header">
                 <h2 id="decode-title">🔓 Verify — Extracted Data</h2>
-                <span class="panel-badge decode" id="decode-badge">VERIFYING</span>
+                <div class="decode-header-controls">
+                    <button class="diff-toggle-btn" id="diff-toggle-btn" title="Show side-by-side frame diff comparison">
+                        🔍 Show Diff
+                    </button>
+                    <span class="panel-badge decode" id="decode-badge">VERIFYING</span>
+                </div>
             </div>
             <div class="crypto-pipeline-info verify-pipeline">
                 <span class="pipeline-step">📦 Extract LSB</span>
@@ -337,6 +348,29 @@
                 <!-- Verification Log -->
                 <div class="verify-log-header">Recent Verifications</div>
                 <div class="verify-log" id="verify-log"></div>
+            </div>
+            <!-- ═══ FRAME DIFF VIEWER ═══ -->
+            <div class="diff-viewer hidden" id="diff-viewer">
+                <div class="diff-viewer-header">
+                    <span class="diff-viewer-title">🔍 Frame Diff Comparison</span>
+                    <button class="diff-overlay-toggle-btn active" id="diff-overlay-toggle" title="Toggle heatmap overlay">
+                        🎨 Heatmap ON
+                    </button>
+                </div>
+                <div class="diff-canvases">
+                    <div class="diff-canvas-wrapper">
+                        <span class="diff-canvas-label">Original (pre-encode)</span>
+                        <canvas id="diff-original-canvas" width="640" height="480"></canvas>
+                    </div>
+                    <div class="diff-canvas-wrapper">
+                        <span class="diff-canvas-label">Watermarked (post-encode)</span>
+                        <canvas id="diff-watermarked-canvas" width="640" height="480"></canvas>
+                    </div>
+                    <div class="diff-canvas-wrapper">
+                        <span class="diff-canvas-label">Diff Heatmap</span>
+                        <canvas id="diff-heatmap-canvas" width="640" height="480"></canvas>
+                    </div>
+                </div>
             </div>
             <div class="panel-stats" id="decode-stats">
                 <div class="stat stat-ok" id="stat-verified-ok">
@@ -635,6 +669,49 @@
                     class="kbd-hint">E</kbd></button>
         </div>
     </footer>
+
+    <!-- ═══ PERFORMANCE PANEL ═══ -->
+    <section class="perf-panel" id="perf-panel">
+        <div class="perf-panel-header" id="perf-panel-header">
+            <span class="perf-panel-title">📊 Performance Metrics</span>
+            <button class="perf-collapse-btn" id="perf-collapse-btn" title="Collapse/Expand">
+                <span class="perf-collapse-icon" id="perf-collapse-icon">▼</span>
+            </button>
+        </div>
+        <div class="perf-panel-body" id="perf-panel-body">
+            <div class="perf-charts-grid">
+                <div class="perf-chart-wrapper">
+                    <span class="perf-chart-title">FPS Over Time</span>
+                    <canvas id="chart-fps" width="400" height="120"></canvas>
+                    <div class="perf-chart-legend">
+                        <span class="legend-item"><span class="legend-dot legend-fps"></span>FPS</span>
+                    </div>
+                </div>
+                <div class="perf-chart-wrapper">
+                    <span class="perf-chart-title">Sign Latency (µs)</span>
+                    <canvas id="chart-sign-latency" width="400" height="120"></canvas>
+                    <div class="perf-chart-legend">
+                        <span class="legend-item"><span class="legend-dot legend-sign"></span>Sign µs</span>
+                    </div>
+                </div>
+                <div class="perf-chart-wrapper">
+                    <span class="perf-chart-title">Verify Latency (µs)</span>
+                    <canvas id="chart-verify-latency" width="400" height="120"></canvas>
+                    <div class="perf-chart-legend">
+                        <span class="legend-item"><span class="legend-dot legend-verify"></span>Verify µs</span>
+                    </div>
+                </div>
+                <div class="perf-chart-wrapper">
+                    <span class="perf-chart-title">Verify OK vs Fail</span>
+                    <canvas id="chart-verify-counts" width="400" height="120"></canvas>
+                    <div class="perf-chart-legend">
+                        <span class="legend-item"><span class="legend-dot legend-ok"></span>OK</span>
+                        <span class="legend-item"><span class="legend-dot legend-fail"></span>Fail</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
 
     <!-- ═══ DOCS TAB ═══ -->
     <section id="tab-docs" class="tab-content docs-tab hidden">

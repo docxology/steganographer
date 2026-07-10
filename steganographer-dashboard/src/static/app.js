@@ -36,8 +36,19 @@ let metamaskAccount = null;
 let cameraActive = false;
 let awaitingSignResponse = false;
 let frameCounter = 0;
+let selectedCameraDeviceId = '';
 
-// Latest verification data from server (for QR overlay)
+// Frame diff viewer state
+let diffViewerEnabled = false;
+let diffOverlayEnabled = true;
+let lastOriginalFrameData = null;   // ImageData of frame before encoding
+let lastWatermarkedFrameData = null; // ImageData of frame after encoding (from encode canvas)
+
+// Metrics history buffer (last 60 seconds, polled every 1s)
+const METRICS_HISTORY_MAX = 60;
+let metricsHistory = [];
+
+// Last verification data from server (for QR overlay)
 let lastVerifyData = {
     frameIndex: 0,
     hash: '0000000000000000',
@@ -113,6 +124,25 @@ const el = {
     footerUptimeValue: document.getElementById('footer-uptime-value'),
     footerResolutionValue: document.getElementById('footer-resolution-value'),
     signingBackend: document.getElementById('signing-backend'),
+    // Camera selector
+    cameraSelect: document.getElementById('camera-select'),
+    // Diff viewer
+    diffToggleBtn: document.getElementById('diff-toggle-btn'),
+    diffViewer: document.getElementById('diff-viewer'),
+    diffOverlayToggle: document.getElementById('diff-overlay-toggle'),
+    diffOriginalCanvas: document.getElementById('diff-original-canvas'),
+    diffWatermarkedCanvas: document.getElementById('diff-watermarked-canvas'),
+    diffHeatmapCanvas: document.getElementById('diff-heatmap-canvas'),
+    // Performance panel
+    perfPanel: document.getElementById('perf-panel'),
+    perfPanelHeader: document.getElementById('perf-panel-header'),
+    perfCollapseBtn: document.getElementById('perf-collapse-btn'),
+    perfCollapseIcon: document.getElementById('perf-collapse-icon'),
+    perfPanelBody: document.getElementById('perf-panel-body'),
+    chartFps: document.getElementById('chart-fps'),
+    chartSignLatency: document.getElementById('chart-sign-latency'),
+    chartVerifyLatency: document.getElementById('chart-verify-latency'),
+    chartVerifyCounts: document.getElementById('chart-verify-counts'),
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -269,6 +299,33 @@ function renderQrOverlay(ctx, canvasW, canvasH) {
 
 // ─── Webcam ───────────────────────────────────────────────────────────────────
 
+async function enumerateCameras() {
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter(d => d.kind === 'videoinput');
+        if (el.cameraSelect) {
+            // Preserve current selection
+            const currentVal = el.cameraSelect.value;
+            el.cameraSelect.innerHTML = '<option value="">Default Camera</option>';
+            videoInputs.forEach((device, idx) => {
+                const opt = document.createElement('option');
+                opt.value = device.deviceId;
+                const label = device.label || `Camera ${idx + 1}`;
+                opt.textContent = label.length > 40 ? label.slice(0, 37) + '…' : label;
+                el.cameraSelect.appendChild(opt);
+            });
+            // Restore selection if still valid
+            if (currentVal && [...el.cameraSelect.options].some(o => o.value === currentVal)) {
+                el.cameraSelect.value = currentVal;
+            }
+        }
+        return videoInputs;
+    } catch (err) {
+        console.error('[camera] enumerateDevices failed:', err);
+        return [];
+    }
+}
+
 async function startCamera() {
     const [rw, rh] = liveConfig.resolution.split('x').map(Number);
     try {
@@ -277,17 +334,25 @@ async function startCamera() {
             webcamStream.getTracks().forEach(t => t.stop());
             webcamStream = null;
         }
-        webcamStream = await navigator.mediaDevices.getUserMedia({
+        const constraints = {
             video: { width: { ideal: rw || 640 }, height: { ideal: rh || 480 }, facingMode: 'user' },
             audio: false,
-        });
+        };
+        // Use specific camera device if selected
+        if (selectedCameraDeviceId) {
+            constraints.video.deviceId = { exact: selectedCameraDeviceId };
+            delete constraints.video.facingMode;
+        }
+        webcamStream = await navigator.mediaDevices.getUserMedia(constraints);
         el.webcamVideo.srcObject = webcamStream;
         await el.webcamVideo.play();
         cameraActive = true;
         el.encodeOverlay.classList.add('hidden');
+        // Re-enumerate to populate labels (labels are empty until permission granted)
+        await enumerateCameras();
         drawWebcamLoop();
         startSigningInterval();
-        console.log(`[camera] Webcam started at ${rw}x${rh}`);
+        console.log(`[camera] Webcam started at ${rw}x${rh}` + (selectedCameraDeviceId ? ` (device: ${selectedCameraDeviceId.slice(0, 8)}…)` : ''));
     } catch (err) {
         console.error('[camera] Failed:', err);
         el.encodeOverlay.querySelector('.overlay-text').textContent = '❌ Camera denied';
@@ -329,7 +394,14 @@ function sendFrameForSigning() {
     const c = document.createElement('canvas');
     c.width = v.videoWidth || 640;
     c.height = v.videoHeight || 480;
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(v, 0, 0, c.width, c.height);
+
+    // Capture original frame for diff viewer (before encoding)
+    if (diffViewerEnabled) {
+        lastOriginalFrameData = ctx.getImageData(0, 0, c.width, c.height);
+    }
+
     el.signIndicator.classList.remove('hidden');
     c.toBlob((blob) => {
         if (blob && encodeWs && encodeWs.readyState === WebSocket.OPEN) {
@@ -383,6 +455,18 @@ function handleEncodeMessage(msg) {
         el.identityValue.title = msg.identity;
     }
     if (msg.width && msg.height) el.footerResolutionValue.textContent = `${msg.width}×${msg.height}`;
+
+    // Capture watermarked frame for diff viewer (post-encode, from encode canvas)
+    if (diffViewerEnabled && lastOriginalFrameData) {
+        try {
+            const encCanvas = el.encodeCanvas;
+            const encCtx = encCanvas.getContext('2d');
+            lastWatermarkedFrameData = encCtx.getImageData(0, 0, encCanvas.width, encCanvas.height);
+            renderDiffViewer();
+        } catch (e) {
+            console.warn('[diff] Failed to capture watermarked frame:', e);
+        }
+    }
 }
 
 function handleDecodeMessage(msg) {
@@ -730,6 +814,334 @@ function initThemeToggle() {
 
 const SESSION_START = new Date();
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// FRAME DIFF VIEWER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function renderDiffViewer() {
+    if (!diffViewerEnabled || !lastOriginalFrameData || !lastWatermarkedFrameData) return;
+
+    const origCanvas = el.diffOriginalCanvas;
+    const wmCanvas = el.diffWatermarkedCanvas;
+    const heatCanvas = el.diffHeatmapCanvas;
+
+    // Match canvas size to the encode/decode canvas
+    const encW = el.encodeCanvas.width;
+    const encH = el.encodeCanvas.height;
+    [origCanvas, wmCanvas, heatCanvas].forEach(c => {
+        c.width = encW;
+        c.height = encH;
+    });
+
+    // Draw original frame
+    const origCtx = origCanvas.getContext('2d');
+    origCtx.putImageData(lastOriginalFrameData, 0, 0);
+
+    // Draw watermarked frame
+    const wmCtx = wmCanvas.getContext('2d');
+    wmCtx.putImageData(lastWatermarkedFrameData, 0, 0);
+
+    // Compute pixel-level diff and render heatmap
+    const heatCtx = heatCanvas.getContext('2d');
+    const origData = lastOriginalFrameData.data;
+    const wmData = lastWatermarkedFrameData.data;
+    const diffImageData = origCtx.createImageData(encW, encH);
+    const diffData = diffImageData.data;
+
+    for (let i = 0; i < origData.length; i += 4) {
+        const rDiff = Math.abs(origData[i] - wmData[i]);
+        const gDiff = Math.abs(origData[i + 1] - wmData[i + 1]);
+        const bDiff = Math.abs(origData[i + 2] - wmData[i + 2]);
+        const pixelDiff = rDiff + gDiff + bDiff;
+
+        if (diffOverlayEnabled) {
+            if (pixelDiff > 6) {
+                // Changed: red (intensity proportional to diff)
+                const intensity = Math.min(255, pixelDiff);
+                diffData[i] = Math.min(255, 80 + intensity / 3);      // R
+                diffData[i + 1] = 0;                                   // G
+                diffData[i + 2] = 0;                                   // B
+                diffData[i + 3] = 255;                                 // A
+            } else {
+                // Unchanged: green (dim)
+                diffData[i] = 0;                                        // R
+                diffData[i + 1] = 60;                                   // G
+                diffData[i + 2] = 0;                                    // B
+                diffData[i + 3] = 255;                                 // A
+            }
+        } else {
+            // No overlay — just show the watermarked frame in the heatmap canvas too
+            diffData[i] = wmData[i];
+            diffData[i + 1] = wmData[i + 1];
+            diffData[i + 2] = wmData[i + 2];
+            diffData[i + 3] = 255;
+        }
+    }
+
+    heatCtx.putImageData(diffImageData, 0, 0);
+}
+
+function setupDiffViewer() {
+    if (el.diffToggleBtn) {
+        el.diffToggleBtn.addEventListener('click', () => {
+            diffViewerEnabled = !diffViewerEnabled;
+            if (diffViewerEnabled) {
+                el.diffToggleBtn.textContent = '🔍 Hide Diff';
+                el.diffToggleBtn.classList.add('active');
+                el.diffViewer.classList.remove('hidden');
+                // If camera is active, the next sign cycle will capture frames
+            } else {
+                el.diffToggleBtn.textContent = '🔍 Show Diff';
+                el.diffToggleBtn.classList.remove('active');
+                el.diffViewer.classList.add('hidden');
+                lastOriginalFrameData = null;
+                lastWatermarkedFrameData = null;
+            }
+        });
+    }
+
+    if (el.diffOverlayToggle) {
+        el.diffOverlayToggle.addEventListener('click', () => {
+            diffOverlayEnabled = !diffOverlayEnabled;
+            if (diffOverlayEnabled) {
+                el.diffOverlayToggle.textContent = '🎨 Heatmap ON';
+                el.diffOverlayToggle.classList.add('active');
+            } else {
+                el.diffOverlayToggle.textContent = '🎨 Heatmap OFF';
+                el.diffOverlayToggle.classList.remove('active');
+            }
+            renderDiffViewer();
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HISTORICAL METRICS CHARTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let metricsPollInterval = null;
+
+function startMetricsPolling() {
+    if (metricsPollInterval) clearInterval(metricsPollInterval);
+    metricsPollInterval = setInterval(pollMetrics, 1000);
+}
+
+async function pollMetrics() {
+    try {
+        const r = await fetch('/api/metrics');
+        const data = await r.json();
+        const entry = {
+            timestamp: Date.now(),
+            fps: parseFloat(data.average_fps) || 0,
+            signLatency: parseFloat(data.avg_sign_latency_us) || 0,
+            verifyLatency: parseFloat(data.avg_verify_latency_us) || 0,
+            verifiedOk: parseInt(data.frames_verified_ok) || 0,
+            verifiedFail: parseInt(data.frames_verified_fail) || 0,
+        };
+        metricsHistory.push(entry);
+        if (metricsHistory.length > METRICS_HISTORY_MAX) metricsHistory.shift();
+        drawCharts();
+    } catch (e) {
+        // Server might not be running yet
+    }
+}
+
+function drawCharts() {
+    drawLineChart(el.chartFps, metricsHistory, 'fps', '#3b82f6', 'FPS');
+    drawLineChart(el.chartSignLatency, metricsHistory, 'signLatency', '#f59e0b', 'µs');
+    drawLineChart(el.chartVerifyLatency, metricsHistory, 'verifyLatency', '#8b5cf6', 'µs');
+    drawBarChart(el.chartVerifyCounts, metricsHistory);
+}
+
+function drawLineChart(canvas, data, key, color, yLabel) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const padL = 38, padR = 8, padT = 8, padB = 18;
+
+    // Clear background
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, w, h);
+
+    if (data.length < 2) {
+        ctx.fillStyle = '#555';
+        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Waiting for data…', w / 2, h / 2);
+        return;
+    }
+
+    const chartW = w - padL - padR;
+    const chartH = h - padT - padB;
+
+    // Calculate Y range
+    const values = data.map(d => d[key]);
+    let yMax = Math.max(...values, 1);
+    let yMin = Math.min(...values, 0);
+    // Add 10% padding to yMax
+    if (yMax > 0) yMax = yMax * 1.1;
+    const yRange = yMax - yMin || 1;
+
+    // Draw grid lines
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+        const y = padT + (chartH / 4) * i;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR, y);
+        ctx.stroke();
+
+        // Y-axis labels
+        const labelVal = yMax - (yRange / 4) * i;
+        ctx.fillStyle = '#555';
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(labelVal.toFixed(1), padL - 4, y + 3);
+    }
+
+    // Draw X-axis label
+    ctx.fillStyle = '#555';
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('60s ago', padL + 10, h - 4);
+    ctx.fillText('now', w - padR - 10, h - 4);
+
+    // Draw Y-axis label
+    ctx.save();
+    ctx.translate(10, padT + chartH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText(yLabel, 0, 0);
+    ctx.restore();
+
+    // Draw line
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const xStep = chartW / (METRICS_HISTORY_MAX - 1);
+    data.forEach((d, i) => {
+        const x = padL + i * xStep;
+        const y = padT + chartH - ((d[key] - yMin) / yRange) * chartH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Fill area under line
+    ctx.lineTo(padL + (data.length - 1) * xStep, padT + chartH);
+    ctx.lineTo(padL, padT + chartH);
+    ctx.closePath();
+    ctx.fillStyle = color + '20'; // 12% opacity
+    ctx.fill();
+}
+
+function drawBarChart(canvas, data) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const padL = 38, padR = 8, padT = 8, padB = 18;
+
+    // Clear
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, w, h);
+
+    if (data.length < 1) {
+        ctx.fillStyle = '#555';
+        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Waiting for data…', w / 2, h / 2);
+        return;
+    }
+
+    const chartW = w - padL - padR;
+    const chartH = h - padT - padB;
+
+    // Calculate max value for scaling
+    const okValues = data.map(d => d.verifiedOk);
+    const failValues = data.map(d => d.verifiedFail);
+    const yMax = Math.max(...okValues, ...failValues, 1) * 1.1;
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+        const y = padT + (chartH / 4) * i;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - padR, y);
+        ctx.stroke();
+
+        const labelVal = yMax - (yMax / 4) * i;
+        ctx.fillStyle = '#555';
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(Math.round(labelVal).toString(), padL - 4, y + 3);
+    }
+
+    // X-axis label
+    ctx.fillStyle = '#555';
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('60s ago', padL + 10, h - 4);
+    ctx.fillText('now', w - padR - 10, h - 4);
+
+    // Y-axis label
+    ctx.save();
+    ctx.translate(10, padT + chartH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('Count', 0, 0);
+    ctx.restore();
+
+    // Draw bars — show the latest values as stacked bars across time
+    const barWidth = Math.max(2, chartW / METRICS_HISTORY_MAX);
+    const xStep = chartW / METRICS_HISTORY_MAX;
+
+    data.forEach((d, i) => {
+        const x = padL + i * xStep;
+
+        // OK bar (green, bottom)
+        const okHeight = (d.verifiedOk / yMax) * chartH;
+        ctx.fillStyle = '#22c55e';
+        ctx.fillRect(x, padT + chartH - okHeight, barWidth - 1, okHeight);
+
+        // Fail bar (red, stacked on top)
+        const failHeight = (d.verifiedFail / yMax) * chartH;
+        ctx.fillStyle = '#dc2626';
+        ctx.fillRect(x, padT + chartH - okHeight - failHeight, barWidth - 1, failHeight);
+    });
+}
+
+function setupPerformancePanel() {
+    // Collapse/expand toggle
+    if (el.perfPanelHeader) {
+        el.perfPanelHeader.addEventListener('click', () => {
+            if (el.perfPanel) el.perfPanel.classList.toggle('collapsed');
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CAMERA SELECTOR SETUP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function setupCameraSelector() {
+    if (el.cameraSelect) {
+        el.cameraSelect.addEventListener('change', () => {
+            selectedCameraDeviceId = el.cameraSelect.value;
+            if (cameraActive) {
+                startCamera();
+            }
+        });
+
+        // Try initial enumeration (labels may be empty before permission)
+        enumerateCameras();
+    }
+}
+
 function init() {
     console.log('Steganographer Dashboard initializing...');
     initThemeToggle();
@@ -738,6 +1150,10 @@ function init() {
     connectDecodeWs();
     detectMetaMask();
     setupConfigControls();
+    setupDiffViewer();
+    setupPerformancePanel();
+    setupCameraSelector();
+    startMetricsPolling();
     el.startCameraBtn.addEventListener('click', startCamera);
     el.metamaskBtn.addEventListener('click', () => metamaskAccount ? disconnectMetaMask() : connectMetaMask());
     setInterval(fetchConfig, 5000);
