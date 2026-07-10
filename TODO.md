@@ -11,7 +11,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
 ### Tests
 
-- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 214)
+- [ ] `cargo test --workspace` — **all tests pass**, 0 failures, 0 ignored (currently 246)
 - [ ] `cargo build --workspace` — **clean build**, no warnings
 - [ ] `cargo clippy --workspace` — no new warnings introduced
 - [ ] Any new feature has at least one corresponding test
@@ -72,17 +72,21 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **Capacity reporting** — `steganographer info` CLI command
 - [x] **Steganalysis** — chi-squared, sample-pair, RS analysis (`steganalysis.rs`)
 - [x] **Combined analysis** — multi-detector summary with confidence
+- [x] **Adaptive embedding** — content-aware pixel selection (`adaptive.rs`)
+- [x] **Hash chain streaming auth** — Merkle tree for segment-level tamper detection (`hash_chain.rs`)
 
 ### Flexibility
 
 - [x] **Configurable hash algorithm** — BLAKE3, SHA-256, SHA-3 via config
 - [x] **New CLI stego types** — `spread_spectrum_video`, `dct_video`
-- [x] **New CLI flags** — `--embedding-key`, `info` subcommand
+- [x] **New CLI flags** — `--encrypt`, `--decrypt`, `--ecc`, `--spread`, `--hash-algorithm`, `--signing-key`, `--embedding-key`, `--input-format`, `--dir`
 - [x] **Info bar config** — `[video.stego.info_bar]` with toggleable features
 - [x] **GStreamer pipeline integration** — spread_spectrum and dct as pipeline steps
 - [x] **Hash algorithm in live pipelines** — cmd_video.rs and cmd_audio.rs
 - [x] **Dashboard LiveConfig** — stego_type, hash_algorithm, encrypt, ecc fields
 - [x] **New CLI commands** — `analyze` (chi-squared), `derive` (key derivation)
+- [x] **Batch processing** — `--dir` flag for directory encoding
+- [x] **PNG/WAV format I/O** — image + hound crates for file format support
 
 ### Platform & Distribution
 
@@ -91,19 +95,18 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [x] **cargo deny** — license and vulnerability audit
 - [x] **CI clippy** — lint check in CI workflow
 - [x] **Shell completions** — bash/zsh/fish via clap_complete (build.rs)
+- [x] **Man pages** — `steganographer.1` via clap_mangen (build.rs)
 - [x] **Criterion benchmarks** — sign, LSB, spread-spectrum, DCT, audio
 
 ---
 
 ## 🔜 Upcoming (Minor Improvements)
 
-- [ ] **Fix CLI compilation** — cmd_encode.rs and cmd_verify.rs need compilation fixes (subagent in progress)
-- [ ] **Integrate encryption into encode/verify CLI** — `--encrypt` flag end-to-end
-- [ ] **Integrate error correction into encode/verify CLI** — `--ecc` flag end-to-end
-- [ ] **Integrate multi-frame spreading into CLI** — `--spread N` flag end-to-end
-- [ ] **Batch processing** — `steganographer encode --dir ./frames/ --output ./signed/`
-- [ ] **Fuzz targets** — `cargo fuzz` for extraction robustness
-- [ ] **Replace expect() calls** — dashboard has 12 `expect("lock poisoned")` calls
+- [ ] **JPEG round-trip DCT test** — verify DCT extraction survives JPEG quantization at Q=75/85/95
+- [ ] **Replace expect() calls** — dashboard `expect("lock poisoned")` → graceful recovery
+- [ ] **Dark/light theme toggle** — dashboard theme persistence in localStorage
+- [ ] **Mobile-responsive layout** — media queries for ≤768px viewport
+- [ ] **Frame diff viewer** — side-by-side original vs. watermarked with pixel diff
 
 ---
 
@@ -115,14 +118,12 @@ Larger items requiring design work or architecture changes.
 
 - [ ] **Berlekamp-Massey decoder** — full multi-error RS correction (brute force works for single errors)
 - [ ] **MDCT audio embedding** — frequency-domain audio steganography for MP3/AAC resistance
-- [ ] **Adaptive embedding** — content-adaptive (HUGO/WOW/S-UNIWARD) pixel selection
-- [ ] **Hash chain streaming auth** — Merkle tree for segment-level tamper detection
 
 ### Robustness & Formats
 
 - [ ] **Container format I/O via GStreamer** — read/write MP4, MKV, WAV via decodebin/encodebin
-- [ ] **JPEG round-trip with DCT** — test DCT extraction survives JPEG quantization at Q=75/85/95
 - [ ] **Multi-frame video file support** — read/encode/write multi-frame raw video files
+- [ ] **Fuzz targets** — `cargo fuzz` for extraction robustness
 
 ### Cryptography
 
@@ -137,13 +138,9 @@ Larger items requiring design work or architecture changes.
 - [ ] **Homebrew formula** — `brew install steganographer`
 - [ ] **Windows support** — Media Foundation sources/sinks
 - [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines
-- [ ] **Man pages** — generate `steganographer.1` from Clap metadata via clap_mangen
 
 ### Dashboard Enhancements
 
-- [ ] **Dark/light theme toggle** — persist preference in `localStorage`
-- [ ] **Mobile-responsive layout** — media queries for ≤768px viewport
-- [ ] **Frame diff viewer** — side-by-side original vs. watermarked with pixel diff
 - [ ] **Metrics dashboard** — historical charts of latency, frame rate, capacity
 - [ ] **Multi-camera support** — select from available video devices
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC
