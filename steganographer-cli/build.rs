@@ -1,8 +1,7 @@
 //! Build script for steganographer-cli.
 //!
-//! Generates shell completions and man pages at build time.
+//! Generates shell completions at build time.
 
-use clap::CommandFactory;
 use clap_complete::{generate_to, Shell};
 
 // Disable for now — clap_mangen is an optional dep we add later

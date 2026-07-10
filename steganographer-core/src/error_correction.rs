@@ -109,11 +109,7 @@ pub fn encode(data: &[u8], parity_count: usize) -> anyhow::Result<Vec<u8>> {
 ///
 /// # Returns
 /// The decoded data.
-pub fn decode(
-    encoded: &[u8],
-    data_len: usize,
-    parity_count: usize,
-) -> anyhow::Result<Vec<u8>> {
+pub fn decode(encoded: &[u8], data_len: usize, parity_count: usize) -> anyhow::Result<Vec<u8>> {
     if parity_count == 0 {
         return Ok(encoded[..data_len].to_vec());
     }

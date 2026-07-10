@@ -697,12 +697,42 @@ function toggleVideoRecording() {
         console.log('[record] Video recording stopped');
     }
 }
+// ─── Theme Toggle ─────────────────────────────────────────────────────────────
+
+function initThemeToggle() {
+    // Apply saved theme on load
+    const savedTheme = localStorage.getItem('stego-theme') || 'dark';
+    document.body.setAttribute('data-theme', savedTheme);
+
+    const toggleBtn = document.getElementById('theme-toggle-btn');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+            const currentTheme = document.body.getAttribute('data-theme') || 'dark';
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            document.body.setAttribute('data-theme', newTheme);
+            localStorage.setItem('stego-theme', newTheme);
+
+            // Update mermaid theme if diagrams are present
+            if (window.mermaid) {
+                window.mermaid.initialize({
+                    startOnLoad: false,
+                    theme: newTheme === 'light' ? 'default' : 'dark',
+                    securityLevel: 'loose',
+                });
+            }
+
+            showToast(`Theme: ${newTheme}`, 'info');
+        });
+    }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 const SESSION_START = new Date();
 
 function init() {
     console.log('Steganographer Dashboard initializing...');
+    initThemeToggle();
     fetchConfig();
     connectEncodeWs();
     connectDecodeWs();

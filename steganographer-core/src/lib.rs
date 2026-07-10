@@ -17,14 +17,18 @@
 //! - **Error Correction** — Reed-Solomon codes over GF(2^8) for payload resilience
 //! - **Multi-Frame** — Spread one signature across N frames for partial loss resilience
 //! - **Overlay** — Text burn-in watermark for video frames
+//! - **Hash Chain** — Merkle tree / hash chain for streaming authentication
+//! - **Adaptive** — Content-adaptive steganography (high-variance region embedding)
 //! - **Info Bar** — Exoteric info overlay with timestamp, barcode, QR code
 
+pub mod adaptive;
 pub mod audio;
 pub mod config;
 pub mod crypto;
 pub mod dct_video;
 pub mod encryption;
 pub mod error_correction;
+pub mod hash_chain;
 pub mod info_bar;
 pub mod kdf;
 pub mod lsb_audio;
@@ -38,14 +42,19 @@ pub mod steganalysis;
 pub mod video;
 
 pub use audio::{AudioBuffer, AudioStegoModule};
-pub use steganalysis::{analyze_combined, chi_squared_detect, rs_analyze, sample_pair_detect, CombinedResult, DetectionResult};
 pub use config::{AudioStegoConfig, Config, VideoStegoConfig};
 pub use crypto::{HashAlgorithm, SignaturePayload, Signer, Verifier};
 pub use encryption::EncryptionKey;
-pub use kdf::{DerivedKeys, derive_all, derive_signing_key, derive_encryption_key, derive_embedding_key};
+pub use kdf::{
+    derive_all, derive_embedding_key, derive_encryption_key, derive_signing_key, DerivedKeys,
+};
 pub use metrics::StegoMetrics;
 pub use signer_backend::{Ed25519Backend, Ed25519Verifier, SignerBackend};
 pub use spread_spectrum::{SpreadSpectrumAudio, SpreadSpectrumVideo};
+pub use steganalysis::{
+    analyze_combined, chi_squared_detect, rs_analyze, sample_pair_detect, CombinedResult,
+    DetectionResult,
+};
 pub use video::{VideoFormat, VideoFrame, VideoStegoModule};
 
 #[cfg(feature = "ethereum")]

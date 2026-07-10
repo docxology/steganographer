@@ -86,18 +86,13 @@ impl SpreadSpectrumVideo {
             seed[i] = byte ^ frame_bytes[i % 8] ^ bit_bytes[i % 8];
         }
         let mut rng = StdRng::from_seed(seed);
-        (0..len).map(|_| if rng.gen::<bool>() { 1 } else { -1 }).collect()
+        (0..len)
+            .map(|_| if rng.gen::<bool>() { 1 } else { -1 })
+            .collect()
     }
 
     /// Embed a single bit at a given offset in the pixel data.
-    fn embed_bit(
-        &self,
-        data: &mut [u8],
-        start: usize,
-        bit: u8,
-        bit_pos: usize,
-        frame_index: u64,
-    ) {
+    fn embed_bit(&self, data: &mut [u8], start: usize, bit: u8, bit_pos: usize, frame_index: u64) {
         let region = &mut data[start..start + self.spread_factor];
         let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
         let sign = if bit == 1 { 1 } else { -1 };
@@ -109,13 +104,7 @@ impl SpreadSpectrumVideo {
     }
 
     /// Extract a single bit from a given offset in the pixel data.
-    fn extract_bit(
-        &self,
-        data: &[u8],
-        start: usize,
-        bit_pos: usize,
-        frame_index: u64,
-    ) -> u8 {
+    fn extract_bit(&self, data: &[u8], start: usize, bit_pos: usize, frame_index: u64) -> u8 {
         let region = &data[start..start + self.spread_factor];
         let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
 
@@ -163,13 +152,7 @@ impl VideoStegoModule for SpreadSpectrumVideo {
                 let bit = (byte >> bit_in_byte) & 1;
                 let payload_bit_pos = byte_idx * 8 + bit_in_byte;
                 let start = payload_bit_pos * self.spread_factor;
-                self.embed_bit(
-                    frame.data,
-                    start,
-                    bit,
-                    payload_bit_pos,
-                    frame.frame_index,
-                );
+                self.embed_bit(frame.data, start, bit, payload_bit_pos, frame.frame_index);
             }
         }
 
@@ -247,7 +230,9 @@ impl SpreadSpectrumAudio {
             seed[i] = byte ^ frame_bytes[i % 8] ^ bit_bytes[i % 8];
         }
         let mut rng = StdRng::from_seed(seed);
-        (0..len).map(|_| if rng.gen::<bool>() { 1 } else { -1 }).collect()
+        (0..len)
+            .map(|_| if rng.gen::<bool>() { 1 } else { -1 })
+            .collect()
     }
 }
 

@@ -222,7 +222,10 @@ fn test_crypto_different_audio_data_changes_hash() {
     let p1 = signer.sign_frame(0, video, Some(b"audio_a"));
     let p2 = signer.sign_frame(0, video, Some(b"audio_b"));
 
-    assert_ne!(p1.hash, p2.hash, "Different audio should produce different hashes");
+    assert_ne!(
+        p1.hash, p2.hash,
+        "Different audio should produce different hashes"
+    );
     assert_ne!(p1.signature, p2.signature);
 }
 
@@ -254,15 +257,23 @@ fn test_lsb_video_3bit_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 33,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 33,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 33,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 33,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 33);
@@ -280,15 +291,23 @@ fn test_lsb_video_4bit_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 44,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 44,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 44,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 44,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 44);
@@ -308,15 +327,23 @@ fn test_lsb_video_minimum_frame_size_1bit() {
     let mut lsb = LsbVideo::new(1);
     {
         let mut frame = VideoFrame {
-            width: 904, height: 1, stride: 904,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
+            width: 904,
+            height: 1,
+            stride: 904,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 0,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 904, height: 1, stride: 904,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
+            width: 904,
+            height: 1,
+            stride: 904,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 0);
@@ -332,8 +359,12 @@ fn test_lsb_video_one_byte_too_small() {
     let mut frame_data = vec![0u8; 903];
     let mut lsb = LsbVideo::new(1);
     let mut frame = VideoFrame {
-        width: 863, height: 1, stride: 863,
-        format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
+        width: 863,
+        height: 1,
+        stride: 863,
+        format: VideoFormat::Rgb8,
+        data: &mut frame_data,
+        frame_index: 0,
     };
     assert!(lsb.embed(&mut frame, Some(&payload)).is_err());
 }
@@ -349,8 +380,12 @@ fn test_lsb_video_preserves_high_bits() {
 
     {
         let mut frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 0,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
@@ -358,8 +393,10 @@ fn test_lsb_video_preserves_high_bits() {
     // Verify high bits (bits 7-1) are preserved
     for i in 0..frame_data.len() {
         assert_eq!(
-            frame_data[i] & 0xFE, original[i] & 0xFE,
-            "High bits at index {} should be preserved", i
+            frame_data[i] & 0xFE,
+            original[i] & 0xFE,
+            "High bits at index {} should be preserved",
+            i
         );
     }
 }
@@ -375,15 +412,23 @@ fn test_lsb_video_bgra_format() {
 
     {
         let mut frame = VideoFrame {
-            width: 32, height: 32, stride: 128,
-            format: VideoFormat::Bgra8, data: &mut frame_data, frame_index: 0,
+            width: 32,
+            height: 32,
+            stride: 128,
+            format: VideoFormat::Bgra8,
+            data: &mut frame_data,
+            frame_index: 0,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 32, height: 32, stride: 128,
-            format: VideoFormat::Bgra8, data: &mut frame_data, frame_index: 0,
+            width: 32,
+            height: 32,
+            stride: 128,
+            format: VideoFormat::Bgra8,
+            data: &mut frame_data,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 0);
@@ -406,15 +451,19 @@ fn test_lsb_audio_3bit_roundtrip() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
     {
         let buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&buf).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 100);
@@ -432,15 +481,19 @@ fn test_lsb_audio_4bit_roundtrip() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
     {
         let buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&buf).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 200);
@@ -462,8 +515,10 @@ fn test_lsb_audio_different_keys_incompatible() {
     let mut lsb_a = LsbAudio::new(1, key_a);
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb_a.embed(&mut buf, Some(&payload)).unwrap();
     }
@@ -471,11 +526,16 @@ fn test_lsb_audio_different_keys_incompatible() {
     // Extract with key B should fail (wrong permutation)
     let lsb_b = LsbAudio::new(1, key_b);
     let buf = AudioBuffer {
-        channels: 1, sample_rate: 44100,
-        samples: &mut samples, frame_index: 0,
+        channels: 1,
+        sample_rate: 44100,
+        samples: &mut samples,
+        frame_index: 0,
     };
     let result = lsb_b.extract(&buf).unwrap();
-    assert!(result.is_none(), "Wrong key should not extract valid payload");
+    assert!(
+        result.is_none(),
+        "Wrong key should not extract valid payload"
+    );
 }
 
 #[test]
@@ -490,19 +550,26 @@ fn test_lsb_audio_different_frame_index_incompatible() {
     let mut lsb = LsbAudio::new(1, key);
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
 
     // Extract at frame_index 1 should fail (different permutation)
     let buf = AudioBuffer {
-        channels: 1, sample_rate: 44100,
-        samples: &mut samples, frame_index: 1,
+        channels: 1,
+        sample_rate: 44100,
+        samples: &mut samples,
+        frame_index: 1,
     };
     let result = lsb.extract(&buf).unwrap();
-    assert!(result.is_none(), "Wrong frame index should not yield valid payload");
+    assert!(
+        result.is_none(),
+        "Wrong frame index should not yield valid payload"
+    );
 }
 
 #[test]
@@ -517,8 +584,10 @@ fn test_lsb_audio_preserves_high_bits() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
@@ -526,8 +595,10 @@ fn test_lsb_audio_preserves_high_bits() {
     // All high bits (bits 15-1) should be preserved
     for i in 0..samples.len() {
         assert_eq!(
-            samples[i] & !1i16, original[i] & !1i16,
-            "High bits at sample {} should be preserved", i
+            samples[i] & !1i16,
+            original[i] & !1i16,
+            "High bits at sample {} should be preserved",
+            i
         );
     }
 }
@@ -544,15 +615,19 @@ fn test_lsb_audio_negative_samples() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
     {
         let buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&buf).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 0);
@@ -572,13 +647,20 @@ fn test_config_parse_example_toml() {
         .parent()
         .unwrap()
         .join("config/example.toml");
-    let toml_content = std::fs::read_to_string(&config_path)
-        .unwrap_or_else(|e| panic!("config/example.toml should exist at {:?}: {}", config_path, e));
+    let toml_content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        panic!(
+            "config/example.toml should exist at {:?}: {}",
+            config_path, e
+        )
+    });
     let cfg = Config::from_toml(&toml_content).expect("Example config should parse");
 
     assert_eq!(cfg.global.log_level.as_deref(), Some("info"));
     let video = cfg.video.expect("Video config should exist");
-    assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay", "info_bar"]);
+    assert_eq!(
+        video.stego.pipeline,
+        vec!["lsb_signature", "overlay", "info_bar"]
+    );
     assert_eq!(video.stego.lsb_signature.as_ref().unwrap().bits, 1);
 
     let audio = cfg.audio.expect("Audio config should exist");
@@ -766,11 +848,14 @@ fn test_audio_buffer_duration_zero_rate() {
 fn test_overlay_scale_1() {
     let mut data = vec![0u8; 320 * 240 * 3];
     let mut frame = VideoFrame {
-        width: 320, height: 240, stride: 960,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 320,
+        height: 240,
+        stride: 960,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
-    let mut overlay = TextOverlay::new("A".to_string(), OverlayPosition::TopLeft)
-        .with_scale(1);
+    let mut overlay = TextOverlay::new("A".to_string(), OverlayPosition::TopLeft).with_scale(1);
     overlay.embed(&mut frame, None).unwrap();
     assert!(data.iter().any(|&b| b != 0), "Scale 1 should write pixels");
 }
@@ -780,11 +865,14 @@ fn test_overlay_all_ascii_characters() {
     let mut data = vec![0u8; 1920 * 100 * 3];
     let text: String = (32u8..=126).map(|c| c as char).collect();
     let mut frame = VideoFrame {
-        width: 1920, height: 100, stride: 1920 * 3,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 1920,
+        height: 100,
+        stride: 1920 * 3,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
-    let mut overlay = TextOverlay::new(text, OverlayPosition::TopLeft)
-        .with_scale(1);
+    let mut overlay = TextOverlay::new(text, OverlayPosition::TopLeft).with_scale(1);
     overlay.embed(&mut frame, None).unwrap();
     assert!(data.iter().any(|&b| b != 0));
 }
@@ -794,11 +882,15 @@ fn test_overlay_tiny_frame_no_panic() {
     // Frame smaller than one character — should not panic
     let mut data = vec![0u8; 3 * 3 * 3]; // 3x3 RGB
     let mut frame = VideoFrame {
-        width: 3, height: 3, stride: 9,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 3,
+        height: 3,
+        stride: 9,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
-    let mut overlay = TextOverlay::new("TOOLONG".to_string(), OverlayPosition::TopLeft)
-        .with_scale(1);
+    let mut overlay =
+        TextOverlay::new("TOOLONG".to_string(), OverlayPosition::TopLeft).with_scale(1);
     // Should not panic even if text doesn't fit
     overlay.embed(&mut frame, None).unwrap();
 }
@@ -807,12 +899,19 @@ fn test_overlay_tiny_frame_no_panic() {
 fn test_overlay_extract_returns_none() {
     let data = vec![0u8; 320 * 240 * 3];
     let frame = VideoFrame {
-        width: 320, height: 240, stride: 960,
-        format: VideoFormat::Rgb8, data: &mut data.clone(), frame_index: 0,
+        width: 320,
+        height: 240,
+        stride: 960,
+        format: VideoFormat::Rgb8,
+        data: &mut data.clone(),
+        frame_index: 0,
     };
     let overlay = TextOverlay::new("X".to_string(), OverlayPosition::Center);
     let result = overlay.extract(&frame).unwrap();
-    assert!(result.is_none(), "Overlay extract should always return None");
+    assert!(
+        result.is_none(),
+        "Overlay extract should always return None"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -831,8 +930,8 @@ fn test_signature_payload_from_invalid_bytes() {
     let mut buf = [0u8; 109];
     buf[0..4].copy_from_slice(b"STEG");
     buf[4] = 2; // FORMAT_VERSION
-    // frame_index = 0, hash = zeros, signature = zeros
-    // from_bytes should parse without error (Signature::from_bytes accepts any 64 bytes)
+                // frame_index = 0, hash = zeros, signature = zeros
+                // from_bytes should parse without error (Signature::from_bytes accepts any 64 bytes)
     let result = SignaturePayload::from_bytes(&buf);
     assert!(result.is_ok());
 }
@@ -862,15 +961,23 @@ fn test_multiple_sequential_embeds_same_frame() {
     for i in 0..5u64 {
         let payload = signer.sign_frame(i, b"sequential", None);
         let mut frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: i,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: i,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
 
         // The last embedded payload should be extractable
         let frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: i,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: i,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, i);
@@ -890,8 +997,14 @@ fn test_multiple_signers_different_payloads() {
     let payload_b = signer_b.sign_frame(0, data, None);
 
     // Same data, same frame index, but different keys → different signatures
-    assert_eq!(payload_a.hash, payload_b.hash, "Same data should produce same hash");
-    assert_ne!(payload_a.signature, payload_b.signature, "Different keys → different sigs");
+    assert_eq!(
+        payload_a.hash, payload_b.hash,
+        "Same data should produce same hash"
+    );
+    assert_ne!(
+        payload_a.signature, payload_b.signature,
+        "Different keys → different sigs"
+    );
 
     // Cross-verification should fail
     assert!(verifier_a.verify(&payload_a, data, None));
@@ -910,16 +1023,18 @@ fn test_overlay_template_expands_frame_index() {
     let mut data1 = vec![0u8; 320 * 240 * 3];
     let mut data2 = vec![0u8; 320 * 240 * 3];
 
-    let mut overlay = TextOverlay::new(
-        "F{frame_index}".to_string(),
-        OverlayPosition::TopLeft,
-    ).with_scale(1);
+    let mut overlay =
+        TextOverlay::new("F{frame_index}".to_string(), OverlayPosition::TopLeft).with_scale(1);
 
     // Embed with frame_index=0
     {
         let mut frame = VideoFrame {
-            width: 320, height: 240, stride: 960,
-            format: VideoFormat::Rgb8, data: &mut data1, frame_index: 0,
+            width: 320,
+            height: 240,
+            stride: 960,
+            format: VideoFormat::Rgb8,
+            data: &mut data1,
+            frame_index: 0,
         };
         overlay.embed(&mut frame, None).unwrap();
     }
@@ -927,14 +1042,21 @@ fn test_overlay_template_expands_frame_index() {
     // Embed with frame_index=1
     {
         let mut frame = VideoFrame {
-            width: 320, height: 240, stride: 960,
-            format: VideoFormat::Rgb8, data: &mut data2, frame_index: 1,
+            width: 320,
+            height: 240,
+            stride: 960,
+            format: VideoFormat::Rgb8,
+            data: &mut data2,
+            frame_index: 1,
         };
         overlay.embed(&mut frame, None).unwrap();
     }
 
     // The two frames should have different pixel data (different frame indices rendered)
-    assert_ne!(data1, data2, "Different frame indices should produce different overlays");
+    assert_ne!(
+        data1, data2,
+        "Different frame indices should produce different overlays"
+    );
 }
 
 #[test]
@@ -943,28 +1065,36 @@ fn test_overlay_template_preserves_plain_text() {
     let mut data1 = vec![0u8; 320 * 240 * 3];
     let mut data2 = vec![0u8; 320 * 240 * 3];
 
-    let mut overlay = TextOverlay::new(
-        "HELLO".to_string(),
-        OverlayPosition::TopLeft,
-    ).with_scale(1);
+    let mut overlay = TextOverlay::new("HELLO".to_string(), OverlayPosition::TopLeft).with_scale(1);
 
     {
         let mut frame = VideoFrame {
-            width: 320, height: 240, stride: 960,
-            format: VideoFormat::Rgb8, data: &mut data1, frame_index: 0,
+            width: 320,
+            height: 240,
+            stride: 960,
+            format: VideoFormat::Rgb8,
+            data: &mut data1,
+            frame_index: 0,
         };
         overlay.embed(&mut frame, None).unwrap();
     }
     {
         let mut frame = VideoFrame {
-            width: 320, height: 240, stride: 960,
-            format: VideoFormat::Rgb8, data: &mut data2, frame_index: 99,
+            width: 320,
+            height: 240,
+            stride: 960,
+            format: VideoFormat::Rgb8,
+            data: &mut data2,
+            frame_index: 99,
         };
         overlay.embed(&mut frame, None).unwrap();
     }
 
     // Plain text (no placeholders) produces identical pixel output regardless of frame index
-    assert_eq!(data1, data2, "Plain text overlay should be frame-index-independent");
+    assert_eq!(
+        data1, data2,
+        "Plain text overlay should be frame-index-independent"
+    );
 }
 
 #[test]
@@ -972,8 +1102,14 @@ fn test_overlay_template_expand_static() {
     // Unit-style test of expand_template with known values
     let result = TextOverlay::expand_template("IDX:{frame_index} D:{date}", 999);
     assert!(result.contains("IDX:999"), "Should contain frame index 999");
-    assert!(result.contains("D:20"), "Should contain date starting with 20xx");
-    assert!(!result.contains("{frame_index}"), "Placeholder should be replaced");
+    assert!(
+        result.contains("D:20"),
+        "Should contain date starting with 20xx"
+    );
+    assert!(
+        !result.contains("{frame_index}"),
+        "Placeholder should be replaced"
+    );
     assert!(!result.contains("{date}"), "Placeholder should be replaced");
 }
 
@@ -995,8 +1131,12 @@ fn test_info_bar_no_barcode() {
         .with_timestamp(true);
 
     let mut frame = VideoFrame {
-        width: 640, height: 480, stride: 640 * 3,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 640,
+        height: 480,
+        stride: 640 * 3,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
     // Should not panic even with barcode/QR disabled
     bar.embed(&mut frame, Some(&payload)).unwrap();
@@ -1012,8 +1152,12 @@ fn test_info_bar_all_disabled() {
         .with_timestamp(false);
 
     let mut frame = VideoFrame {
-        width: 640, height: 480, stride: 640 * 3,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 640,
+        height: 480,
+        stride: 640 * 3,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
     // Even with all features disabled, embed should succeed (renders label bar only)
     bar.embed(&mut frame, None).unwrap();
@@ -1053,7 +1197,10 @@ font_size = 24
     let video = cfg.video.unwrap();
     assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay"]);
     let overlay = video.stego.overlay.unwrap();
-    assert_eq!(overlay.text, Some("CONFIDENTIAL {timestamp} F{frame_index}".to_string()));
+    assert_eq!(
+        overlay.text,
+        Some("CONFIDENTIAL {timestamp} F{frame_index}".to_string())
+    );
     assert_eq!(overlay.position, Some("bottom-right".to_string()));
     assert_eq!(overlay.font_size, Some(24));
 }
@@ -1074,8 +1221,16 @@ fn test_metrics_comprehensive_json() {
     m.record_sign_duration(std::time::Duration::from_millis(15));
 
     let json = m.to_json();
-    assert!(json.contains("\"frames_processed\":3"), "Should have 3 frames: {}", json);
-    assert!(json.contains("\"avg_sign_latency_us\":"), "Should have sign latency: {}", json);
+    assert!(
+        json.contains("\"frames_processed\":3"),
+        "Should have 3 frames: {}",
+        json
+    );
+    assert!(
+        json.contains("\"avg_sign_latency_us\":"),
+        "Should have sign latency: {}",
+        json
+    );
 
     // Verify it's valid JSON by checking basic structure
     assert!(json.starts_with('{'), "Should be JSON object");
@@ -1099,7 +1254,12 @@ fn test_signer_backend_e2e_sign_verify() {
     assert!(!backend.verify(b"tampered data", &signature));
     assert_eq!(backend.name(), "ed25519");
     let identity = backend.display_identity();
-    assert_eq!(identity.len(), 64, "Display identity should be 64 hex chars but got: {}", identity);
+    assert_eq!(
+        identity.len(),
+        64,
+        "Display identity should be 64 hex chars but got: {}",
+        identity
+    );
 }
 
 #[test]
@@ -1109,7 +1269,11 @@ fn test_signer_backend_public_key_bytes() {
     assert_eq!(pk.len(), 32, "Ed25519 public key should be 32 bytes");
 
     let backend2 = Ed25519Backend::generate();
-    assert_ne!(pk, backend2.public_key_bytes(), "Different keys should differ");
+    assert_ne!(
+        pk,
+        backend2.public_key_bytes(),
+        "Different keys should differ"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1126,15 +1290,23 @@ fn test_lsb_video_2bit_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 22,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 22,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 64, height: 64, stride: 192,
-            format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 22,
+            width: 64,
+            height: 64,
+            stride: 192,
+            format: VideoFormat::Rgb8,
+            data: &mut frame_data,
+            frame_index: 22,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 22);
@@ -1154,15 +1326,19 @@ fn test_lsb_audio_2bit_roundtrip() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         lsb.embed(&mut buf, Some(&payload)).unwrap();
     }
     {
         let buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         let extracted = lsb.extract(&buf).unwrap().unwrap();
         assert_eq!(extracted.frame_index, 50);
@@ -1182,24 +1358,43 @@ fn test_signer_backend_wrong_key_verify_fails() {
     let data = b"signed by A, verified by B";
     let sig = backend_a.sign(data);
     // Same data, wrong key → verification must fail
-    assert!(!backend_b.verify(data, &sig), "Verification with wrong key should fail");
+    assert!(
+        !backend_b.verify(data, &sig),
+        "Verification with wrong key should fail"
+    );
 }
 
 #[test]
 fn test_signer_backend_display_identity_hex_format() {
     let backend = Ed25519Backend::generate();
     let identity = backend.display_identity();
-    assert_eq!(identity.len(), 64, "display_identity should be 64 hex chars, got {}", identity.len());
-    assert!(identity.chars().all(|c| c.is_ascii_hexdigit()),
-        "display_identity should be all hex chars, got '{}'", identity);
+    assert_eq!(
+        identity.len(),
+        64,
+        "display_identity should be 64 hex chars, got {}",
+        identity.len()
+    );
+    assert!(
+        identity.chars().all(|c| c.is_ascii_hexdigit()),
+        "display_identity should be all hex chars, got '{}'",
+        identity
+    );
 }
 
 #[test]
 fn test_signer_backend_signature_size_ed25519() {
     let backend = Ed25519Backend::generate();
-    assert_eq!(backend.signature_size(), 64, "Ed25519 signatures are 64 bytes");
+    assert_eq!(
+        backend.signature_size(),
+        64,
+        "Ed25519 signatures are 64 bytes"
+    );
     let sig = backend.sign(b"test");
-    assert_eq!(sig.len(), 64, "Actual signature should match signature_size()");
+    assert_eq!(
+        sig.len(),
+        64,
+        "Actual signature should match signature_size()"
+    );
 }
 
 #[test]
@@ -1207,13 +1402,19 @@ fn test_crypto_empty_data_sign_verify() {
     let signer = Signer::generate();
     let payload = signer.sign_frame(0, b"", None);
     // Empty data should still produce a valid hash + signature
-    assert_eq!(payload.hash.len(), 32, "BLAKE3 hash should be 32 bytes even for empty data");
+    assert_eq!(
+        payload.hash.len(),
+        32,
+        "BLAKE3 hash should be 32 bytes even for empty data"
+    );
     assert_eq!(payload.signature.to_bytes().len(), 64);
 
     // Verify the signature
     let verifier = Verifier::new(signer.verifying_key());
-    assert!(verifier.verify(&payload, b"", None),
-        "Empty data signature should verify");
+    assert!(
+        verifier.verify(&payload, b"", None),
+        "Empty data signature should verify"
+    );
 }
 
 #[test]
@@ -1229,22 +1430,34 @@ fn test_e2e_audio_multi_bit_levels_all_verify() {
 
         {
             let mut buf = AudioBuffer {
-                channels: 1, sample_rate: 48000,
-                samples: &mut samples, frame_index: 0,
+                channels: 1,
+                sample_rate: 48000,
+                samples: &mut samples,
+                frame_index: 0,
             };
             lsb.embed(&mut buf, Some(&payload)).unwrap();
         }
         {
             let buf = AudioBuffer {
-                channels: 1, sample_rate: 48000,
-                samples: &mut samples, frame_index: 0,
+                channels: 1,
+                sample_rate: 48000,
+                samples: &mut samples,
+                frame_index: 0,
             };
-            let extracted = lsb.extract(&buf).unwrap()
+            let extracted = lsb
+                .extract(&buf)
+                .unwrap()
                 .unwrap_or_else(|| panic!("Should extract payload at {} bits", bits));
-            assert_eq!(extracted.frame_index, bits as u64,
-                "Frame index mismatch at {} bits", bits);
-            assert_eq!(extracted.hash, payload.hash,
-                "Hash mismatch at {} bits", bits);
+            assert_eq!(
+                extracted.frame_index, bits as u64,
+                "Frame index mismatch at {} bits",
+                bits
+            );
+            assert_eq!(
+                extracted.hash, payload.hash,
+                "Hash mismatch at {} bits",
+                bits
+            );
         }
     }
 }
@@ -1258,7 +1471,10 @@ fn test_metrics_frame_counter_accuracy() {
     }
     let json_str = metrics.to_json();
     let json: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
-    assert_eq!(json["frames_processed"], 100, "Should have exactly 100 frames processed");
+    assert_eq!(
+        json["frames_processed"], 100,
+        "Should have exactly 100 frames processed"
+    );
 }
 
 #[test]
@@ -1270,6 +1486,9 @@ fn test_signer_backend_from_bytes_deterministic() {
     let sig_a = backend_a.sign(data);
     let sig_b = backend_b.sign(data);
     assert_eq!(sig_a, sig_b, "Same seed should produce same signature");
-    assert_eq!(backend_a.public_key_bytes(), backend_b.public_key_bytes(),
-        "Same seed should produce same public key");
+    assert_eq!(
+        backend_a.public_key_bytes(),
+        backend_b.public_key_bytes(),
+        "Same seed should produce same public key"
+    );
 }

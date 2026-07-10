@@ -62,7 +62,10 @@ impl DctVideo {
     /// * `quant_step` — Quantization step for bit embedding (8–32 recommended).
     /// * `channel` — Color channel index (0, 1, or 2).
     pub fn new(coef_index: usize, quant_step: i32, channel: usize) -> Self {
-        assert!(coef_index >= 1 && coef_index < 64, "Coefficient index must be 1–63");
+        assert!(
+            coef_index >= 1 && coef_index < 64,
+            "Coefficient index must be 1–63"
+        );
         assert!(quant_step > 0, "Quantization step must be positive");
         assert!(channel < 3, "Channel must be 0, 1, or 2");
         Self {
@@ -153,14 +156,9 @@ impl DctVideo {
     /// Map a linear index to zigzag scan position.
     fn zigzag_to_linear(idx: usize) -> usize {
         const ZIGZAG: [usize; 64] = [
-            0, 1, 8, 16, 9, 2, 3, 10,
-            17, 24, 32, 25, 18, 11, 4, 5,
-            12, 19, 26, 33, 40, 48, 41, 34,
-            27, 20, 13, 6, 7, 14, 21, 28,
-            35, 42, 49, 56, 57, 50, 43, 36,
-            29, 22, 15, 23, 30, 37, 44, 51,
-            58, 59, 52, 45, 38, 31, 39, 46,
-            53, 60, 61, 54, 47, 55, 62, 63,
+            0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34,
+            27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37,
+            44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
         ];
         ZIGZAG[idx]
     }

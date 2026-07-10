@@ -1790,3 +1790,554 @@ footer {
     background: var(--accent-red);
     border-color: var(--accent-red);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   THEME TOGGLE BUTTON
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.theme-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.theme-toggle-btn:hover {
+    border-color: var(--accent-red);
+    background: var(--accent-red-dim);
+}
+
+.theme-toggle-btn .theme-icon-dark,
+.theme-toggle-btn .theme-icon-light {
+    font-size: 16px;
+    line-height: 1;
+}
+
+/* Dark theme (default): show moon icon, hide sun */
+body[data-theme="dark"] .theme-icon-dark,
+body:not([data-theme]) .theme-icon-dark {
+    display: inline;
+}
+body[data-theme="dark"] .theme-icon-light,
+body:not([data-theme]) .theme-icon-light {
+    display: none;
+}
+
+/* Light theme: show sun icon, hide moon */
+body[data-theme="light"] .theme-icon-dark {
+    display: none;
+}
+body[data-theme="light"] .theme-icon-light {
+    display: inline;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   LIGHT THEME VARIABLES
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+body[data-theme="light"] {
+    --bg-primary: #f5f5f5;
+    --bg-secondary: #e8e8e8;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f0f0f0;
+    --bg-input: #eaeaea;
+    --border-subtle: rgba(0, 0, 0, 0.08);
+    --border-accent: rgba(220, 38, 38, 0.2);
+
+    --text-primary: #1a1a1a;
+    --text-secondary: #555555;
+    --text-muted: #888888;
+
+    --accent-red: #dc2626;
+    --accent-red-light: #ef4444;
+    --accent-red-dim: rgba(220, 38, 38, 0.12);
+    --accent-green: #16a34a;
+    --accent-green-dim: rgba(22, 163, 74, 0.10);
+    --accent-orange: #e8833a;
+    --accent-gray: #6b6b6b;
+    --accent-light: #525252;
+
+    --gradient-header: linear-gradient(180deg, #ffffff 0%, #f0f0f0 100%);
+
+    --shadow-card: 0 2px 16px rgba(0, 0, 0, 0.10);
+    --shadow-glow-red: 0 0 20px rgba(220, 38, 38, 0.06);
+}
+
+body[data-theme="light"] .crypto-pipeline-info {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+body[data-theme="light"] .crypto-pipeline-info.verify-pipeline {
+    background: rgba(22, 163, 74, 0.04);
+}
+
+body[data-theme="light"] .pipeline-step {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+body[data-theme="light"] .canvas-container {
+    background: #1a1a1a;
+}
+
+body[data-theme="light"] .audio-canvas-container canvas {
+    background: #e0e0e0;
+}
+
+body[data-theme="light"] .verify-waiting {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+body[data-theme="light"] .verify-field {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+body[data-theme="light"] .panel-stats {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+body[data-theme="light"] .config-slider {
+    background: #d0d0d0;
+}
+
+body[data-theme="light"] .config-slider::-webkit-slider-thumb {
+    border: 2px solid #ccc;
+}
+
+body[data-theme="light"] .docs-content pre {
+    background: #1a1a1a;
+}
+
+body[data-theme="light"] .docs-content pre code {
+    color: #e0e0e0;
+}
+
+body[data-theme="light"] .docs-content code {
+    background: rgba(0, 0, 0, 0.06);
+    color: #c0392b;
+}
+
+body[data-theme="light"] .docs-content th {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+body[data-theme="light"] .docs-content td {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+body[data-theme="light"] .docs-content tr:hover td {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+body[data-theme="light"] .docs-content .mermaid {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+body[data-theme="light"] .help-icon {
+    background: rgba(0, 0, 0, 0.08);
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    color: #666;
+}
+
+body[data-theme="light"] .help-icon .help-tooltip {
+    background: rgba(255, 255, 255, 0.97);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    color: #333;
+}
+
+body[data-theme="light"] .help-icon .help-tooltip::after {
+    border-top-color: rgba(255, 255, 255, 0.97);
+}
+
+body[data-theme="light"] .copy-btn {
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #666;
+}
+
+body[data-theme="light"] .kbd-hint {
+    color: rgba(0, 0, 0, 0.4);
+    background: rgba(0, 0, 0, 0.06);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+body[data-theme="light"] .export-btn {
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #555;
+}
+
+body[data-theme="light"] #cheatsheet-overlay {
+    background: rgba(0, 0, 0, 0.45);
+}
+
+body[data-theme="light"] .docs-file-item:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+body[data-theme="light"] .docs-search {
+    background: #fff;
+}
+
+body[data-theme="light"] .toast {
+    background: var(--bg-card);
+}
+
+body[data-theme="light"] .toast.toast-success {
+    background: linear-gradient(135deg, rgba(22, 163, 74, 0.08) 0%, var(--bg-card) 100%);
+}
+
+body[data-theme="light"] .toast.toast-error {
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.08) 0%, var(--bg-card) 100%);
+}
+
+body[data-theme="light"] .toast.toast-info {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, var(--bg-card) 100%);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVE LAYOUT (≤768px)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 768px) {
+    /* ─── Header ─── */
+    header {
+        padding: 8px 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    h1 {
+        font-size: 14px;
+    }
+
+    h1 .icon {
+        font-size: 16px;
+    }
+
+    .version-badge {
+        font-size: 10px;
+        padding: 1px 6px;
+    }
+
+    .header-center {
+        gap: 8px;
+        order: 3;
+        width: 100%;
+        justify-content: center;
+    }
+
+    .header-right {
+        gap: 6px;
+    }
+
+    .identity-display code {
+        max-width: 100px;
+        font-size: 10px;
+    }
+
+    .connection-status {
+        font-size: 11px;
+    }
+
+    .theme-toggle-btn {
+        width: 30px;
+        height: 30px;
+    }
+
+    .theme-toggle-btn .theme-icon-dark,
+    .theme-toggle-btn .theme-icon-light {
+        font-size: 14px;
+    }
+
+    /* ─── Tab Bar — full width ─── */
+    .tab-bar {
+        padding: 0;
+        width: 100%;
+    }
+
+    .tab-btn {
+        flex: 1;
+        padding: 8px 12px;
+        font-size: 12px;
+        justify-content: center;
+    }
+
+    .tab-icon {
+        font-size: 13px;
+    }
+
+    /* ─── Main layout — stack vertically ─── */
+    main {
+        flex-direction: column;
+        padding: 8px;
+        gap: 8px;
+        overflow-y: auto;
+    }
+
+    /* ─── Panels ─── */
+    .panel {
+        border-radius: var(--radius-md);
+        min-height: 300px;
+    }
+
+    .panel-header {
+        padding: 8px 12px;
+    }
+
+    .panel-header h2 {
+        font-size: 13px;
+    }
+
+    .panel-badge {
+        font-size: 9px;
+        padding: 2px 8px;
+    }
+
+    /* ─── Crypto pipeline ─── */
+    .crypto-pipeline-info {
+        padding: 6px 10px;
+        font-size: 10px;
+        gap: 4px;
+    }
+
+    .pipeline-step {
+        padding: 2px 6px;
+    }
+
+    .pipeline-arrow {
+        font-size: 11px;
+    }
+
+    /* ─── Canvas ─── */
+    .canvas-container {
+        min-height: 200px;
+    }
+
+    .canvas-container canvas {
+        max-height: 250px;
+    }
+
+    .overlay-text {
+        font-size: 14px;
+    }
+
+    .overlay-subtext {
+        font-size: 11px;
+    }
+
+    .start-camera-btn {
+        padding: 8px 18px;
+        font-size: 13px;
+    }
+
+    /* ─── Divider ─── */
+    .panel-divider {
+        width: auto;
+        height: 32px;
+    }
+
+    .divider-arrow {
+        flex-direction: row;
+        font-size: 14px;
+    }
+
+    .divider-label {
+        font-size: 8px;
+        padding: 1px 5px;
+    }
+
+    /* ─── Audio canvas ─── */
+    .audio-canvas-container canvas {
+        max-height: 180px;
+    }
+
+    #audio-waveform-canvas {
+        min-height: 140px;
+    }
+
+    #audio-spectrum-canvas {
+        min-height: 70px;
+    }
+
+    /* ─── Config controls ─── */
+    .config-controls {
+        padding: 6px 12px 10px;
+        gap: 6px;
+    }
+
+    .config-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+    }
+
+    .config-label {
+        font-size: 11px;
+        min-width: auto;
+    }
+
+    .config-control {
+        width: 100%;
+    }
+
+    .config-select,
+    .config-input {
+        max-width: 100%;
+        font-size: 12px;
+        padding: 4px 8px;
+    }
+
+    .config-slider-value {
+        font-size: 12px;
+    }
+
+    /* ─── Stego info ─── */
+    .stego-info {
+        padding: 6px 12px 8px;
+    }
+
+    .stego-info-row {
+        font-size: 11px;
+    }
+
+    .stego-info-value {
+        font-size: 11px;
+    }
+
+    /* ─── Verify fields ─── */
+    .verify-fields {
+        padding: 8px 12px;
+    }
+
+    .verify-field {
+        padding: 5px 8px;
+    }
+
+    .field-label {
+        font-size: 10px;
+    }
+
+    .field-value {
+        font-size: 11px;
+    }
+
+    .field-hash {
+        max-width: 120px;
+    }
+
+    /* ─── Stats bar ─── */
+    .panel-stats {
+        padding: 0;
+    }
+
+    .stat {
+        padding: 4px 0;
+    }
+
+    .stat-label {
+        font-size: 8px;
+    }
+
+    .stat-value {
+        font-size: 13px;
+    }
+
+    /* ─── Verification log ─── */
+    .verify-log {
+        max-height: 100px;
+        padding: 0 12px 6px;
+    }
+
+    .log-entry {
+        font-size: 9px;
+        padding: 3px 6px;
+    }
+
+    .log-time {
+        font-size: 8px;
+        min-width: 50px;
+    }
+
+    /* ─── Footer ─── */
+    footer {
+        padding: 4px 12px;
+        flex-wrap: wrap;
+        gap: 4px;
+        font-size: 10px;
+    }
+
+    .footer-section {
+        gap: 4px;
+    }
+
+    .footer-value {
+        font-size: 10px;
+    }
+
+    /* ─── Docs tab ─── */
+    .docs-tab {
+        flex-direction: column;
+        height: auto;
+    }
+
+    .docs-sidebar {
+        width: 100%;
+        min-width: auto;
+        max-height: 200px;
+    }
+
+    .docs-content {
+        padding: 16px;
+    }
+
+    .docs-content h1 {
+        font-size: 22px;
+    }
+
+    .docs-content h2 {
+        font-size: 18px;
+    }
+
+    .docs-content h3 {
+        font-size: 15px;
+    }
+
+    /* ─── Sign indicator ─── */
+    .sign-indicator {
+        font-size: 10px;
+        padding: 3px 8px;
+    }
+
+    /* ─── Preset buttons ─── */
+    .preset-btn {
+        font-size: 10px;
+        padding: 4px 0;
+    }
+
+    /* ─── Toast ─── */
+    #toast-container {
+        bottom: 12px;
+        right: 12px;
+        left: 12px;
+    }
+
+    .toast {
+        min-width: auto;
+        max-width: 100%;
+        font-size: 0.78rem;
+    }
+
+    /* ─── Cheatsheet ─── */
+    .cheatsheet-panel {
+        padding: 20px 24px;
+        max-width: 320px;
+    }
+}

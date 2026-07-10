@@ -2,14 +2,14 @@
 //!
 //! Run with: cargo bench -p steganographer-core
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use steganographer_core::crypto::Signer;
-use steganographer_core::lsb_video::LsbVideo;
-use steganographer_core::lsb_audio::LsbAudio;
-use steganographer_core::spread_spectrum::SpreadSpectrumVideo;
-use steganographer_core::dct_video::DctVideo;
-use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use steganographer_core::audio::{AudioBuffer, AudioStegoModule};
+use steganographer_core::crypto::Signer;
+use steganographer_core::dct_video::DctVideo;
+use steganographer_core::lsb_audio::LsbAudio;
+use steganographer_core::lsb_video::LsbVideo;
+use steganographer_core::spread_spectrum::SpreadSpectrumVideo;
+use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
 fn bench_sign(c: &mut Criterion) {
     let signer = Signer::generate();
@@ -52,16 +52,24 @@ fn bench_lsb_extract(c: &mut Criterion) {
     let payload = signer.sign_frame(0, &[0u8; 1024], None);
     let mut data = vec![128u8; 640 * 480 * 3];
     let mut frame = VideoFrame {
-        width: 640, height: 480, stride: 640 * 3,
-        format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        width: 640,
+        height: 480,
+        stride: 640 * 3,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index: 0,
     };
     lsb.embed(&mut frame, Some(&payload)).unwrap();
 
     c.bench_function("lsb_video_extract_640x480", |b| {
         b.iter(|| {
             let frame = VideoFrame {
-                width: 640, height: 480, stride: 640 * 3,
-                format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+                width: 640,
+                height: 480,
+                stride: 640 * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 0,
             };
             lsb.extract(&frame).unwrap();
         });
@@ -78,8 +86,12 @@ fn bench_spread_spectrum(c: &mut Criterion) {
     c.bench_function("spread_spectrum_embed_1MB", |b| {
         b.iter(|| {
             let mut frame = VideoFrame {
-                width: 1024, height: 1024, stride: 1024 * 3,
-                format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+                width: 1024,
+                height: 1024,
+                stride: 1024 * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 0,
             };
             ss.embed(&mut frame, Some(&payload)).unwrap();
         });
@@ -95,8 +107,12 @@ fn bench_dct(c: &mut Criterion) {
     c.bench_function("dct_embed_320x320", |b| {
         b.iter(|| {
             let mut frame = VideoFrame {
-                width: 320, height: 320, stride: 320 * 3,
-                format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+                width: 320,
+                height: 320,
+                stride: 320 * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 0,
             };
             dct.embed(&mut frame, Some(&payload)).unwrap();
         });
@@ -113,8 +129,10 @@ fn bench_audio_lsb(c: &mut Criterion) {
     c.bench_function("lsb_audio_embed_1s", |b| {
         b.iter(|| {
             let mut buf = AudioBuffer {
-                channels: 1, sample_rate: 44100,
-                samples: &mut samples, frame_index: 0,
+                channels: 1,
+                sample_rate: 44100,
+                samples: &mut samples,
+                frame_index: 0,
             };
             lsb.embed(&mut buf, Some(&payload)).unwrap();
         });

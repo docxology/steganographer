@@ -41,7 +41,12 @@ pub enum HashAlgorithm {
 
 impl HashAlgorithm {
     /// Compute a 32-byte hash over the given data.
-    pub fn hash(&self, frame_index: u64, video_bytes: &[u8], audio_bytes: Option<&[u8]>) -> [u8; 32] {
+    pub fn hash(
+        &self,
+        frame_index: u64,
+        video_bytes: &[u8],
+        audio_bytes: Option<&[u8]>,
+    ) -> [u8; 32] {
         match self {
             HashAlgorithm::Blake3 => {
                 let mut hasher = blake3::Hasher::new();
@@ -144,7 +149,11 @@ impl SignaturePayload {
     pub fn from_bytes(buf: &[u8; Self::SERIALIZED_SIZE]) -> anyhow::Result<Self> {
         // Validate magic header
         if buf[0..4] != MAGIC {
-            anyhow::bail!("Invalid magic header: expected {:?}, got {:?}", &MAGIC, &buf[0..4]);
+            anyhow::bail!(
+                "Invalid magic header: expected {:?}, got {:?}",
+                &MAGIC,
+                &buf[0..4]
+            );
         }
         // Validate version
         let version = buf[4];
@@ -483,7 +492,8 @@ mod tests {
 
     #[test]
     fn test_sha256_sign_verify() {
-        let signer = Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Sha256);
+        let signer =
+            Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Sha256);
         let verifier = Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha256);
         let data = b"sha256 test data";
         let payload = signer.sign_frame(0, data, None);
@@ -492,8 +502,10 @@ mod tests {
 
     #[test]
     fn test_sha3_sign_verify() {
-        let signer = Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Sha3_256);
-        let verifier = Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha3_256);
+        let signer =
+            Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Sha3_256);
+        let verifier =
+            Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha3_256);
         let data = b"sha3 test data";
         let payload = signer.sign_frame(0, data, None);
         assert!(verifier.verify(&payload, data, None));
@@ -501,7 +513,8 @@ mod tests {
 
     #[test]
     fn test_wrong_hash_algo_fails() {
-        let signer = Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Blake3);
+        let signer =
+            Signer::with_hash_algorithm(SigningKey::generate(&mut OsRng), HashAlgorithm::Blake3);
         let verifier = Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha256);
         let data = b"cross-algo test";
         let payload = signer.sign_frame(0, data, None);

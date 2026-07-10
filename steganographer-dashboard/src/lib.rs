@@ -239,7 +239,7 @@ async fn api_docs_content(
 
 /// GET /api/config — return current config state.
 async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
-    let live = state.live_config.lock().expect("live_config lock poisoned");
+    let live = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
     serde_json::json!({
         "signing_backend": live.signing_backend,
         "identity": state.identity,
@@ -268,7 +268,7 @@ async fn api_config_post(
         new_cfg.overlay_text, new_cfg.sign_rate_ms, new_cfg.qr_scale, new_cfg.resolution
     );
 
-    let mut cfg = state.live_config.lock().expect("live_config lock poisoned");
+    let mut cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
     *cfg = new_cfg;
 
     serde_json::json!({ "status": "ok" }).to_string()
@@ -277,7 +277,7 @@ async fn api_config_post(
 /// GET /api/session — return session summary stats for export.
 async fn api_session(State(state): State<Arc<DashboardState>>) -> String {
     let uptime = state.session_start.elapsed();
-    let cfg = state.live_config.lock().expect("live_config lock poisoned").clone();
+    let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let metrics = state.metrics.to_json();
     serde_json::json!({
         "uptime_secs": uptime.as_secs_f64(),
