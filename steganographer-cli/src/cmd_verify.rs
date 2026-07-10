@@ -3,14 +3,12 @@
 //! Supports all stego types, payload encryption, error correction,
 //! multi-frame spreading, and configurable hash algorithms.
 
-use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Verifier};
 use steganographer_core::encryption;
 use steganographer_core::error_correction;
-use steganographer_core::video::{VideoFormat, VideoFrame};
 
 // ─── Options & Results ──────────────────────────────────────────────
 
@@ -46,6 +44,7 @@ pub struct VerifyResult {
 
 // ─── Public entry points ────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn run(
     config_path: &str,
     input: &str,

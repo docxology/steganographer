@@ -67,13 +67,16 @@ pub struct CombinedResult {
 /// Generate synthetic natural-ish pixel data for testing: each channel is a
 /// pseudo-random walk with clipping so that neighbouring values are correlated
 /// (as in real images) and LSB pair histograms are *not* equalised.
+#[allow(dead_code)]
 fn generate_natural_data(len: usize, seed: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(len);
     // simple LCG
     let mut state = seed.wrapping_add(0x9e3779b97f4a7c15);
     let mut val: u8 = 128;
     for _ in 0..len {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let noise = ((state >> 33) & 0x07) as i8; // small noise: -4..+3
         let new_val = val as i16 + noise as i16;
         val = new_val.clamp(0, 255) as u8;
@@ -84,11 +87,14 @@ fn generate_natural_data(len: usize, seed: u64) -> Vec<u8> {
 
 /// Embed random LSBs into a copy of the data to simulate full-capacity LSB
 /// steganography.
+#[allow(dead_code)]
 fn embed_lsb_random(data: &[u8], seed: u64) -> Vec<u8> {
     let mut out = data.to_vec();
     let mut state = seed.wrapping_add(0xdeadbeefcafef00d);
     for byte in &mut out {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bit = (state >> 63) as u8 & 1;
         *byte = (*byte & 0xFE) | bit;
     }
@@ -214,8 +220,8 @@ fn chi_squared_p_value(x: f64, df: u32) -> f64 {
 fn normal_upper_tail(z: f64) -> f64 {
     // Abramowitz & Stegun 7.1.26 approximation for the complementary error function.
     let z_abs = z.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * z_abs);
-    let exp_term = (-z_abs * z_abs / 2.0).exp();
+    let _t = 1.0 / (1.0 + 0.3275911 * z_abs);
+    let _exp_term = (-z_abs * z_abs / 2.0).exp();
     // erfc approximation scaled: P(Z>z) = 0.5*erfc(z/sqrt(2))
     // erfc(x) ≈ t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5)))) * e^(-x²)
     // where x = z/sqrt(2)
@@ -223,18 +229,10 @@ fn normal_upper_tail(z: f64) -> f64 {
     let t2 = 1.0 / (1.0 + 0.3275911 * x);
     let erfc = t2
         * (0.254829592
-            + t2 * (-0.284496736
-                + t2 * (1.421413741
-                    + t2 * (-1.453152027 + t2 * 1.061405429))))
+            + t2 * (-0.284496736 + t2 * (1.421413741 + t2 * (-1.453152027 + t2 * 1.061405429))))
         * (-x * x).exp();
     let upper = 0.5 * erfc;
-    if z >= 0.0 {
-        upper
-    } else {
-        1.0 - upper
-    }
-    .max(0.0)
-    .min(1.0)
+    if z >= 0.0 { upper } else { 1.0 - upper }.max(0.0).min(1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,9 +308,9 @@ pub fn sample_pair_detect(data: &[u8]) -> DetectionResult {
 
     // Reuse the chi-squared approach on the pair histogram of each byte
     // to get a cleaner signal.
-    let mut pair_hist = [0u64; 128]; // pair index = min(a,b)/2 concept
-    // Actually, SPA uses the "value pair" concept: (2i, 2i+1).
-    // We compute how many bytes fall into value 2i vs 2i+1.
+    let _pair_hist = [0u64; 128]; // pair index = min(a,b)/2 concept
+                                  // Actually, SPA uses the "value pair" concept: (2i, 2i+1).
+                                  // We compute how many bytes fall into value 2i vs 2i+1.
     let mut val_hist = [0u64; 256];
     for &b in data {
         val_hist[b as usize] += 1;
@@ -351,9 +349,8 @@ pub fn sample_pair_detect(data: &[u8]) -> DetectionResult {
     let embedded = imb_per_pair < 0.5 && close_ratio > 0.05;
 
     if embedded {
-        let confidence = ((0.5 - imb_per_pair) / 0.5 * 0.7
-            + (close_ratio.min(0.5) / 0.5) * 0.3)
-            .clamp(0.5, 1.0);
+        let confidence =
+            ((0.5 - imb_per_pair) / 0.5 * 0.7 + (close_ratio.min(0.5) / 0.5) * 0.3).clamp(0.5, 1.0);
         DetectionResult::new(
             true,
             confidence,
@@ -486,8 +483,7 @@ pub fn rs_analyze_with_group_size(data: &[u8], group_size: usize) -> DetectionRe
         } else {
             diff // fallback
         };
-        let confidence = ((diff - threshold) / (1.0 - threshold) * 0.8 + 0.2)
-            .clamp(0.5, 1.0);
+        let confidence = ((diff - threshold) / (1.0 - threshold) * 0.8 + 0.2).clamp(0.5, 1.0);
         DetectionResult::new(
             true,
             confidence,
@@ -783,7 +779,9 @@ mod tests {
         let mut partial = clean.clone();
         let mut state = 12345u64;
         for byte in partial.iter_mut() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             if (state >> 62) < 1 {
                 // ~25% of bytes
                 *byte = (*byte & 0xFE) | ((state >> 63) as u8 & 1);

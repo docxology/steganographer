@@ -121,8 +121,14 @@ pub fn encrypt(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let payload = match aad {
-        Some(a) => Payload { msg: plaintext, aad: a },
-        None => Payload { msg: plaintext, aad: &[] },
+        Some(a) => Payload {
+            msg: plaintext,
+            aad: a,
+        },
+        None => Payload {
+            msg: plaintext,
+            aad: &[],
+        },
     };
 
     cipher
@@ -151,8 +157,14 @@ pub fn decrypt(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let payload = match aad {
-        Some(a) => Payload { msg: ciphertext, aad: a },
-        None => Payload { msg: ciphertext, aad: &[] },
+        Some(a) => Payload {
+            msg: ciphertext,
+            aad: a,
+        },
+        None => Payload {
+            msg: ciphertext,
+            aad: &[],
+        },
     };
 
     cipher

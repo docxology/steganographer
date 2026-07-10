@@ -105,12 +105,8 @@ impl TextOverlay {
         // Compute origin based on position
         let (start_x, start_y) = match self.position {
             OverlayPosition::TopLeft => (margin, margin),
-            OverlayPosition::TopRight => {
-                (frame.width.saturating_sub(text_w + margin), margin)
-            }
-            OverlayPosition::BottomLeft => {
-                (margin, frame.height.saturating_sub(text_h + margin))
-            }
+            OverlayPosition::TopRight => (frame.width.saturating_sub(text_w + margin), margin),
+            OverlayPosition::BottomLeft => (margin, frame.height.saturating_sub(text_h + margin)),
             OverlayPosition::BottomRight => (
                 frame.width.saturating_sub(text_w + margin),
                 frame.height.saturating_sub(text_h + margin),
@@ -135,7 +131,8 @@ impl TextOverlay {
                         // Scale up the pixel
                         for sy in 0..self.scale as u32 {
                             for sx in 0..self.scale as u32 {
-                                let px = start_x + ci as u32 * char_w + col * self.scale as u32 + sx;
+                                let px =
+                                    start_x + ci as u32 * char_w + col * self.scale as u32 + sx;
                                 let py = start_y + row * self.scale as u32 + sy;
                                 if px < frame.width && py < frame.height {
                                     let offset = (py * frame.stride + px * bpp as u32) as usize;
@@ -270,7 +267,10 @@ mod tests {
 
         // Check that some pixels were written (text starts at margin=4, scale=2)
         // So the first rendered row is at y=4
-        assert!(data.iter().any(|&b| b != 0), "Overlay should write pixels somewhere in the frame");
+        assert!(
+            data.iter().any(|&b| b != 0),
+            "Overlay should write pixels somewhere in the frame"
+        );
     }
 
     #[test]
@@ -325,8 +325,8 @@ mod tests {
             frame_index: 0,
         };
 
-        let mut overlay = TextOverlay::new("RED".to_string(), OverlayPosition::TopLeft)
-            .with_color(255, 0, 0);
+        let mut overlay =
+            TextOverlay::new("RED".to_string(), OverlayPosition::TopLeft).with_color(255, 0, 0);
         overlay.embed(&mut frame, None).unwrap();
 
         // Find first non-zero pixel and check it's red
@@ -343,9 +343,15 @@ mod tests {
     #[test]
     fn test_position_from_str() {
         assert_eq!(OverlayPosition::parse("top-left"), OverlayPosition::TopLeft);
-        assert_eq!(OverlayPosition::parse("bottom_right"), OverlayPosition::BottomRight);
+        assert_eq!(
+            OverlayPosition::parse("bottom_right"),
+            OverlayPosition::BottomRight
+        );
         assert_eq!(OverlayPosition::parse("CENTER"), OverlayPosition::Center);
-        assert_eq!(OverlayPosition::parse("unknown"), OverlayPosition::BottomRight);
+        assert_eq!(
+            OverlayPosition::parse("unknown"),
+            OverlayPosition::BottomRight
+        );
     }
 
     #[test]
@@ -369,10 +375,17 @@ mod tests {
     fn test_template_timestamp() {
         let expanded = TextOverlay::expand_template("TS:{timestamp}", 0);
         // Should be something like "TS:2026-03-07 20:25:52"
-        assert!(expanded.starts_with("TS:20"), "Should start with year prefix, got: {}", expanded);
+        assert!(
+            expanded.starts_with("TS:20"),
+            "Should start with year prefix, got: {}",
+            expanded
+        );
         assert!(expanded.contains('-'), "Should contain date separator");
         assert!(expanded.contains(':'), "Should contain time separator");
-        assert!(!expanded.contains("{timestamp}"), "Placeholder should be replaced");
+        assert!(
+            !expanded.contains("{timestamp}"),
+            "Placeholder should be replaced"
+        );
     }
 
     #[test]
@@ -386,13 +399,16 @@ mod tests {
 
     #[test]
     fn test_template_multiple() {
-        let expanded = TextOverlay::expand_template(
-            "{date} F{frame_index} {time}",
-            7,
+        let expanded = TextOverlay::expand_template("{date} F{frame_index} {time}", 7);
+        assert!(
+            !expanded.contains("{date}"),
+            "date placeholder should be replaced"
         );
-        assert!(!expanded.contains("{date}"), "date placeholder should be replaced");
         assert!(expanded.contains("F7"), "frame_index should be 7");
-        assert!(!expanded.contains("{time}"), "time placeholder should be replaced");
+        assert!(
+            !expanded.contains("{time}"),
+            "time placeholder should be replaced"
+        );
 
         // No placeholders should pass through unchanged
         let plain = TextOverlay::expand_template("HELLO WORLD", 0);

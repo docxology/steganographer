@@ -55,7 +55,11 @@ pub struct SignatureShard {
 ///
 /// # Returns
 /// A vector of N shards, each to be embedded in a separate frame.
-pub fn split(payload: &SignaturePayload, n: u8, base_frame_index: u64) -> anyhow::Result<Vec<SignatureShard>> {
+pub fn split(
+    payload: &SignaturePayload,
+    n: u8,
+    base_frame_index: u64,
+) -> anyhow::Result<Vec<SignatureShard>> {
     if n < 2 {
         anyhow::bail!("Number of shards must be at least 2, got {}", n);
     }
@@ -135,11 +139,7 @@ pub fn reconstruct(shards: &[SignatureShard]) -> anyhow::Result<SignaturePayload
 
     let expected_total = shards[0].total_shards as usize;
     if shards.len() != expected_total {
-        anyhow::bail!(
-            "Expected {} shards, got {}",
-            expected_total,
-            shards.len()
-        );
+        anyhow::bail!("Expected {} shards, got {}", expected_total, shards.len());
     }
 
     // Verify all shards have the same total_shards

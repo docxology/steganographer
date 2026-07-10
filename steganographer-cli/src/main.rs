@@ -101,6 +101,9 @@ enum Commands {
         /// Path to signing key file (hex-encoded 32-byte Ed25519 private key)
         #[arg(long)]
         signing_key: Option<String>,
+        /// Batch mode: process all files in the input directory
+        #[arg(long)]
+        dir: bool,
     },
 
     /// Verify steganographic signatures in a media file
@@ -240,7 +243,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Encode {
             input, output, stego_type, bits, format,
             input_format, encrypt, encryption_key, encryption_key_file,
-            ecc, ecc_parity, spread, hash_algorithm, signing_key,
+            ecc, ecc_parity, spread, hash_algorithm, signing_key, dir,
         } => {
             let opts = cmd_encode::EncodeOptions {
                 encrypt,
@@ -253,7 +256,11 @@ fn main() -> anyhow::Result<()> {
                 signing_key,
                 input_format,
             };
-            cmd_encode::run(&cli.config, &input, &output, &stego_type, bits, &format, &opts)
+            if dir {
+                cmd_encode::batch_process(&cli.config, &input, &output, &stego_type, bits, &format, &opts)
+            } else {
+                cmd_encode::run(&cli.config, &input, &output, &stego_type, bits, &format, &opts)
+            }
         }
 
         Commands::Verify {

@@ -147,8 +147,7 @@ impl InfoBar {
 
         // 5. Label
         if !self.label.is_empty() {
-            let _cx =
-                self.render_text_small(frame, cursor_x, text_y, &self.label, TEXT_SECONDARY);
+            let _cx = self.render_text_small(frame, cursor_x, text_y, &self.label, TEXT_SECONDARY);
         }
 
         // 6. Second row: hash excerpt + signature status
@@ -157,9 +156,15 @@ impl InfoBar {
 
         if let Some(payload) = sig {
             // Show hash excerpt
-            let hash_hex: String = payload.hash.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+            let hash_hex: String = payload
+                .hash
+                .iter()
+                .take(8)
+                .map(|b| format!("{:02x}", b))
+                .collect();
             let hash_text = format!("H:{}", hash_hex);
-            cursor_x2 = self.render_text_small(frame, cursor_x2, text_y2, &hash_text, TEXT_SECONDARY);
+            cursor_x2 =
+                self.render_text_small(frame, cursor_x2, text_y2, &hash_text, TEXT_SECONDARY);
             cursor_x2 += 8;
 
             // Show "SIGNED" indicator
@@ -167,7 +172,8 @@ impl InfoBar {
             cursor_x2 += 8;
 
             // Show stego type indicator
-            let _cx = self.render_text_small(frame, cursor_x2, text_y2, "LSB+OVERLAY", TEXT_SECONDARY);
+            let _cx =
+                self.render_text_small(frame, cursor_x2, text_y2, "LSB+OVERLAY", TEXT_SECONDARY);
         }
 
         // 7. Barcode from hash (right portion of bar)
@@ -293,7 +299,12 @@ impl InfoBar {
         };
 
         // Encode frame index + hash excerpt as QR content
-        let hash_hex: String = payload.hash.iter().take(16).map(|b| format!("{:02x}", b)).collect();
+        let hash_hex: String = payload
+            .hash
+            .iter()
+            .take(16)
+            .map(|b| format!("{:02x}", b))
+            .collect();
         let qr_content = format!("F:{} H:{}", payload.frame_index, hash_hex);
 
         let code = match QrCode::new(qr_content.as_bytes()) {
@@ -421,7 +432,10 @@ mod tests {
         // Verify some pixels changed in the bar region
         let bar_top = 480 - 80;
         let bar_region = &data[(bar_top * 640 * 3) as usize..];
-        assert!(bar_region.iter().any(|&b| b != 200), "Bar should modify pixels");
+        assert!(
+            bar_region.iter().any(|&b| b != 200),
+            "Bar should modify pixels"
+        );
     }
 
     #[test]
@@ -485,6 +499,9 @@ mod tests {
         let offset = (qr_region_y * 800 * 3 + qr_region_x * 3) as usize;
         // At least some pixels in that region should be non-zero
         let region = &data[offset..offset + 200.min(data.len() - offset)];
-        assert!(region.iter().any(|&b| b != 0), "QR region should have rendered pixels");
+        assert!(
+            region.iter().any(|&b| b != 0),
+            "QR region should have rendered pixels"
+        );
     }
 }

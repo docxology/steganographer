@@ -52,11 +52,7 @@ impl LsbVideo {
         // Extract all LSBs
         let all_bits: Vec<u8> = data
             .iter()
-            .flat_map(|byte| {
-                (0..bits_per_byte)
-                    .rev()
-                    .map(move |i| (byte >> i) & 1)
-            })
+            .flat_map(|byte| (0..bits_per_byte).rev().map(move |i| (byte >> i) & 1))
             .collect();
 
         if all_bits.len() < 32 {

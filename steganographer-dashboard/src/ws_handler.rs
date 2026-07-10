@@ -147,7 +147,7 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
 
         // Update LSB bits from live config if changed
         {
-            let cfg = state.live_config.lock().expect("live_config lock poisoned");
+            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
             if cfg.lsb_bits != current_lsb_bits {
                 current_lsb_bits = cfg.lsb_bits;
                 lsb = LsbVideo::new(current_lsb_bits);
@@ -189,7 +189,7 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         let b64_frame = base64_encode(&encoded_jpeg);
 
         {
-            let mut last = state.last_encoded_frame.lock().expect("last_encoded_frame lock poisoned");
+            let mut last = state.last_encoded_frame.lock().unwrap_or_else(|e| e.into_inner());
             *last = Some(EncodedFrame {
                 rgb_data,
                 width,
@@ -251,7 +251,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         }
 
         let encoded = {
-            let last = state.last_encoded_frame.lock().expect("last_encoded_frame lock poisoned");
+            let last = state.last_encoded_frame.lock().unwrap_or_else(|e| e.into_inner());
             last.clone()
         };
 
@@ -269,7 +269,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
 
             // Update LSB bits from live config if changed
             {
-                let cfg = state.live_config.lock().expect("live_config lock poisoned");
+                let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
                 if cfg.lsb_bits != current_lsb_bits {
                     current_lsb_bits = cfg.lsb_bits;
                     lsb = LsbVideo::new(current_lsb_bits);
@@ -475,7 +475,7 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
 
         // Store for decode handler
         {
-            let mut last = state.last_encoded_audio.lock().expect("last_encoded_audio lock poisoned");
+            let mut last = state.last_encoded_audio.lock().unwrap_or_else(|e| e.into_inner());
             *last = Some(EncodedAudioChunk {
                 samples: samples.clone(),
                 sample_rate,
@@ -533,7 +533,7 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
         }
 
         let encoded = {
-            let last = state.last_encoded_audio.lock().expect("last_encoded_audio lock poisoned");
+            let last = state.last_encoded_audio.lock().unwrap_or_else(|e| e.into_inner());
             last.clone()
         };
 

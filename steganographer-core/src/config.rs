@@ -282,10 +282,7 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
 /// Resolve a key from either an inline hex string or a file path.
 ///
 /// Priority: file > inline hex.
-pub fn resolve_key(
-    inline_hex: Option<&str>,
-    key_file: Option<&str>,
-) -> anyhow::Result<[u8; 32]> {
+pub fn resolve_key(inline_hex: Option<&str>, key_file: Option<&str>) -> anyhow::Result<[u8; 32]> {
     let hex_str = if let Some(path) = key_file {
         std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Cannot read key file '{}': {}", path, e))?
@@ -384,7 +381,10 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         let video = cfg.video.unwrap();
         assert_eq!(video.input.r#type, "device");
         assert_eq!(video.input.backend.as_deref(), Some("avfoundation"));
-        assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay", "info_bar"]);
+        assert_eq!(
+            video.stego.pipeline,
+            vec!["lsb_signature", "overlay", "info_bar"]
+        );
         assert_eq!(video.stego.lsb_signature.as_ref().unwrap().bits, 2);
         assert_eq!(
             video.stego.overlay.as_ref().unwrap().text.as_deref(),
@@ -405,7 +405,9 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     fn test_hex_decode_key() {
         let cfg = LsbSignatureConfig {
             bits: 1,
-            key: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+            key: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
             key_file: None,
         };
         let key = cfg.key_bytes().unwrap();

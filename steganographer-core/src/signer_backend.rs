@@ -94,10 +94,7 @@ impl SignerBackend for Ed25519Backend {
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(signature);
         let sig = Signature::from_bytes(&sig_bytes);
-        self.signing_key
-            .verifying_key()
-            .verify(data, &sig)
-            .is_ok()
+        self.signing_key.verifying_key().verify(data, &sig).is_ok()
     }
 
     fn public_key_bytes(&self) -> Vec<u8> {
@@ -131,9 +128,7 @@ impl Ed25519Verifier {
     /// Import from raw 32-byte public key.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
         let key = VerifyingKey::from_bytes(bytes)?;
-        Ok(Self {
-            verifying_key: key,
-        })
+        Ok(Self { verifying_key: key })
     }
 
     /// Verify signature over data.
@@ -156,9 +151,7 @@ impl Ed25519Verifier {
 mod ethereum {
     use super::*;
     use k256::ecdsa::{
-        signature::hazmat::PrehashSigner,
-        signature::hazmat::PrehashVerifier,
-        Signature,
+        signature::hazmat::PrehashSigner, signature::hazmat::PrehashVerifier, Signature,
         SigningKey as EthSigningKey, VerifyingKey as EthVerifyingKey,
     };
     use sha3::{Digest, Keccak256};
@@ -277,9 +270,7 @@ mod ethereum {
         pub fn from_compressed(bytes: &[u8]) -> Result<Self> {
             let key = EthVerifyingKey::from_sec1_bytes(bytes)
                 .map_err(|e| anyhow::anyhow!("Invalid secp256k1 pubkey: {}", e))?;
-            Ok(Self {
-                verifying_key: key,
-            })
+            Ok(Self { verifying_key: key })
         }
 
         /// Verify signature over data.
@@ -343,10 +334,7 @@ mod ethereum {
             let backend = EthereumBackend::generate();
             let key_bytes = backend.signing_key_bytes();
             let restored = EthereumBackend::from_bytes(&key_bytes).unwrap();
-            assert_eq!(
-                backend.public_key_bytes(),
-                restored.public_key_bytes()
-            );
+            assert_eq!(backend.public_key_bytes(), restored.public_key_bytes());
         }
 
         #[test]
@@ -372,7 +360,6 @@ mod ethereum {
 // Re-export Ethereum types when feature is enabled
 #[cfg(feature = "ethereum")]
 pub use ethereum::{EthereumBackend, EthereumVerifier};
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests for Ed25519Backend

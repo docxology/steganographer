@@ -4,16 +4,13 @@
 //! `steganographer analyze` — steganalysis (chi-squared test).
 //! `steganographer derive` — derive keys from a master secret.
 
-use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use serde::Serialize;
-use steganographer_core::audio::AudioStegoModule;
-use steganographer_core::config::resolve_key;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Signer};
 use steganographer_core::encryption::{self, EncryptionKey};
 use steganographer_core::error_correction;
-use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+use steganographer_core::video::{VideoFormat, VideoFrame};
 
 // ─── Options & Results ──────────────────────────────────────────────
 
@@ -985,4 +982,53 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
                 .map_err(|e| anyhow::anyhow!("Invalid hex at position {}: {}", i, e))
         })
         .collect()
+}
+
+/// Batch process a directory of files.
+///
+/// Encodes or verifies all files in the given directory.
+pub fn batch_process(
+    config_path: &str,
+    input_dir: &str,
+    output_dir: &str,
+    stego_type: &str,
+    bits: u8,
+    format: &str,
+    opts: &EncodeOptions,
+) -> anyhow::Result<()> {
+    log::info!("Batch processing: {} -> {}", input_dir, output_dir);
+    std::fs::create_dir_all(output_dir)?;
+
+    let mut success_count = 0u32;
+    let mut error_count = 0u32;
+
+    let entries = std::fs::read_dir(input_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let input_path = path.to_string_lossy().to_string();
+        let output_path = format!("{}/{}", output_dir, path.file_name().unwrap_or_default().to_string_lossy());
+
+        log::info!("Processing: {}", input_path);
+        match run(config_path, &input_path, &output_path, stego_type, bits, format, opts) {
+            Ok(_) => {
+                success_count += 1;
+                log::info!("✓ {}", input_path);
+            }
+            Err(e) => {
+                error_count += 1;
+                log::error!("✗ {}: {}", input_path, e);
+            }
+        }
+    }
+
+    println!("Batch complete: {} succeeded, {} failed", success_count, error_count);
+    if error_count > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
