@@ -399,3 +399,81 @@ pub fn extract_from_source(
     source_bin.set_state(gstreamer::State::Null)?;
     Ok(results)
 }
+
+/// Process a video container file (MP4, MKV, AVI) through steganography.
+///
+/// Uses `decodebin` to automatically detect the container format and decode
+/// to raw RGB frames, processes them through the stego module, then re-encodes
+/// with `encodebin` or writes as raw frames.
+///
+/// # Arguments
+/// * `input_path` — Path to input video file (MP4, MKV, AVI, etc.)
+/// * `output_path` — Path to output file
+/// * `stego` — The steganography module to apply
+/// * `signer` — Optional signer for generating frame signatures
+/// * `max_frames` — Optional limit on frames to process
+pub fn process_video_file(
+    input_path: &str,
+    output_path: &str,
+    stego: Box<dyn VideoStegoModule>,
+    signer: Option<&Signer>,
+    max_frames: Option<u64>,
+) -> anyhow::Result<()> {
+    log::info!("Processing video file: {} -> {}", input_path, output_path);
+
+    // Use decodebin for automatic format detection
+    let source_str = format!(
+        "filesrc location={} ! decodebin ! videoconvert ! video/x-raw,format=RGB ! queue max-size-buffers=10 ! appsink name=sink emit-signals=false sync=false max-buffers=5 drop=true",
+        input_path
+    );
+
+    // For output, use encodebin or filesink with raw
+    let sink_str = format!(
+        "appsrc name=src format=time is-live=true ! queue max-size-buffers=10 ! videoconvert ! x264enc ! mp4mux ! filesink location={}",
+        output_path
+    );
+
+    let config = VideoFilterConfig {
+        source_pipeline: source_str,
+        sink_pipeline: sink_str,
+    };
+
+    // Reuse the existing filter pipeline
+    run_video_filter(&config, stego, signer, max_frames)?;
+
+    log::info!("Video file processing complete");
+    Ok(())
+}
+
+/// Process an audio container file (WAV, MP3, FLAC) through steganography.
+///
+/// Uses `decodebin` for automatic format detection and decodes to
+/// raw S16LE PCM samples.
+pub fn process_audio_file(
+    input_path: &str,
+    output_path: &str,
+    stego: &mut dyn steganographer_core::audio::AudioStegoModule,
+    signer: Option<&Signer>,
+    max_buffers: Option<u64>,
+) -> anyhow::Result<()> {
+    log::info!("Processing audio file: {} -> {}", input_path, output_path);
+
+    let source_str = format!(
+        "filesrc location={} ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,channels=1,rate=44100 ! queue ! appsink name=sink",
+        input_path
+    );
+    let sink_str = format!(
+        "appsrc name=src ! queue ! audioconvert ! wavenc ! filesink location={}",
+        output_path
+    );
+
+    let config = crate::audio_filter::AudioFilterConfig {
+        source_pipeline: source_str,
+        sink_pipeline: sink_str,
+    };
+
+    crate::audio_filter::run_audio_filter(&config, stego, signer, max_buffers)?;
+
+    log::info!("Audio file processing complete");
+    Ok(())
+}
