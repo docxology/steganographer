@@ -23,6 +23,10 @@ fn test_live_config_serialization_roundtrip() {
         sign_rate_ms: 500,
         qr_scale: 25,
         resolution: "1280x720".into(),
+        stego_type: "lsb".into(),
+        hash_algorithm: "blake3".into(),
+        encrypt: false,
+        ecc: false,
     };
     let json = serde_json::to_string(&cfg).expect("serialize");
     let parsed: LiveConfig = serde_json::from_str(&json).expect("deserialize");
@@ -108,6 +112,10 @@ fn test_live_config_full_json_roundtrip() {
         sign_rate_ms: 2500,
         qr_scale: 50,
         resolution: "1920x1080".into(),
+        stego_type: "lsb".into(),
+        hash_algorithm: "blake3".into(),
+        encrypt: false,
+        ecc: false,
     };
     let json = serde_json::to_string(&original).unwrap();
     let restored: LiveConfig = serde_json::from_str(&json).unwrap();
@@ -177,6 +185,10 @@ fn test_live_config_qr_scale_resolution_roundtrip() {
         sign_rate_ms: 1000,
         qr_scale: 75,
         resolution: "1920x1080".into(),
+        stego_type: "lsb".into(),
+        hash_algorithm: "blake3".into(),
+        encrypt: false,
+        ecc: false,
     };
     let json = serde_json::to_string(&cfg).expect("serialize");
     let parsed: LiveConfig = serde_json::from_str(&json).expect("deserialize");

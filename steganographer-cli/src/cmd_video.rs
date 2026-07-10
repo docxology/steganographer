@@ -36,8 +36,18 @@ pub fn run(
     log::info!("Stego pipeline has {} modules", stego_modules.len());
 
     // Create signer if LSB signature is configured
-    let signer = if video_cfg.stego.lsb_signature.is_some() {
-        Some(steganographer_core::crypto::Signer::generate())
+    let hash_algo = steganographer_core::crypto::HashAlgorithm::parse(
+        cfg.global.hash_algorithm_name()
+    );
+    let signer = if video_cfg.stego.lsb_signature.is_some()
+        || video_cfg.stego.pipeline.iter().any(|s| s == "spread_spectrum" || s == "dct")
+    {
+        let s = steganographer_core::crypto::Signer::with_hash_algorithm(
+            ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+            hash_algo,
+        );
+        log::info!("Hash algorithm: {}", hash_algo.name());
+        Some(s)
     } else {
         None
     };
@@ -143,6 +153,21 @@ fn build_video_stego_chain(
                 let lsb = steganographer_core::lsb_video::LsbVideo::new(lsb_cfg.bits);
                 modules.push(Box::new(lsb));
                 log::info!("Added LSB video module ({} bits)", lsb_cfg.bits);
+            }
+            "spread_spectrum" => {
+                let lsb_cfg = stego_cfg
+                    .lsb_signature
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'spread_spectrum' but no [lsb_signature] config for key"))?;
+                let key = lsb_cfg.key_bytes()?;
+                let ss = steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key(key);
+                modules.push(Box::new(ss));
+                log::info!("Added spread-spectrum video module");
+            }
+            "dct" => {
+                let dct = steganographer_core::dct_video::DctVideo::default();
+                modules.push(Box::new(dct));
+                log::info!("Added DCT video module");
             }
             "overlay" => {
                 let ov_cfg = stego_cfg

@@ -49,6 +49,18 @@ pub struct LiveConfig {
     /// Video resolution string (e.g. "640x480").
     #[serde(default = "default_resolution")]
     pub resolution: String,
+    /// Steganography type: "lsb", "spread_spectrum", "dct".
+    #[serde(default = "default_stego_type", rename = "stegoType")]
+    pub stego_type: String,
+    /// Hash algorithm: "blake3", "sha256", "sha3-256".
+    #[serde(default = "default_hash_algo", rename = "hashAlgorithm")]
+    pub hash_algorithm: String,
+    /// Enable payload encryption.
+    #[serde(default, rename = "encrypt")]
+    pub encrypt: bool,
+    /// Enable error correction.
+    #[serde(default, rename = "ecc")]
+    pub ecc: bool,
 }
 
 fn default_opacity() -> f64 { 1.0 }
@@ -58,6 +70,8 @@ fn default_overlay_text() -> String { "CONFIDENTIAL".into() }
 fn default_sign_rate() -> u32 { 1000 }
 fn default_qr_scale() -> u32 { 10 }
 fn default_resolution() -> String { "640x480".into() }
+fn default_stego_type() -> String { "lsb".into() }
+fn default_hash_algo() -> String { "blake3".into() }
 
 impl Default for LiveConfig {
     fn default() -> Self {
@@ -69,6 +83,10 @@ impl Default for LiveConfig {
             sign_rate_ms: default_sign_rate(),
             qr_scale: default_qr_scale(),
             resolution: default_resolution(),
+            stego_type: default_stego_type(),
+            hash_algorithm: default_hash_algo(),
+            encrypt: false,
+            ecc: false,
         }
     }
 }
@@ -231,6 +249,10 @@ async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
         "lsb_bits": live.lsb_bits,
         "overlay_text": live.overlay_text,
         "sign_rate_ms": live.sign_rate_ms,
+        "stego_type": live.stego_type,
+        "hash_algorithm": live.hash_algorithm,
+        "encrypt": live.encrypt,
+        "ecc": live.ecc,
     })
     .to_string()
 }
