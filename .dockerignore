@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+
+# Cargo lock is needed for builds but not for library crates
+# Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+
+# OS files
+.DS_Store
+Thesaurus.txt
+
+# Keys and output (sensitive)
+keys/
+output/
+*.key
+*.pub
+!config/example.toml
+
+# Docker
+.docker/

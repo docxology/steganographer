@@ -24,4 +24,13 @@ env_logger = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rand = { workspace = true }
+image = { workspace = true }
+hound = "3.5"
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
 gstreamer = { version = "0.23", features = ["v1_22"] }
+
+[build-dependencies]
+clap = { workspace = true }
+clap_complete = "4"
