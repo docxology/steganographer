@@ -13,9 +13,10 @@ mod cmd_video;
     about = "Real-time steganographic watermarking for video and audio streams",
     version,
     long_about = "Steganographer embeds cryptographic signatures and visible watermarks into \
-                   live video/audio streams using LSB steganography, text overlays, and \
-                   BLAKE3+Ed25519 signing. Supports GStreamer pipelines for real-time processing \
-                   and offline file encoding/verification."
+                   live video/audio streams using LSB steganography, spread-spectrum modulation, \
+                   DCT-domain embedding, and text overlays. Supports GStreamer pipelines for \
+                   real-time processing and offline file encoding/verification. \
+                   BLAKE3/SHA-256/SHA-3 hashing + Ed25519/secp256k1 signing."
 )]
 pub struct Cli {
     /// Path to configuration file (TOML)
@@ -38,52 +39,36 @@ pub struct Cli {
 enum Commands {
     /// Run live video pipeline: capture → steganography → virtual device
     Video {
-        /// GStreamer source element (e.g., "v4l2src", "avfvideosrc", "videotestsrc")
         #[arg(long)]
         source: Option<String>,
-
-        /// GStreamer sink element (e.g., "autovideosink", "v4l2sink device=/dev/video42")
         #[arg(long)]
         sink: Option<String>,
-
-        /// Maximum frames to process (omit for unlimited)
         #[arg(long)]
         max_frames: Option<u64>,
     },
 
     /// Run live audio pipeline: capture → steganography → virtual device
     Audio {
-        /// GStreamer source element
         #[arg(long)]
         source: Option<String>,
-
-        /// GStreamer sink element
         #[arg(long)]
         sink: Option<String>,
-
-        /// Maximum audio buffers to process
         #[arg(long)]
         max_buffers: Option<u64>,
     },
 
     /// Encode steganographic data into a file (offline)
     Encode {
-        /// Input media file path
         #[arg(long, short)]
         input: String,
-
-        /// Output media file path
         #[arg(long, short)]
         output: String,
-
-        /// Type of steganography: "lsb_video", "lsb_audio", "overlay"
+        /// Type of steganography: "lsb_video", "lsb_audio", "spread_spectrum_video", "dct_video"
         #[arg(long, default_value = "lsb_video")]
         stego_type: String,
-
         /// LSB bits per sample/pixel (1-4)
         #[arg(long, default_value = "1")]
         bits: u8,
-
         /// Output format: "plain" (human-readable) or "json" (machine-readable)
         #[arg(long, default_value = "plain")]
         format: String,
@@ -91,18 +76,17 @@ enum Commands {
 
     /// Verify steganographic signatures in a media file
     Verify {
-        /// Input media file path
         #[arg(long, short)]
         input: String,
-
         /// Public key (hex-encoded) for signature verification
         #[arg(long)]
         public_key: Option<String>,
-
-        /// Type of steganography to verify: "lsb_video", "lsb_audio"
+        /// Type of steganography to verify: "lsb_video", "lsb_audio", "spread_spectrum_video", "dct_video"
         #[arg(long, default_value = "lsb_video")]
         stego_type: String,
-
+        /// Embedding key (hex-encoded, 32 bytes) for audio/spread-spectrum extraction
+        #[arg(long)]
+        embedding_key: Option<String>,
         /// Output format: "plain" (human-readable) or "json" (machine-readable)
         #[arg(long, default_value = "plain")]
         format: String,
@@ -110,17 +94,29 @@ enum Commands {
 
     /// Generate a new Ed25519 signing key pair
     Keygen {
-        /// Output path for the key file (writes `<output>.pub` and `<output>.key`)
         #[arg(long, short, default_value = "steganographer")]
         output: String,
     },
 
+    /// Report steganographic capacity of a media file
+    Info {
+        #[arg(long, short)]
+        input: String,
+        /// Type of steganography to report capacity for
+        #[arg(long, default_value = "lsb_video")]
+        stego_type: String,
+        /// LSB bits per sample/pixel (1-4)
+        #[arg(long, default_value = "1")]
+        bits: u8,
+        /// Output format: "plain" (human-readable) or "json" (machine-readable)
+        #[arg(long, default_value = "plain")]
+        format: String,
+    },
+
     /// Launch the live round-trip verification dashboard (web GUI)
     Dashboard {
-        /// Port to serve the dashboard on
         #[arg(long, short, default_value = "8080")]
         port: u16,
-
         /// Signing backend: "ed25519" or "ethereum"
         #[arg(long, default_value = "ed25519")]
         backend: String,
@@ -128,7 +124,6 @@ enum Commands {
 
     /// Validate a TOML configuration file without running any pipeline
     Config {
-        /// Action to perform: "check"
         #[arg(default_value = "check")]
         action: String,
     },
@@ -137,7 +132,6 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging (--quiet suppresses all log output)
     let log_level = if cli.quiet {
         log::LevelFilter::Off
     } else {
@@ -184,12 +178,27 @@ fn main() -> anyhow::Result<()> {
             input,
             public_key,
             stego_type,
+            embedding_key,
             format,
-        } => cmd_verify::run(&cli.config, &input, public_key.as_deref(), &stego_type, &format),
+        } => cmd_verify::run_with_key(
+            &cli.config,
+            &input,
+            public_key.as_deref(),
+            &stego_type,
+            &format,
+            embedding_key.as_deref(),
+        ),
 
         Commands::Keygen { output } => {
             cmd_encode::keygen(&output)
         }
+
+        Commands::Info {
+            input,
+            stego_type,
+            bits,
+            format,
+        } => cmd_encode::info(&input, &stego_type, bits, &format),
 
         Commands::Config { action } => {
             match action.as_str() {
@@ -201,6 +210,12 @@ fn main() -> anyhow::Result<()> {
                             if cfg.audio.is_some() { sections.push("audio"); }
                             println!("✓ Configuration valid: {}", cli.config);
                             println!("  Sections: {}", sections.join(", "));
+                            if let Some(ref algo) = cfg.global.hash_algorithm {
+                                println!("  Hash algorithm: {}", algo);
+                            }
+                            if let Some(ref kf) = cfg.global.key_file {
+                                println!("  Key file: {}", kf);
+                            }
                             Ok(())
                         }
                         Err(e) => {

@@ -6,6 +6,11 @@
 [global]
 # Log level: "trace", "debug", "info", "warn", "error"
 log_level = "info"
+# Hash algorithm: "blake3" (default), "sha256", "sha3-256"
+# hash_algorithm = "blake3"
+# Path to a file containing the LSB embedding key (hex, 64 chars = 32 bytes).
+# If set, overrides the inline `key` field in LSB configs.
+# key_file = "keys/stego.key"
 
 # ─── Video Pipeline ───────────────────────────────────────────────────────────
 
@@ -19,9 +24,19 @@ opacity = 1.0
 
 [video.pipeline.payload]
 type = "signature"
-size = 104
+size = 109
 # Signing backend: "ed25519" (default) or "ethereum" (requires --features ethereum)
 signing_backend = "ed25519"
+# Enable payload encryption (ChaCha20-Poly1305 AEAD)
+# encrypt = true
+# Encryption key (hex-encoded 32 bytes). If omitted with encrypt=true, random key is generated.
+# encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Path to encryption key file (overrides encryption_key)
+# encryption_key_file = "keys/encryption.key"
+# Error correction: "none" (default) or "reed_solomon"
+# error_correction = "reed_solomon"
+# Multi-frame signature spreading: spread one signature across N frames (1 = no spreading)
+# multi_frame_spread = 1
 
 [video.input]
 # Input type: "device", "file", "network"
@@ -37,21 +52,34 @@ type = "device"
 
 [video.stego]
 # Ordered list of stego modules to apply per frame
-pipeline = ["lsb_signature", "overlay"]
+# Available: "lsb_signature", "overlay", "info_bar"
+pipeline = ["lsb_signature", "overlay", "info_bar"]
 
 [video.stego.lsb_signature]
 # Number of LSBs per pixel byte (1-4). Lower = less visible distortion.
 bits = 1
 # 32-byte hex key for embedding (used by audio; video uses sequential)
 key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Alternatively, load key from file:
+# key_file = "keys/stego.key"
 
 [video.stego.overlay]
-# Text watermark (supports static text; future: {timestamp}, {frame})
-text = "CONFIDENTIAL"
+# Text watermark (supports {timestamp}, {frame_index}, {date}, {time} placeholders)
+text = "CONFIDENTIAL {timestamp}"
 # Position: "top-left", "top-right", "bottom-left", "bottom-right", "center"
 position = "bottom-right"
 # Font size in pixels (rendered via built-in 8x8 bitmap font, scaled)
 font_size = 16
+
+[video.stego.info_bar]
+# Label text shown in the info bar
+label = "STEGANOGRAPHER"
+# Show barcode (generated from signature hash)
+show_barcode = true
+# Show QR code (encoding frame index + hash)
+show_qr = true
+# Show timestamp
+show_timestamp = true
 
 # ─── Audio Pipeline ───────────────────────────────────────────────────────────
 
@@ -75,3 +103,5 @@ pipeline = ["lsb_signature"]
 bits = 1
 # 32-byte hex key for pseudo-random index permutation
 key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+# Alternatively, load key from file:
+# key_file = "keys/audio_stego.key"

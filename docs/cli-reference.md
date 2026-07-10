@@ -13,6 +13,8 @@ flowchart LR
     CLI --> ENCODE["encode\n🔒 Offline encoding"]
     CLI --> VERIFY["verify\n🔓 Signature verification"]
     CLI --> KEYGEN["keygen\n🔑 Key generation"]
+    CLI --> INFO["info\n📊 Capacity reporting"]
+    CLI --> CONFIG["config\n⚙️ Config validation"]
     CLI --> DASH["dashboard\n🌐 Web GUI"]
     style CLI fill:#333,stroke:#e53935,color:#e0e0e0
     style DASH fill:#2d5016,stroke:#4a8c2a,color:#fff
@@ -24,6 +26,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `--config <PATH>` | `-c` | `config/example.toml` | Path to TOML configuration file |
 | `--log-level <LEVEL>` | `-l` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `--quiet` | `-q` | `false` | Suppress all output except final result (for scripting) |
 | `--help` | `-h` | — | Print help information |
 | `--version` | `-V` | — | Print version |
 
@@ -107,13 +110,16 @@ steganographer encode [OPTIONS]
 | --- | --- | --- | --- |
 | `--input <PATH>` | `-i` | Required | Input file path |
 | `--output <PATH>` | `-o` | Required | Output file path |
-| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio` |
+| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
+| `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
 
 **Currently supported formats**:
 
 - `lsb_video`: Raw RGB pixel data (3 bytes per pixel)
 - `lsb_audio`: Raw S16LE PCM audio (2 bytes per sample, mono)
+- `spread_spectrum_video`: PN-sequence modulation for noise resistance
+- `dct_video`: DCT-domain embedding for compression resistance
 
 **Examples**:
 
@@ -140,8 +146,9 @@ steganographer verify [OPTIONS]
 | Option | Short | Default | Description |
 | --- | --- | --- | --- |
 | `--input <PATH>` | `-i` | Required | Input file path |
-| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio` |
+| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--public-key <HEX>` | — | None | Public key for signature verification |
+| `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for audio/spread-spectrum extraction |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
 
 **Examples**:
@@ -266,6 +273,61 @@ The dashboard opens a web UI at `http://localhost:<port>` displaying:
 
 ---
 
+### `info` — Capacity Reporting
+
+Report steganographic capacity of a media file.
+
+```bash
+steganographer info [OPTIONS]
+```
+
+| Option | Short | Default | Description |
+| --- | --- | --- | --- |
+| `--input <PATH>` | `-i` | Required | Input file path |
+| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
+| `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
+| `--format <FORMAT>` | — | `plain` | Output format: `plain` or `json` |
+
+**Example**:
+
+```bash
+steganographer info -i frame.rgb --stego-type lsb_video --bits 1
+```
+
+---
+
+### `config` — Configuration Validation
+
+Validate a TOML configuration file without running any pipeline.
+
+```bash
+steganographer config [ACTION]
+```
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `<ACTION>` | `check` | Config action to perform (currently only `check`) |
+
+**Example**:
+
+```bash
+# Validate the default config file
+steganographer config check
+
+# Validate a specific config file
+steganographer --config my-config.toml config check
+```
+
+**Output** (valid config):
+
+```text
+✓ Configuration valid: config/example.toml
+  Sections: global, video, audio
+  Hash algorithm: blake3
+```
+
+---
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -305,6 +367,7 @@ See [Configuration](configuration.md) for full TOML schema including `[video.pip
 - [Getting Started](getting-started.md) — First-time setup and tutorial
 - [Configuration](configuration.md) — Full TOML config schema
 - [Algorithms](algorithms.md) — How the stego modules work
-- [Cryptography](cryptography.md) — BLAKE3+Ed25519 and Ethereum signing
+- [Cryptography](cryptography.md) — BLAKE3/SHA-256/SHA-3 + Ed25519 and Ethereum signing
 - [Steganography Theory](steganography-theory.md) — Information hiding fundamentals
 - [Security](security.md) — Threat models and deployment guidance
+- [API Reference](api-reference.md) — Rust API, traits, and HTTP routes

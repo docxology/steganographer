@@ -191,7 +191,7 @@ impl InfoBar {
         // 9. Third row: encoding details
         let text_y3 = text_y2 + 12;
         if text_y3 + 8 < frame.height && sig.is_some() {
-            let detail = "BLAKE3+Ed25519 | 104B payload";
+            let detail = "BLAKE3+Ed25519 | 109B payload";
             self.render_text_small(frame, 4, text_y3, detail, TEXT_SECONDARY);
         }
 

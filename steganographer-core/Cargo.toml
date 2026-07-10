@@ -7,16 +7,19 @@ license.workspace = true
 
 [features]
 default = []
-ethereum = ["k256", "sha3"]
+ethereum = ["k256"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 blake3 = { workspace = true }
+sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 k256 = { workspace = true, optional = true }
-sha3 = { workspace = true, optional = true }
+sha3 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+subtle = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

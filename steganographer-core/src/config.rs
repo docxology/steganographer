@@ -17,6 +17,20 @@ pub struct Config {
 pub struct GlobalConfig {
     /// Log level: "trace", "debug", "info", "warn", "error"
     pub log_level: Option<String>,
+    /// Hash algorithm: "blake3" (default), "sha256", "sha3-256"
+    #[serde(default)]
+    pub hash_algorithm: Option<String>,
+    /// Path to a file containing the LSB embedding key (hex, 64 chars = 32 bytes).
+    /// If set, overrides the inline `key` field in LSB configs.
+    #[serde(default)]
+    pub key_file: Option<String>,
+}
+
+impl GlobalConfig {
+    /// Get the resolved hash algorithm name, or "blake3" as default.
+    pub fn hash_algorithm_name(&self) -> &str {
+        self.hash_algorithm.as_deref().unwrap_or("blake3")
+    }
 }
 
 /// Video pipeline configuration.
@@ -51,10 +65,37 @@ pub struct VideoPipelineConfig {
 pub struct PayloadConfig {
     /// Payload type: "signature" (default) or "custom"
     pub r#type: Option<String>,
-    /// Payload size in bytes (default: 104)
+    /// Payload size in bytes (default: 109 for v2 format)
     pub size: Option<u32>,
     /// Signing backend: "ed25519" (default) or "ethereum"
     pub signing_backend: Option<String>,
+    /// Enable payload encryption (ChaCha20-Poly1305)
+    #[serde(default)]
+    pub encrypt: Option<bool>,
+    /// Encryption key (hex-encoded 32 bytes). If omitted with encrypt=true,
+    /// a random key is generated (not recoverable).
+    #[serde(default)]
+    pub encryption_key: Option<String>,
+    /// Path to a file containing the encryption key (hex, 64 chars).
+    #[serde(default)]
+    pub encryption_key_file: Option<String>,
+    /// Error correction: "none" (default), "reed_solomon"
+    #[serde(default)]
+    pub error_correction: Option<String>,
+    /// Number of frames to spread a single signature across (1 = single frame)
+    #[serde(default)]
+    pub multi_frame_spread: Option<u32>,
+}
+
+impl PayloadConfig {
+    /// Whether encryption is enabled.
+    pub fn encrypt_enabled(&self) -> bool {
+        self.encrypt.unwrap_or(false)
+    }
+    /// Multi-frame spread count (default: 1 = no spreading).
+    pub fn spread_count(&self) -> u32 {
+        self.multi_frame_spread.unwrap_or(1).max(1)
+    }
 }
 
 impl VideoPipelineConfig {
@@ -100,7 +141,7 @@ pub struct EndpointConfig {
 /// Video steganography configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct VideoStegoConfig {
-    /// Ordered list of stego modules to apply: "lsb_signature", "overlay"
+    /// Ordered list of stego modules to apply: "lsb_signature", "overlay", "info_bar"
     pub pipeline: Vec<String>,
     /// LSB signature embedding settings
     #[serde(default)]
@@ -108,6 +149,9 @@ pub struct VideoStegoConfig {
     /// Text overlay settings
     #[serde(default)]
     pub overlay: Option<OverlayConfig>,
+    /// Info bar settings
+    #[serde(default)]
+    pub info_bar: Option<InfoBarConfig>,
 }
 
 /// Audio steganography configuration.
@@ -126,7 +170,10 @@ pub struct LsbSignatureConfig {
     /// Number of LSBs to use per sample/pixel (1-4)
     pub bits: u8,
     /// Hex-encoded 32-byte key for pseudo-random index generation
-    pub key: String,
+    pub key: Option<String>,
+    /// Path to a file containing the key (hex, 64 chars). Overrides `key`.
+    #[serde(default)]
+    pub key_file: Option<String>,
 }
 
 /// Configuration for text overlay watermark.
@@ -138,6 +185,38 @@ pub struct OverlayConfig {
     pub position: Option<String>,
     /// Font size in pixels
     pub font_size: Option<u32>,
+}
+
+/// Configuration for the info bar overlay.
+#[derive(Debug, Deserialize, Clone)]
+pub struct InfoBarConfig {
+    /// Label text shown in the bar
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Whether to show the barcode (default: true)
+    #[serde(default)]
+    pub show_barcode: Option<bool>,
+    /// Whether to show the QR code (default: true)
+    #[serde(default)]
+    pub show_qr: Option<bool>,
+    /// Whether to show the timestamp (default: true)
+    #[serde(default)]
+    pub show_timestamp: Option<bool>,
+}
+
+impl InfoBarConfig {
+    pub fn show_barcode(&self) -> bool {
+        self.show_barcode.unwrap_or(true)
+    }
+    pub fn show_qr(&self) -> bool {
+        self.show_qr.unwrap_or(true)
+    }
+    pub fn show_timestamp(&self) -> bool {
+        self.show_timestamp.unwrap_or(true)
+    }
+    pub fn label_or_default(&self) -> &str {
+        self.label.as_deref().unwrap_or("STEGANOGRAPHER")
+    }
 }
 
 impl Config {
@@ -156,8 +235,24 @@ impl Config {
 
 impl LsbSignatureConfig {
     /// Decode the hex key into a 32-byte array.
+    ///
+    /// Resolution order:
+    /// 1. `key_file` (if set, read hex from file)
+    /// 2. `key` (inline hex string)
+    /// 3. Error if neither is set
     pub fn key_bytes(&self) -> anyhow::Result<[u8; 32]> {
-        let bytes = hex_decode(&self.key)?;
+        let hex_str = if let Some(ref path) = self.key_file {
+            std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Cannot read key file '{}': {}", path, e))?
+                .trim()
+                .to_string()
+        } else if let Some(ref key) = self.key {
+            key.clone()
+        } else {
+            anyhow::bail!("No key or key_file specified for LSB signature config");
+        };
+
+        let bytes = hex_decode(&hex_str)?;
         if bytes.len() != 32 {
             anyhow::bail!(
                 "LSB key must be exactly 32 bytes (64 hex chars), got {} bytes",
@@ -184,6 +279,36 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         .collect()
 }
 
+/// Resolve a key from either an inline hex string or a file path.
+///
+/// Priority: file > inline hex.
+pub fn resolve_key(
+    inline_hex: Option<&str>,
+    key_file: Option<&str>,
+) -> anyhow::Result<[u8; 32]> {
+    let hex_str = if let Some(path) = key_file {
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Cannot read key file '{}': {}", path, e))?
+            .trim()
+            .to_string()
+    } else if let Some(key) = inline_hex {
+        key.to_string()
+    } else {
+        anyhow::bail!("No key or key_file specified");
+    };
+
+    let bytes = hex_decode(&hex_str)?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "Key must be exactly 32 bytes (64 hex chars), got {} bytes",
+            bytes.len()
+        );
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +330,7 @@ log_level = "info"
         let toml_str = r#"
 [global]
 log_level = "debug"
+hash_algorithm = "sha256"
 
 [video]
 [video.input]
@@ -218,7 +344,7 @@ backend = "v4l2loopback"
 device = "/dev/video42"
 
 [video.stego]
-pipeline = ["lsb_signature", "overlay"]
+pipeline = ["lsb_signature", "overlay", "info_bar"]
 
 [video.stego.lsb_signature]
 bits = 2
@@ -228,6 +354,12 @@ key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 text = "CONFIDENTIAL {timestamp}"
 position = "bottom-right"
 font_size = 14
+
+[video.stego.info_bar]
+label = "SECURE STREAM"
+show_barcode = true
+show_qr = true
+show_timestamp = false
 
 [audio]
 [audio.input]
@@ -247,16 +379,22 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 "#;
         let cfg = Config::from_toml(toml_str).unwrap();
         assert_eq!(cfg.global.log_level.as_deref(), Some("debug"));
+        assert_eq!(cfg.global.hash_algorithm_name(), "sha256");
 
         let video = cfg.video.unwrap();
         assert_eq!(video.input.r#type, "device");
         assert_eq!(video.input.backend.as_deref(), Some("avfoundation"));
-        assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay"]);
+        assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay", "info_bar"]);
         assert_eq!(video.stego.lsb_signature.as_ref().unwrap().bits, 2);
         assert_eq!(
             video.stego.overlay.as_ref().unwrap().text.as_deref(),
             Some("CONFIDENTIAL {timestamp}")
         );
+        let bar_cfg = video.stego.info_bar.unwrap();
+        assert_eq!(bar_cfg.label_or_default(), "SECURE STREAM");
+        assert!(bar_cfg.show_barcode());
+        assert!(bar_cfg.show_qr());
+        assert!(!bar_cfg.show_timestamp());
 
         let audio = cfg.audio.unwrap();
         assert_eq!(audio.stego.pipeline, vec!["lsb_signature"]);
@@ -267,8 +405,8 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     fn test_hex_decode_key() {
         let cfg = LsbSignatureConfig {
             bits: 1,
-            key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
+            key: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+            key_file: None,
         };
         let key = cfg.key_bytes().unwrap();
         assert_eq!(key[0], 0x01);
@@ -280,8 +418,61 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     fn test_hex_decode_invalid() {
         let cfg = LsbSignatureConfig {
             bits: 1,
-            key: "not_hex".to_string(),
+            key: Some("not_hex".to_string()),
+            key_file: None,
         };
         assert!(cfg.key_bytes().is_err());
+    }
+
+    #[test]
+    fn test_no_key_errors() {
+        let cfg = LsbSignatureConfig {
+            bits: 1,
+            key: None,
+            key_file: None,
+        };
+        assert!(cfg.key_bytes().is_err());
+    }
+
+    #[test]
+    fn test_hash_algorithm_default() {
+        let cfg = GlobalConfig {
+            log_level: Some("info".to_string()),
+            hash_algorithm: None,
+            key_file: None,
+        };
+        assert_eq!(cfg.hash_algorithm_name(), "blake3");
+    }
+
+    #[test]
+    fn test_payload_config_defaults() {
+        let cfg = PayloadConfig {
+            r#type: None,
+            size: None,
+            signing_backend: None,
+            encrypt: None,
+            encryption_key: None,
+            encryption_key_file: None,
+            error_correction: None,
+            multi_frame_spread: None,
+        };
+        assert!(!cfg.encrypt_enabled());
+        assert_eq!(cfg.spread_count(), 1);
+    }
+
+    #[test]
+    fn test_payload_config_encrypt() {
+        let cfg = PayloadConfig {
+            r#type: None,
+            size: None,
+            signing_backend: None,
+            encrypt: Some(true),
+            encryption_key: Some("0123".to_string()),
+            encryption_key_file: None,
+            error_correction: None,
+            multi_frame_spread: Some(5),
+        };
+        assert!(cfg.encrypt_enabled());
+        assert_eq!(cfg.spread_count(), 5);
     }
 }

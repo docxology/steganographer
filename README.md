@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-132_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-187_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 132 tests, 0 failures
+cargo test --workspace   # 187 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -119,7 +119,7 @@ Four Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│  steganographer-cli       (binary)           │  Clap CLI: 6 subcommands
+│  steganographer-cli       (binary)           │  Clap CLI: 8 subcommands
 ├──────────────────────────────────────────────┤
 │  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
@@ -130,10 +130,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, LSB, overlay, config | 114 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 174 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 12 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 1 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 1 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 0 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -143,11 +143,16 @@ Four Rust crates with strict dependency layering:
 
 | Component | Algorithm | Details |
 | ----------- | ----------- | --------- |
-| **Hashing** | BLAKE3 | Parallel 256-bit hash of `frame_index ∥ video_bytes ∥ audio_bytes` |
-| **Signing** | Ed25519 | 64-byte EUF-CMA secure signature over the BLAKE3 hash |
+| **Hashing** | BLAKE3 / SHA-256 / SHA-3 | Configurable; BLAKE3 default, 256-bit digest of `frame_index ∥ video_bytes ∥ audio_bytes` |
+| **Signing** | Ed25519 | 64-byte EUF-CMA secure signature over the hash |
 | **Payload** | 104 bytes | `frame_index (8) + hash (32) + signature (64)` |
 | **Video embed** | Length-prefixed LSB | 1–4 bit replacement with 32-bit length header |
 | **Audio embed** | Keyed ChaCha8 PRNG | Pseudo-random sample permutation for scatter embedding |
+| **Encryption** | ChaCha20-Poly1305 | AEAD encryption for payload confidentiality before embedding |
+| **Error correction** | Reed-Solomon GF(2⁸) | Payload recovery from corrupted bits |
+| **Alt video embed** | DCT-domain | Mid-frequency coefficient embedding for compression resistance |
+| **Alt video embed** | Spread-spectrum | PN-sequence modulation for noise resistance |
+| **Multi-frame** | Shard spreading | One signature spread across N frames for partial loss resilience |
 | **Alt signing** | Ethereum secp256k1 | EIP-191 personal_sign, MetaMask-compatible |
 
 > 📖 Deep dives: [**Cryptography**](docs/cryptography.md) · [**Security Model**](docs/security.md) · [**Threat Model**](docs/threat-model.md)
@@ -163,8 +168,14 @@ steganographer keygen --output mykey
 # Offline encode
 steganographer encode --input frame.rgb --output signed.rgb --stego-type lsb_video --bits 1
 
+# Report steganographic capacity of a file
+steganographer info --input frame.rgb --stego-type lsb_video --bits 1
+
 # Verify
 steganographer verify --input signed.rgb --public-key <hex> --stego-type lsb_video --format json
+
+# Validate a TOML configuration file
+steganographer config check
 
 # Live video (GStreamer)
 steganographer video --config steganographer.toml
@@ -207,19 +218,19 @@ bits = 2
 
 ## ✅ Tests
 
-132 tests across 4 crates — all passing:
+187 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 56 | `steganographer-core/src/*.rs` |
-| Core integration tests | 58 | `steganographer-core/tests/integration_tests.rs` |
+| Core unit tests | 115 | `steganographer-core/src/*.rs` |
+| Core integration tests | 59 | `steganographer-core/tests/integration_tests.rs` |
 | Dashboard tests | 12 | `steganographer-dashboard/tests/dashboard_tests.rs` |
-| GStreamer + Ethereum | 1 + 5 | Plugin skeleton + feature-gated |
-| **Total** | **132** | **0 failures** |
+| GStreamer + Ethereum | 1 + 0 | Plugin skeleton + feature-gated (no inline tests) |
+| **Total** | **187** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 132 tests
-cargo test -p steganographer-core     # Core only (114 tests)
+cargo test --workspace                # All 187 tests
+cargo test -p steganographer-core     # Core only (174 tests)
 cargo test -p steganographer-dashboard # Dashboard only (12 tests)
 ```
 

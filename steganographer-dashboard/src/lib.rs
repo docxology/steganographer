@@ -94,10 +94,6 @@ pub struct DashboardState {
     pub session_start: std::time::Instant,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// EMBEDDED DOCUMENTATION FILES
-// ═══════════════════════════════════════════════════════════════════════════════
-
 /// All documentation markdown files, embedded at compile time.
 static DOCS: &[(&str, &str)] = &[
     ("README.md", include_str!("../../docs/README.md")),

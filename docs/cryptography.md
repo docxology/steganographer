@@ -4,8 +4,8 @@
 
 Steganographer uses a two-layer cryptographic scheme to produce tamper-evident signatures for each media frame:
 
-1. **BLAKE3** — Fast, parallel hash function (256-bit output)
-2. **Ed25519** — Elliptic curve digital signature scheme (RFC 8032)
+1. **Hashing** — Configurable hash function (BLAKE3 default, also SHA-256, SHA-3-256) producing a 256-bit digest
+2. **Signing** — Ed25519 (default) or secp256k1/Ethereum (EIP-191) digital signature scheme
 
 The combination provides both **integrity** (hash detects any modification) and **authenticity** (signature proves the frame was signed by the holder of the private key).
 
@@ -22,10 +22,11 @@ Auguste Kerckhoffs (1883) established that **a cryptographic system should be se
 | Component | Public Knowledge | Secret |
 | --- | --- | --- |
 | LSB embedding algorithm | ✅ Known | — |
-| BLAKE3 + Ed25519 scheme | ✅ Known | — |
-| Payload format (104 bytes) | ✅ Known | — |
-| Ed25519 signing key | — | ✅ Private key |
+| Hash + signing scheme | ✅ Known | — |
+| Payload format (109 bytes) | ✅ Known | — |
+| Ed25519 / secp256k1 signing key | — | ✅ Private key |
 | Audio PRNG permutation key | — | ✅ 32-byte key |
+| Payload encryption key (optional) | — | ✅ 32-byte ChaCha20 key |
 
 Security relies entirely on key secrecy, never on algorithm secrecy.
 
@@ -49,6 +50,25 @@ The composition `Stego(Sign(Hash(frame)))` provides defense in depth:
 
 ## Hash Construction
 
+### Configurable Hash Algorithm
+
+The hash algorithm is configurable via `[global]` in `steganographer.toml`:
+
+```toml
+[global]
+hash_algorithm = "blake3"  # default
+# hash_algorithm = "sha256"     # FIPS 180-4
+# hash_algorithm = "sha3-256"   # FIPS 202 (Keccak)
+```
+
+| Algorithm | Config String | Standard | Speed (single core) | Use Case |
+| --- | --- | --- | --- | --- |
+| BLAKE3 | `"blake3"` | — | ~6 GB/s | Default — fastest, best for real-time |
+| SHA-256 | `"sha256"` or `"sha-256"` | FIPS 180-4 | ~0.5 GB/s | FIPS compliance |
+| SHA-3 256 | `"sha3"` or `"sha3-256"` | FIPS 202 | ~0.3 GB/s | NIST-approved sponge |
+
+The hash algorithm is parsed by `HashAlgorithm::parse()` and falls back to BLAKE3 for unrecognized values.
+
 ### Input Domain
 
 The BLAKE3 hash covers a deterministic concatenation of frame metadata and raw media bytes:
@@ -68,29 +88,28 @@ flowchart LR
 | `video_bytes` | Variable | Raw pixel data (RGB8, BGRA8, or Y plane) |
 | `audio_bytes` | Variable (optional) | Raw PCM samples, if present |
 
-### Why BLAKE3?
+### Why BLAKE3 (Default)?
 
-| Property | BLAKE3 | SHA-256 | SHA-512 |
+| Property | BLAKE3 | SHA-256 | SHA-3 256 |
 | --- | --- | --- | --- |
-| Speed (single core) | ~6 GB/s | ~0.5 GB/s | ~0.8 GB/s |
+| Speed (single core) | ~6 GB/s | ~0.5 GB/s | ~0.3 GB/s |
 | Parallelizable | ✅ (tree hash) | ❌ | ❌ |
-| Output size | 256 bits | 256 bits | 512 bits |
-| Security level | 128-bit | 128-bit | 256-bit |
+| Output size | 256 bits | 256 bits | 256 bits |
+| Security level | 128-bit | 128-bit | 128-bit |
+| FIPS certified | ❌ | ✅ | ✅ |
 
-For real-time video at 30 fps with 1080p frames (~6 MB/frame), BLAKE3 can hash a frame in **<1 ms**, making it viable for live pipelines.
+For real-time video at 30 fps with 1080p frames (~6 MB/frame), BLAKE3 can hash a frame in **<1 ms**, making it viable for live pipelines. SHA-256 and SHA-3-256 are available for FIPS-compliant deployments at the cost of higher latency.
 
 ### Implementation
 
 ```rust
-fn compute_hash(frame_index: u64, video_bytes: &[u8], audio_bytes: Option<&[u8]>) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&frame_index.to_le_bytes());
-    hasher.update(video_bytes);
-    if let Some(a) = audio_bytes {
-        hasher.update(a);
-    }
-    *hasher.finalize().as_bytes()
-}
+// HashAlgorithm is configurable: Blake3 (default), Sha256, or Sha3_256
+let hash = signer.hash_algorithm().hash(frame_index, video_bytes, audio_bytes);
+// → 32-byte digest
+
+// The Signer handles this internally:
+let payload = signer.sign_frame(frame_index, video_bytes, audio_bytes);
+// Uses the configured hash algorithm + Ed25519 signature
 ```
 
 ---
@@ -179,29 +198,46 @@ println!("Address: {}", backend.ethereum_address()); // 0x...
 
 ## SignaturePayload Format
 
-The `SignaturePayload` is the atomic unit of cryptographic data embedded into media frames.
+The `SignaturePayload` is the atomic unit of cryptographic data embedded into media frames. The v2 format includes a magic header and version number for format identification and future compatibility:
 
 ```mermaid
 block-beta
-    columns 3
-    A["frame_index\n8 bytes (u64 LE)"]:1
-    B["BLAKE3 hash\n32 bytes"]:1
-    C["Ed25519 signature\n64 bytes"]:1
+    columns 5
+    A["magic\n4 bytes (\"STEG\")"]:1
+    B["version\n1 byte (= 2)"]:1
+    C["frame_index\n8 bytes (u64 LE)"]:1
+    D["hash\n32 bytes"]:1
+    E["signature\n64 bytes"]:1
     style A fill:#5c1a1a,stroke:#a33c3c,color:#fff
-    style B fill:#1a3a5c,stroke:#2d6da3,color:#fff
-    style C fill:#2d5016,stroke:#4a8c2a,color:#fff
+    style B fill:#3a3a3a,stroke:#888,color:#fff
+    style C fill:#5c1a1a,stroke:#a33c3c,color:#fff
+    style D fill:#1a3a5c,stroke:#2d6da3,color:#fff
+    style E fill:#2d5016,stroke:#4a8c2a,color:#fff
 ```
 
-**Total: 104 bytes**
+**Total: 109 bytes** (`SERIALIZED_SIZE = 4 + 1 + 8 + 32 + 64`)
+
+### Format Identification
+
+Every payload begins with:
+- **Magic header** (4 bytes): ASCII `STEG` — identifies the data as a Steganographer payload
+- **Version** (1 byte): Currently `2` — allows future format evolution
+
+Extraction validates both the magic header and version before parsing. Non-matching data returns `None` (no payload found), preventing false positives from random LSB data. The `has_valid_magic()` helper provides a quick check without full deserialization.
 
 ### Serialization
 
 ```rust
-// Serialize to 104-byte array
-let bytes: [u8; 104] = payload.to_bytes();
+// Serialize to 109-byte array
+let bytes: [u8; 109] = payload.to_bytes();
 
-// Deserialize from 104-byte array
+// Deserialize from 109-byte array (validates magic + version)
 let payload = SignaturePayload::from_bytes(&bytes)?;
+
+// Quick check without full deserialization
+if SignaturePayload::has_valid_magic(&some_bytes) {
+    // Likely a valid steganographer payload
+}
 ```
 
 All multi-byte fields use **little-endian** byte order.
@@ -213,15 +249,15 @@ All multi-byte fields use **little-endian** byte order.
 ```mermaid
 sequenceDiagram
     participant F as Frame Data
-    participant H as BLAKE3 Hasher
-    participant S as Ed25519 Signer
+    participant H as Hasher
+    participant S as Signer (Ed25519/Ethereum)
     participant P as SignaturePayload
 
     F->>H: frame_index || video_bytes || audio_bytes
     H->>H: Compute 256-bit hash
     H->>S: hash (32 bytes)
     S->>S: Sign(private_key, hash)
-    S->>P: SignaturePayload { frame_index, hash, signature }
+    S->>P: SignaturePayload { magic, version, frame_index, hash, signature }
 ```
 
 ## Verification Flow
@@ -230,13 +266,14 @@ sequenceDiagram
 sequenceDiagram
     participant F as Frame Data
     participant E as Extractor
-    participant H as BLAKE3 Hasher
+    participant H as Hasher
     participant V as Ed25519 Verifier
 
     E->>E: Extract SignaturePayload from LSBs
+    E->>E: Validate magic header "STEG" + version
     F->>H: frame_index || video_bytes || audio_bytes
     H->>H: Recompute 256-bit hash
-    H->>V: Compare extracted hash vs computed hash
+    H->>V: Constant-time comparison (ct_eq) of extracted vs computed hash
     V->>V: Verify(public_key, hash, signature)
     V-->>V: ✅ VALID or ❌ INVALID
 ```
@@ -258,7 +295,7 @@ sequenceDiagram
 
 | Limitation | Notes |
 | --- | --- |
-| Side-channel attacks | No constant-time guarantees beyond what `ed25519-dalek` provides |
+| Side-channel attacks | Hash comparison uses constant-time `ct_eq`; no constant-time guarantees for signing beyond what `ed25519-dalek` provides |
 | Quantum adversaries | Ed25519 is not post-quantum (consider ML-DSA for future) |
 | Key compromise | If the private key leaks, all signatures can be forged |
 | Frame removal | Missing frames are detectable only by frame index gaps |
@@ -284,7 +321,7 @@ Steganographer's signature scheme provides **Existential Unforgeability under Ch
 
 ### Collision Resistance
 
-BLAKE3 provides **128-bit collision resistance**: finding two distinct frame payloads with the same hash requires ~2^128 operations. This ensures:
+BLAKE3 (and SHA-256/SHA-3-256) provides **128-bit collision resistance**: finding two distinct frame payloads with the same hash requires ~2^128 operations. This ensures:
 
 - **Preimage resistance**: Given a hash, finding any frame that produces it is infeasible
 - **Second preimage resistance**: Given a frame, finding another frame with the same hash is infeasible
@@ -306,7 +343,7 @@ Ed25519 relies on the hardness of the Elliptic Curve Discrete Logarithm Problem 
 | Hashing | BLAKE3 (32B) | BLAKE3 (unchanged) | Quantum-resistant (Grover: 128→64 bit, still safe) |
 | Key generation | `OsRng` | `OsRng` (unchanged) | N/A |
 
-**Impact on Steganography**: ML-DSA signatures are ~50× larger than Ed25519 (3,309 bytes vs 64 bytes). The payload would grow from 104 bytes to ~3,349 bytes, requiring ~26,792 pixel bytes at LSB-1 (still easily fits in a 640×480 frame with 921,600 bytes).
+**Impact on Steganography**: ML-DSA signatures are ~50× larger than Ed25519 (3,309 bytes vs 64 bytes). The payload would grow from 109 bytes to ~3,354 bytes, requiring ~26,832 pixel bytes at LSB-1 (still easily fits in a 640×480 frame with 921,600 bytes).
 
 ---
 
@@ -314,11 +351,16 @@ Ed25519 relies on the hardness of the Elliptic Curve Discrete Logarithm Problem 
 
 | Crate | Version | Purpose | Audited |
 | --- | --- | --- | --- |
-| `blake3` | 1.5.x | Hashing | [Official audits](https://github.com/BLAKE3-team/BLAKE3) |
-| `ed25519-dalek` | 2.x | Signing/verification | [Dalek audits](https://github.com/dalek-cryptography/ed25519-dalek) |
+| `blake3` | 1.5.x | Hashing (default) | [Official audits](https://github.com/BLAKE3-team/BLAKE3) |
+| `sha2` | 0.10.x | SHA-256 hashing (FIPS 180-4) | Widely reviewed |
+| `sha3` | 0.10.x | SHA-3-256 hashing (FIPS 202) + Keccak-256 for Ethereum | Widely reviewed |
+| `ed25519-dalek` | 2.x | Ed25519 signing/verification | [Dalek audits](https://github.com/dalek-cryptography/ed25519-dalek) |
+| `k256` | 0.13.x | secp256k1/Ethereum signing (feature-gated) | Reviewed |
+| `chacha20poly1305` | 0.10.x | Payload encryption (AEAD) | Audited, RFC 8439 |
+| `subtle` | 2.x | Constant-time comparison | Audited, anti-timing-attack |
 | `rand` | 0.8.x | Key generation (OsRng) | Widely reviewed |
 
-All dependencies use the standard Ed25519 specification (SHA-512 internal prehash per RFC 8032). BLAKE3 is used **only** for hashing frame data, not as a replacement for Ed25519's internal hash.
+All dependencies use the standard Ed25519 specification (SHA-512 internal prehash per RFC 8032). The configurable hash algorithm (BLAKE3/SHA-256/SHA-3) is used **only** for hashing frame data, not as a replacement for Ed25519's internal hash.
 
 ---
 

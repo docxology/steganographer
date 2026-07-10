@@ -299,23 +299,23 @@ fn test_lsb_video_4bit_roundtrip() {
 
 #[test]
 fn test_lsb_video_minimum_frame_size_1bit() {
-    // 104 bytes payload * 8 bits + 32 prefix = 864 bits
-    // At 1 bit per byte, need exactly 864 bytes
+    // 109 bytes payload * 8 bits + 32 prefix = 904 bits
+    // At 1 bit per byte, need exactly 904 bytes
     let signer = Signer::generate();
     let payload = signer.sign_frame(0, b"min size", None);
 
-    let mut frame_data = vec![128u8; 864];
+    let mut frame_data = vec![128u8; 904];
     let mut lsb = LsbVideo::new(1);
     {
         let mut frame = VideoFrame {
-            width: 864, height: 1, stride: 864,
+            width: 904, height: 1, stride: 904,
             format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
         };
         lsb.embed(&mut frame, Some(&payload)).unwrap();
     }
     {
         let frame = VideoFrame {
-            width: 864, height: 1, stride: 864,
+            width: 904, height: 1, stride: 904,
             format: VideoFormat::Rgb8, data: &mut frame_data, frame_index: 0,
         };
         let extracted = lsb.extract(&frame).unwrap().unwrap();
@@ -328,8 +328,8 @@ fn test_lsb_video_one_byte_too_small() {
     let signer = Signer::generate();
     let payload = signer.sign_frame(0, b"test", None);
 
-    // 863 bytes is one byte too small for 1-bit embedding (need 864)
-    let mut frame_data = vec![0u8; 863];
+    // 903 bytes is one byte too small for 1-bit embedding (need 904)
+    let mut frame_data = vec![0u8; 903];
     let mut lsb = LsbVideo::new(1);
     let mut frame = VideoFrame {
         width: 863, height: 1, stride: 863,
@@ -578,7 +578,7 @@ fn test_config_parse_example_toml() {
 
     assert_eq!(cfg.global.log_level.as_deref(), Some("info"));
     let video = cfg.video.expect("Video config should exist");
-    assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay"]);
+    assert_eq!(video.stego.pipeline, vec!["lsb_signature", "overlay", "info_bar"]);
     assert_eq!(video.stego.lsb_signature.as_ref().unwrap().bits, 1);
 
     let audio = cfg.audio.expect("Audio config should exist");
@@ -590,7 +590,8 @@ fn test_config_key_bytes_wrong_length() {
     use steganographer_core::config::LsbSignatureConfig;
     let cfg = LsbSignatureConfig {
         bits: 1,
-        key: "0123456789abcdef".to_string(), // 16 hex chars = 8 bytes (too short)
+        key: Some("0123456789abcdef".to_string()), // 16 hex chars = 8 bytes (too short)
+        key_file: None,
     };
     assert!(cfg.key_bytes().is_err());
 }
@@ -600,7 +601,8 @@ fn test_config_key_bytes_odd_length() {
     use steganographer_core::config::LsbSignatureConfig;
     let cfg = LsbSignatureConfig {
         bits: 1,
-        key: "abc".to_string(), // odd length
+        key: Some("abc".to_string()), // odd length
+        key_file: None,
     };
     assert!(cfg.key_bytes().is_err());
 }
@@ -819,18 +821,30 @@ fn test_overlay_extract_returns_none() {
 
 #[test]
 fn test_signature_payload_size() {
-    assert_eq!(SignaturePayload::SERIALIZED_SIZE, 104);
-    // 8 (frame_index) + 32 (hash) + 64 (signature)
+    assert_eq!(SignaturePayload::SERIALIZED_SIZE, 109);
+    // 4 (magic) + 1 (version) + 8 (frame_index) + 32 (hash) + 64 (signature)
 }
 
 #[test]
 fn test_signature_payload_from_invalid_bytes() {
-    // Construct valid-length but potentially bad signature bytes
-    let buf = [0u8; 104];
+    // Construct valid-length buffer with correct magic+version but zeroed payload
+    let mut buf = [0u8; 109];
+    buf[0..4].copy_from_slice(b"STEG");
+    buf[4] = 2; // FORMAT_VERSION
     // frame_index = 0, hash = zeros, signature = zeros
     // from_bytes should parse without error (Signature::from_bytes accepts any 64 bytes)
     let result = SignaturePayload::from_bytes(&buf);
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_signature_payload_from_bad_magic_fails() {
+    // Wrong magic header should fail
+    let mut buf = [0u8; 109];
+    buf[0..4].copy_from_slice(b"XXXX");
+    buf[4] = 2;
+    let result = SignaturePayload::from_bytes(&buf);
+    assert!(result.is_err());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

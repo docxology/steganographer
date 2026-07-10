@@ -8,6 +8,8 @@ Steganographer implements three categories of watermarking algorithms, each serv
 | --- | --- | --- | --- | --- |
 | LSB Video | Data hiding | Invisible | ✅ Yes | `lsb_video.rs` |
 | LSB Audio | Data hiding | Inaudible | ✅ Yes | `lsb_audio.rs` |
+| Spread Spectrum | Data hiding | Invisible | ✅ Yes | `spread_spectrum.rs` |
+| DCT Video | Data hiding | Invisible | ✅ Yes | `dct_video.rs` |
 | Text Overlay | Visual mark | Visible | ❌ No | `overlay.rs` |
 | Info Bar | Visual + Machine | Visible | ✅ Yes (scan) | `info_bar.rs` |
 | QR Data Matrix | Visual metadata | Visible | ✅ Yes (scan) | `app.js` (client-side) |
@@ -29,20 +31,20 @@ flowchart LR
 
 ### Embedding Protocol
 
-1. **Serialize** the `SignaturePayload` (104 bytes = 832 bits)
-2. **Prepend** a 32-bit length prefix (big-endian, value = 832)
+1. **Serialize** the `SignaturePayload` (109 bytes = 872 bits)
+2. **Prepend** a 32-bit length prefix (big-endian, value = 872)
 3. **Replace** the lowest `N` bits of each pixel byte sequentially
 
 ```mermaid
 block-beta
     columns 2
-    A["Length Prefix\n32 bits (= 832)"]:1
-    B["Payload Bits\n832 bits (104 bytes x 8)\nframe_index | hash | signature"]:1
+    A["Length Prefix\n32 bits (= 872)"]:1
+    B["Payload Bits\n872 bits (109 bytes × 8)\nmagic | version | frame_index | hash | signature"]:1
     style A fill:#5c1a1a,stroke:#a33c3c,color:#fff
     style B fill:#1a3a5c,stroke:#2d6da3,color:#fff
 ```
 
-**Total: 864 bits to embed**
+**Total: 904 bits to embed**
 
 ### Capacity Requirements
 
@@ -50,16 +52,16 @@ The frame must have enough pixel bytes to hold all embedded bits:
 
 ```mermaid
 flowchart LR
-    BITS["total_bits = 864"] --> DIV["/ N bits_per_byte"] --> RESULT["ceil = required_bytes"]
+    BITS["total_bits = 904"] --> DIV["/ N bits_per_byte"] --> RESULT["ceil = required_bytes"]
     style DIV fill:#333,stroke:#e53935,color:#e0e0e0
 ```
 
 | LSB Bits (N) | Required Bytes | Min Frame Size (RGB8) |
 | --- | --- | --- |
-| 1 | 864 bytes | 288 pixels (17×17) |
-| 2 | 432 bytes | 144 pixels (12×12) |
-| 3 | 288 bytes | 96 pixels (10×10) |
-| 4 | 216 bytes | 72 pixels (9×8) |
+| 1 | 904 bytes | 302 pixels (18×18) |
+| 2 | 452 bytes | 151 pixels (13×12) |
+| 3 | 302 bytes | 101 pixels (11×10) |
+| 4 | 226 bytes | 76 pixels (9×9) |
 
 A typical 640×480 RGB frame has 921,600 bytes — far more than needed.
 
@@ -67,11 +69,11 @@ A typical 640×480 RGB frame has 921,600 bytes — far more than needed.
 
 1. Read `N` LSBs from each pixel byte sequentially
 2. Reconstruct the 32-bit length prefix
-3. Validate the length matches `SignaturePayload::SERIALIZED_SIZE * 8` (832)
-4. Reconstruct the 104-byte payload from the next 832 bits
+3. Validate the length matches `SignaturePayload::SERIALIZED_SIZE * 8` (872)
+4. Reconstruct the 109-byte payload from the next 872 bits
 5. Deserialize into a `SignaturePayload`
 
-If the length prefix doesn't match 832, extraction returns `None` (no payload found).
+If the length prefix doesn't match 872, extraction returns `None` (no payload found). The payload is further validated by checking the 4-byte magic header (`STEG`) and 1-byte version number during deserialization.
 
 ### Visual Impact
 
@@ -150,7 +152,7 @@ The `mask` clears the lowest `N` bits: `mask = !((1 << N) - 1)`
 | 100 ms | 4,410 | 4,410 bits (551 bytes) | 8,820 bits |
 | 1 sec | 44,100 | 44,100 bits (5.4 KB) | 88,200 bits |
 
-The 104-byte payload needs 832 bits → only **832 samples** minimum (≈19 ms at 44.1 kHz).
+The 109-byte payload needs 872 bits → only **872 samples** minimum (≈20 ms at 44.1 kHz).
 
 ### Audibility Impact
 
@@ -284,27 +286,110 @@ The Overlay Opacity slider (0.0–1.0) directly controls the `globalAlpha` of th
 
 ## Algorithm Comparison
 
-| Property | LSB Video | LSB Audio | Text Overlay | Info Bar |
-| --- | --- | --- | --- | --- |
-| Visibility | Invisible | Inaudible | Visible | V. Visible |
-| Extractable | ✅ | ✅ | ❌ | ✅ (Optical) |
-| Index selection | Sequential | Pseudo-random | N/A | N/A |
-| Survives transcoding | ❌ | ❌ | Partially | ✅ (Optical) |
-| Survives screenshots | ❌ | N/A | ✅ | ✅ |
-| Payload size | 104 bytes | 104 bytes | N/A | ~100 bytes |
-| Configurable bits | 1–4 per byte | 1–4 per sample | N/A | N/A |
+| Property | LSB Video | LSB Audio | Spread Spectrum | DCT Video | Text Overlay | Info Bar |
+| --- | --- | --- | --- | --- | --- | --- |
+| Visibility | Invisible | Inaudible | Invisible | Invisible | Visible | V. Visible |
+| Extractable | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ (Optical) |
+| Index selection | Sequential | Pseudo-random | Keyed PRNG | Block-based | N/A | N/A |
+| Survives transcoding | ❌ | ❌ | ✅ Partially | ✅ (JPEG) | Partially | ✅ (Optical) |
+| Survives screenshots | ❌ | N/A | ❌ | ❌ | ✅ | ✅ |
+| Payload size | 109 bytes | 109 bytes | 109 bytes | 109 bytes | N/A | ~100 bytes |
+| Configurable bits | 1–4 per byte | 1–4 per sample | Amplitude+spread | Coef+quant | N/A | N/A |
+
+---
+
+## Spread-Spectrum Steganography
+
+### Principle
+
+Spread-spectrum embedding modulates payload bits onto a pseudo-noise (PN) sequence and adds it to pixel/sample values. Unlike LSB replacement, each payload bit is spread across many pixels, making it robust against local noise and compression artifacts.
+
+### Algorithm
+
+For each payload bit `b`:
+
+1. **Generate** a PN sequence `pn[i] ∈ {-1, +1}` of length `spread_factor` using a keyed PRNG (seed = `key ⊕ frame_index ⊕ bit_position`)
+2. **Embed**: `pixel[i] += pn[i] * amplitude * (2*b - 1)` (clamped to 0–255)
+3. **Extract**: compute `correlation = Σ(pixel[i] - 128) * pn[i]`. If correlation > 0 → bit = 1, else bit = 0
+
+### Parameters
+
+| Parameter | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `key` | (required) | 32 bytes | Secret key for PN sequence — without it, extraction is impossible |
+| `amplitude` | 3 | 1–5 | Higher = more robust to noise but more visible |
+| `spread_factor` | 64 | 8–256 | Higher = more robust but lower capacity |
+
+### Capacity
+
+Capacity = `data_length / spread_factor`. For a 109-byte payload (872 bits) at default spread_factor=64:
+
+- **Video**: needs 872 × 64 = 55,808 pixel bytes (easily fits in 640×480 RGB = 921,600 bytes)
+- **Audio**: needs 872 × 64 = 55,808 samples (≈1.3 sec at 44.1 kHz)
+
+### Noise Resistance
+
+Spread-spectrum is significantly more robust than LSB against:
+- Additive Gaussian noise (correlation detection survives SNR > 10 dB)
+- JPEG compression at moderate quality settings
+- Partial pixel/sample corruption (only affects local correlation)
+
+### Supported Formats
+
+| Format | Module | Notes |
+| --- | --- | --- |
+| RGB8 | `SpreadSpectrumVideo` | Operates on raw pixel bytes |
+| BGRA8 | `SpreadSpectrumVideo` | Operates on raw pixel bytes |
+| PCM16 | `SpreadSpectrumAudio` | Operates on i16 samples |
+
+---
+
+## DCT-Domain Video Steganography
+
+### Principle
+
+Embeds payload bits into mid-frequency DCT (Discrete Cosine Transform) coefficients of 8×8 pixel blocks. Since JPEG compression operates in the DCT domain, this method survives JPEG re-encoding far better than spatial-domain LSB.
+
+### Algorithm
+
+1. **Divide** the frame into 8×8 pixel blocks
+2. **Apply** a 2D DCT to each block (using f64 precision)
+3. **Modify** a mid-frequency coefficient (selected by zigzag index):
+   - Round the coefficient to the nearest `quant_step` boundary
+   - If bit=1, move to the upper half of the quantization cell
+   - If bit=0, move to the lower half
+4. **Apply** the inverse DCT to reconstruct the block
+5. **Extract**: apply DCT, read the coefficient, determine which half of the quantization cell it falls in
+
+### Parameters
+
+| Parameter | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `coef_index` | 20 | 1–63 (zigzag) | Which DCT coefficient to modify (mid-frequencies recommended) |
+| `quant_step` | 16 | 8–32 | Quantization step size — higher = more robust but more visible |
+| `channel` | 1 (green) | 0, 1, 2 | Color channel to embed in (green is least perceptible) |
+
+### Capacity
+
+Each 8×8 block holds one payload bit. For a 109-byte payload (872 bits):
+- Need 872 blocks = ~30×30 blocks = 240×240 pixel minimum
+- A 640×480 frame has 80×60 = 4,800 blocks — far more than needed
+
+### JPEG Resistance
+
+DCT embedding survives JPEG compression because the data lives in the same frequency domain that JPEG operates on. At moderate quality (Q=75+), extraction remains reliable.
+
+### Supported Formats
+
+| Format | Supported | Notes |
+| --- | --- | --- |
+| RGB8 | ✅ | Channel 0=R, 1=G, 2=B |
+| BGRA8 | ✅ | Channel 0=B, 1=G, 2=R |
+| YUV420 | ❌ | Not supported (planar format) |
 
 ---
 
 ## Future Algorithms
-
-### DCT-Based Embedding (Planned)
-
-Embed data in the frequency domain (Discrete Cosine Transform coefficients) for robustness against lossy compression. This would survive JPEG/H.264 re-encoding.
-
-### Spread-Spectrum (Planned)
-
-Spread embedded data across a wide frequency band using a PN sequence, making it robust against noise and compression.
 
 ### Video Seal Integration (Planned)
 
@@ -332,6 +417,22 @@ Keyed permutation provides significantly better steganalysis resistance than seq
 1. **Scattered indices** — Bits are spread pseudo-randomly across the buffer, defeating sequential analysis
 2. **Key-dependent** — Different keys produce completely different index patterns
 3. **Frame-varying** — Each frame's permutation changes (seed = key ⊕ frame_index)
+
+### Spread-Spectrum
+
+Spread-spectrum embedding provides strong steganalysis resistance:
+
+1. **Below noise floor** — The PN-sequence modulation is spread across many pixels at low amplitude, making it statistically indistinguishable from sensor noise
+2. **Key-dependent** — The PN sequence is derived from a secret key, so without it, the signal cannot be detected or removed
+3. **Correlation detection** — Only a verifier with the key can extract the payload via correlation
+
+### DCT-Domain
+
+DCT embedding is inherently less detectable than LSB:
+
+1. **Frequency domain** — Modifications are in the DCT domain, which is less visible per-pixel than spatial LSB
+2. **Mid-frequency** — Embedding in mid-frequencies avoids both the DC component (too visible) and high frequencies (too easily destroyed)
+3. **Block-based** — Each 8×8 block carries one bit, making statistical analysis harder
 
 ### Overlay Modules
 

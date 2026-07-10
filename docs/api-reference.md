@@ -28,18 +28,66 @@ pub struct Config {
 ```rust
 pub struct GlobalConfig {
     pub log_level: Option<String>,
+    pub hash_algorithm: Option<String>,  // "blake3" (default), "sha256", "sha3-256"
+    pub key_file: Option<String>,        // Path to file with hex key (overrides inline)
 }
 ```
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `hash_algorithm_name` | `fn hash_algorithm_name(&self) -> &str` | Returns algorithm name or `"blake3"` default |
 
 #### `VideoConfig`
 
 ```rust
 pub struct VideoConfig {
+    pub pipeline: Option<VideoPipelineConfig>,
     pub input: EndpointConfig,
     pub output: EndpointConfig,
     pub stego: VideoStegoConfig,
 }
 ```
+
+#### `VideoPipelineConfig`
+
+```rust
+pub struct VideoPipelineConfig {
+    pub width: Option<u32>,       // default: 640
+    pub height: Option<u32>,      // default: 480
+    pub framerate: Option<u32>,   // default: 30
+    pub opacity: Option<f64>,     // default: 1.0
+    pub payload: Option<PayloadConfig>,
+}
+```
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `width_or_default` | `fn width_or_default(&self) -> u32` | Width or 640 |
+| `height_or_default` | `fn height_or_default(&self) -> u32` | Height or 480 |
+| `framerate_or_default` | `fn framerate_or_default(&self) -> u32` | Framerate or 30 |
+| `opacity_or_default` | `fn opacity_or_default(&self) -> f64` | Opacity or 1.0 |
+
+#### `PayloadConfig`
+
+Cryptographic payload configuration including encryption and error correction.
+
+```rust
+pub struct PayloadConfig {
+    pub r#type: Option<String>,               // "signature" (default) or "custom"
+    pub size: Option<u32>,                    // default: 109 for v2 format
+    pub signing_backend: Option<String>,      // "ed25519" (default) or "ethereum"
+    pub encrypt: Option<bool>,                // Enable ChaCha20-Poly1305 encryption
+    pub encryption_key: Option<String>,       // Hex-encoded 32-byte key
+    pub encryption_key_file: Option<String>,  // Path to key file
+    pub error_correction: Option<String>,     // "none" (default) or "reed_solomon"
+    pub multi_frame_spread: Option<u32>,      // Frames to spread signature across (default: 1)
+}
+```
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `encrypt_enabled` | `fn encrypt_enabled(&self) -> bool` | Whether encryption is enabled |
+| `spread_count` | `fn spread_count(&self) -> u32` | Multi-frame spread count (min 1) |
 
 #### `AudioConfig`
 
@@ -69,6 +117,7 @@ pub struct VideoStegoConfig {
     pub pipeline: Vec<String>,
     pub lsb_signature: Option<LsbSignatureConfig>,
     pub overlay: Option<OverlayConfig>,
+    pub info_bar: Option<InfoBarConfig>,
 }
 ```
 
@@ -86,13 +135,40 @@ pub struct AudioStegoConfig {
 ```rust
 pub struct LsbSignatureConfig {
     pub bits: u8,
-    pub key: Option<String>,  // 64 hex chars
+    pub key: Option<String>,      // 64 hex chars
+    pub key_file: Option<String>, // Path to key file (overrides `key`)
 }
 ```
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
-| `key_bytes` | `fn key_bytes(&self) -> Result<[u8; 32]>` | Decode hex key to 32-byte array |
+| `key_bytes` | `fn key_bytes(&self) -> Result<[u8; 32]>` | Decode hex key from `key_file` or inline `key` to 32-byte array |
+
+#### `InfoBarConfig`
+
+```rust
+pub struct InfoBarConfig {
+    pub label: Option<String>,          // default: "STEGANOGRAPHER"
+    pub show_barcode: Option<bool>,     // default: true
+    pub show_qr: Option<bool>,          // default: true
+    pub show_timestamp: Option<bool>,   // default: true
+}
+```
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `show_barcode` | `fn show_barcode(&self) -> bool` | Whether to show barcode |
+| `show_qr` | `fn show_qr(&self) -> bool` | Whether to show QR code |
+| `show_timestamp` | `fn show_timestamp(&self) -> bool` | Whether to show timestamp |
+| `label_or_default` | `fn label_or_default(&self) -> &str` | Label or `"STEGANOGRAPHER"` |
+
+#### `resolve_key` (module-level function)
+
+```rust
+pub fn resolve_key(inline_hex: Option<&str>, key_file: Option<&str>) -> Result<[u8; 32]>
+```
+
+Resolve a 32-byte key from either an inline hex string or a file path. Priority: file > inline hex.
 
 #### `OverlayConfig`
 
@@ -131,16 +207,31 @@ pub struct SignaturePayload {
 
 #### `Signer`
 
-Signs frame data using BLAKE3 + Ed25519.
+Signs frame data using BLAKE3/SHA-256/SHA-3 + Ed25519.
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
-| `new` | `fn new(signing_key: SigningKey) -> Self` | Create with existing key |
+| `new` | `fn new(signing_key: SigningKey) -> Self` | Create with existing key (BLAKE3 default) |
+| `with_hash_algorithm` | `fn with_hash_algorithm(signing_key: SigningKey, algo: HashAlgorithm) -> Self` | Create with specific hash algorithm |
 | `generate` | `fn generate() -> Self` | Generate random keypair |
 | `verifying_key` | `fn verifying_key(&self) -> VerifyingKey` | Get public key |
 | `signing_key_bytes` | `fn signing_key_bytes(&self) -> [u8; 32]` | Export private key bytes |
 | `from_bytes` | `fn from_bytes(bytes: &[u8; 32]) -> Self` | Import from raw bytes |
+| `set_hash_algorithm` | `fn set_hash_algorithm(&mut self, algo: HashAlgorithm)` | Change hash algorithm |
+| `hash_algorithm` | `fn hash_algorithm(&self) -> HashAlgorithm` | Get current hash algorithm |
 | `sign_frame` | `fn sign_frame(&self, frame_index: u64, video: &[u8], audio: Option<&[u8]>) -> SignaturePayload` | Hash and sign frame data |
+
+#### `HashAlgorithm`
+
+```rust
+pub enum HashAlgorithm {
+    Blake3,
+    Sha256,
+    Sha3_256,
+}
+```
+
+Defaults to `Blake3`. Configurable via `[global] hash_algorithm` in TOML.
 
 #### `Verifier`
 
@@ -359,6 +450,75 @@ pub struct StegoMetrics {
 | -------- | ----------- | ------------- |
 | `new` | `fn new() -> Self` | Create zeroed counters |
 | `reset` | `fn reset(&self)` | Reset all counters to zero |
+
+---
+
+### Module: `encryption`
+
+#### `EncryptionKey`
+
+ChaCha20-Poly1305 AEAD encryption for payload confidentiality.
+
+```rust
+pub struct EncryptionKey { /* 32-byte key */ }
+```
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `generate` | `fn generate() -> Self` | Generate random encryption key |
+| `from_bytes` | `fn from_bytes(bytes: &[u8; 32]) -> Self` | Import from raw 32 bytes |
+| `encrypt` | `fn encrypt(&self, plaintext: &[u8]) -> Vec<u8>` | Encrypt with AEAD (returns nonce + ciphertext) |
+| `decrypt` | `fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>>` | Decrypt AEAD ciphertext |
+
+---
+
+### Module: `spread_spectrum`
+
+#### `SpreadSpectrumVideo`
+
+PN-sequence modulation for noise-resistant video embedding.
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `new` | `fn new(key: [u8; 32], spread_factor: u32) -> Self` | Create with PRNG key and spread factor |
+
+Implements `VideoStegoModule`.
+
+#### `SpreadSpectrumAudio`
+
+PN-sequence modulation for noise-resistant audio embedding.
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `new` | `fn new(key: [u8; 32], spread_factor: u32) -> Self` | Create with PRNG key and spread factor |
+
+Implements `AudioStegoModule`.
+
+---
+
+### Module: `dct_video`
+
+#### `DctVideo`
+
+DCT-domain embedding for compression-resistant video steganography.
+
+| Method | Signature | Description |
+| -------- | ----------- | ------------- |
+| `new` | `fn new(bits: u8, key: [u8; 32]) -> Self` | Create with bits and PRNG key |
+
+Implements `VideoStegoModule`.
+
+---
+
+### Module: `error_correction`
+
+Reed-Solomon codes over GF(2⁸) for payload resilience against partial LSB corruption.
+
+---
+
+### Module: `multi_frame`
+
+Spread a single signature across N frames for partial loss resilience. Uses `PayloadConfig.multi_frame_spread` to determine spread count.
 
 ---
 

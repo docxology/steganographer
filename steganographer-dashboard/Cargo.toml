@@ -17,6 +17,7 @@ env_logger = { workspace = true }
 image = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
+rand = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

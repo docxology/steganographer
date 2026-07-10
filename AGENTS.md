@@ -8,14 +8,14 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: LSB video/audio, crypto, overlay, info_bar, signer_backend, metrics, config (11 modules, 56 unit tests, 58 integration tests) |
+| `steganographer-core/` | Crate | Pure algorithms: LSB video/audio, crypto, overlay, info_bar, signer_backend, metrics, config, DCT video, encryption, error_correction, multi_frame, spread_spectrum (16 modules, 115 unit tests, 59 integration tests) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines (4 modules) |
-| `steganographer-cli/` | Crate | CLI binary: 6 Clap subcommands — video, audio, encode, verify, keygen, dashboard (5 modules) |
+| `steganographer-cli/` | Crate | CLI binary: 8 Clap subcommands — video, audio, encode, verify, keygen, info, config, dashboard (5 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
 | `config/` | Config | Example TOML configuration files |
 | `docs/` | Docs | 17 comprehensive documentation files |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
-| `run.sh` | Script | Interactive terminal menu (12 options including dashboard and run-all) |
+| `run.sh` | Script | Interactive terminal menu (6 options: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info) |
 
 ## File Counts
 

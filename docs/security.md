@@ -30,13 +30,13 @@ Christian Cachin (2004) formalized steganographic security using the Kullback-Le
 | ε-secure | D_KL ≤ ε | Bounded distinguishability |
 | Detectable | D_KL → ∞ | Trivially detectable |
 
-Steganographer's LSB embedding at 1-bit with only 864 out of 921,600 bytes modified achieves a very low embedding rate (~0.09%), placing it in the **low-ε regime** for practical purposes.
+Steganographer's LSB embedding at 1-bit with only 904 out of 921,600 bytes modified achieves a very low embedding rate (~0.10%), placing it in the **low-ε regime** for practical purposes.
 
 ### What It Guarantees
 
 | Property | Mechanism | Strength |
 | --- | --- | --- |
-| **Integrity** | BLAKE3 hash over frame data | Collision resistance: 128-bit security |
+| **Integrity** | BLAKE3 hash over frame data (constant-time comparison) | Collision resistance: 128-bit security |
 | **Authenticity** | Ed25519 signature over hash | Forgery resistance: ~128-bit security |
 | **Non-repudiation** | Asymmetric key — signer can't deny producing a valid signature | Same as Ed25519 |
 | **Frame ordering** | Frame index included in hash domain | Reordering/replay detected |
@@ -45,7 +45,7 @@ Steganographer's LSB embedding at 1-bit with only 864 out of 921,600 bytes modif
 
 | Limitation | Description |
 | --- | --- |
-| **Confidentiality** | Embedded data is not encrypted; extraction reveals the payload |
+| **Confidentiality** | Embedded data is not encrypted by default; payload encryption (ChaCha20-Poly1305) is available as an opt-in feature |
 | **Robustness** | LSB data is destroyed by lossy transcoding (H.264, JPEG, MP3) |
 | **Covertness** | Statistical steganalysis may detect the presence of LSB embedding |
 | **Availability** | An attacker can strip LSB data by re-encoding the media |
@@ -71,8 +71,8 @@ We assume an adversary who can:
 | Replace frame content | ✅ | Hash mismatch detected |
 | Reorder frames | ✅ | Frame index in hash domain |
 | Forge signature without key | ✅ | Ed25519 prevents forgery |
-| Strip LSB watermark | ❌ | Re-encoding destroys LSBs (use overlay as backup) |
-| Statistical detection of LSB | ⚠️ | Audio uses keyed PRNG; video uses sequential (more detectable) |
+| Strip LSB watermark | ❌ | Re-encoding destroys LSBs (use overlay or spread-spectrum/DCT as backup) |
+| Statistical detection of LSB | ⚠️ | Audio uses keyed PRNG; video uses sequential (more detectable); spread-spectrum and DCT are more resistant |
 | Side-channel (timing) | ⚠️ | Depends on `ed25519-dalek` implementation |
 | Quantum computing | ❌ | Ed25519 is not post-quantum |
 
@@ -140,12 +140,52 @@ This provides:
 
 ---
 
+## Payload Encryption
+
+### ChaCha20-Poly1305 AEAD
+
+When confidentiality is required (not just integrity/authenticity), Steganographer can encrypt the steganographic payload using ChaCha20-Poly1305 authenticated encryption (RFC 8439) before embedding:
+
+- **Algorithm**: ChaCha20-Poly1305 AEAD — provides both confidentiality and integrity of the ciphertext
+- **Key**: 32 bytes (256-bit), separate from the signing key
+- **Nonce**: 12 bytes, derived deterministically from the frame index (unique per frame per key)
+- **Output**: `ciphertext || tag` (16-byte Poly1305 tag appended)
+
+### Security Properties
+
+| Property | Without Encryption | With Encryption |
+| --- | --- | --- |
+| Payload confidentiality | ❌ Extracted payload is readable | ✅ Encrypted payload is unreadable without key |
+| Tamper detection | ✅ Hash + signature | ✅ AEAD tag detects modification |
+| Key separation | Signing key only | Separate signing + encryption keys |
+
+### Configuration
+
+```toml
+[video.pipeline.payload]
+encrypt = true
+encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# or load from file:
+# encryption_key_file = "/path/to/enc.key"
+```
+
+### Caveats
+
+- The encryption key must be shared with all verifiers who need to extract payloads
+- Encrypted payloads are larger by 16 bytes (the Poly1305 tag), increasing embedding capacity requirements
+- If `encrypt = true` but no key is provided, a random key is generated (not recoverable)
+
+---
+
 ## Dependencies Security
 
 | Dependency | Purpose | Supply Chain Risk |
 | --- | --- | --- |
 | `blake3` | Hashing | Low — well-audited, single-purpose |
 | `ed25519-dalek` | Signatures | Low — widely used, formally verified |
+| `sha2` / `sha3` | Alternative hashes | Low — NIST standard implementations |
+| `chacha20poly1305` | Payload encryption | Low — AEAD, RFC 8439, audited |
+| `subtle` | Constant-time comparison | Low — anti-timing-attack library |
 | `rand` | Key generation | Low — standard library, uses OS entropy |
 | `rand_chacha` | PRNG for audio indexing | Low — well-analyzed ChaCha stream cipher |
 | `gstreamer-rs` | Media I/O | Medium — large surface area, C bindings |
@@ -183,10 +223,10 @@ Steganographer's design sits at a specific point on the capacity–security curv
 
 | Parameter | Steganographer's Choice | Impact |
 | --- | --- | --- |
-| Embedding rate | ~0.09% of cover bytes | Very low → low detectability |
-| Payload size | 104 bytes (fixed) | Minimal footprint |
+| Embedding rate | ~0.10% of cover bytes | Very low → low detectability |
+| Payload size | 109 bytes (fixed) | Minimal footprint |
 | LSB bits | 1 (default, configurable 1–4) | Higher bits → more detectable |
-| Index selection | Sequential (video), Keyed PRNG (audio) | Audio more secure against steganalysis |
+| Index selection | Sequential (video), Keyed PRNG (audio), Spread-Spectrum (keyed), DCT (block-based) | Spread-spectrum and audio more secure against steganalysis |
 | Overlay | Visible info bar (optional) | Deliberate visibility — deterrence model |
 
 The system prioritizes **authenticity and integrity** over **covertness**. The visible Info Bar overlay explicitly signals that watermarking is present — this is a **deterrence-based** security model, not a **secrecy-based** one.

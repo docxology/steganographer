@@ -382,8 +382,14 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
 
     let chunk_counter = AtomicU64::new(0);
     let signer = Signer::generate();
-    let key = [0u8; 32];
-    let mut lsb_audio = LsbAudio::new(1, key);
+    // Generate a random key for audio embedding (shared between encode/decode via DashboardState)
+    let audio_key = {
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        key
+    };
+    let mut lsb_audio = LsbAudio::new(1, audio_key);
 
     loop {
         let msg = match socket.recv().await {
@@ -442,7 +448,7 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
 
         // Update LSB bits if changed
         if lsb_bits != lsb_audio.bits() {
-            lsb_audio = LsbAudio::new(lsb_bits, key);
+            lsb_audio = LsbAudio::new(lsb_bits, audio_key);
         }
 
         // Sign the audio chunk
@@ -476,6 +482,7 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
                 channels,
                 chunk_index: chunk_idx,
                 lsb_bits,
+                audio_key,
             });
         }
 
@@ -507,8 +514,7 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
 async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     log::info!("Audio Decode WebSocket client connected");
 
-    let key = [0u8; 32];
-    let mut lsb_audio = LsbAudio::new(1, key);
+    let mut lsb_audio: Option<LsbAudio> = None;
     let mut current_lsb_bits: u8 = 1;
 
     loop {
@@ -542,13 +548,13 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
             };
 
             // Update LSB bits from stored chunk if changed
-            if ea.lsb_bits != current_lsb_bits {
+            if ea.lsb_bits != current_lsb_bits || lsb_audio.is_none() {
                 current_lsb_bits = ea.lsb_bits;
-                lsb_audio = LsbAudio::new(current_lsb_bits, key);
+                lsb_audio = Some(LsbAudio::new(current_lsb_bits, ea.audio_key));
                 log::info!("Audio decode: LSB bits updated to {}", current_lsb_bits);
             }
 
-            let extracted = lsb_audio.extract(&buf);
+            let extracted = lsb_audio.as_ref().unwrap().extract(&buf);
             let verify_duration = verify_start.elapsed();
 
             let (verified, payload_info) = match extracted {
@@ -648,6 +654,7 @@ pub struct EncodedAudioChunk {
     pub channels: u16,
     pub chunk_index: u64,
     pub lsb_bits: u8,
+    pub audio_key: [u8; 32],
 }
 
 /// Base64-encode bytes (standard encoding).

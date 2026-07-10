@@ -120,9 +120,9 @@ flowchart LR
 | --- | --- |
 | **Threat** | Media is re-encoded (JPEG, H.264, MP3) which destroys LSB data |
 | **Impact** | LSB signature is lost; QR overlay may be degraded but survives |
-| **Countermeasure** | (a) QR overlays survive lossy compression. (b) System is designed for RAW pipeline processing, not post-compression verification. (c) WAV recordings from the dashboard preserve LSB data |
-| **Detection** | LSB verification failure after transcoding is expected and documented |
-| **Residual Risk** | LSB steganography is inherently fragile to lossy compression — this is a known limitation |
+| **Countermeasure** | (a) QR overlays survive lossy compression. (b) DCT-domain embedding (`dct_video`) places signatures in frequency coefficients that survive JPEG/H.264 re-encoding. (c) Spread-spectrum embedding (`spread_spectrum_video`) disperses the signal across a wide band, surviving noise and moderate compression. (d) WAV recordings from the dashboard preserve LSB data |
+| **Detection** | LSB verification failure after transcoding is expected; DCT-domain and spread-spectrum modules provide fallback robustness |
+| **Residual Risk** | Pure LSB steganography is inherently fragile to aggressive lossy compression — DCT and spread-spectrum reduce but do not eliminate this risk |
 
 ### T8: Side-Channel Leakage
 
@@ -133,6 +133,26 @@ flowchart LR
 | **Countermeasure** | Ed25519 uses constant-time operations. BLAKE3 is designed for constant-time execution |
 | **Detection** | N/A — prevented by algorithmic design |
 | **Residual Risk** | Hardware-level side channels theoretically possible but impractical |
+
+### T9: Partial LSB Corruption
+
+| Property | Value |
+| --- | --- |
+| **Threat** | Noise or minor corruption damages some LSB-embedded bytes, causing extraction failure |
+| **Impact** | Medium — signature may be partially unrecoverable |
+| **Countermeasure** | Reed-Solomon error correction codes (GF(2⁸)) add redundancy to the embedded payload, enabling recovery from partial corruption |
+| **Detection** | Error correction decoder attempts to recover the original payload; success/failure reported |
+| **Residual Risk** | If corruption exceeds the error correction capacity (number of redundant symbols), recovery fails |
+
+### T10: Payload Interception
+
+| Property | Value |
+| --- | --- |
+| **Threat** | Adversary extracts the LSB-embedded payload and reads the signature/hash data |
+| **Impact** | Low — signature and hash are not secret, but payload metadata may reveal signer identity |
+| **Countermeasure** | ChaCha20-Poly1305 AEAD encryption (`encrypt` in `PayloadConfig`) encrypts the payload before embedding. Only holders of the encryption key can decrypt |
+| **Detection** | Without the encryption key, extracted data appears as random noise |
+| **Residual Risk** | If the encryption key is compromised, the payload is readable |
 
 ---
 
@@ -147,15 +167,15 @@ flowchart LR
 | **Non-repudiation** | A valid signature proves the holder of the private key created it |
 | **Tamper evidence** | Any modification to signed data invalidates verification |
 | **Visual deterrence** | QR overlay and text watermarks discourage unauthorized use |
+| **Payload confidentiality** | Optional ChaCha20-Poly1305 encryption hides signer identity in embedded data |
 
 ### What Steganographer Does NOT Guarantee
 
 | Non-guarantee | Reason |
 | --- | --- |
 | **Tamper prevention** | Media can still be modified — modifications are just detectable |
-| **Confidentiality** | Media content is NOT encrypted, only signed |
 | **Covert channels** | LSB embedding is detectable by statistical steganalysis at high bit counts |
-| **Compression survival** | LSB data is destroyed by lossy compression (JPEG, H.264, MP3) |
+| **Compression survival (LSB)** | Pure LSB data is destroyed by lossy compression (JPEG, H.264, MP3) — DCT and spread-spectrum modules improve robustness |
 | **Key management** | The system generates keys but does not manage their lifecycle |
 
 ---
@@ -292,9 +312,11 @@ The web GUI exposes several security-relevant controls:
 | Risk | Severity | Mitigation Path |
 | --- | --- | --- |
 | Private key compromise | Critical | Hardware security modules (HSMs), key rotation |
-| Lossy compression destroying LSB | Medium | Use raw pipelines, QR overlay as fallback |
+| Encryption key compromise | High | Separate key management, key rotation, HSM storage |
+| Lossy compression destroying LSB | Medium | DCT-domain embedding, spread-spectrum, QR overlay as fallback |
 | Steganalysis detecting LSB at high bit depths | Low | Use 1-bit LSB (below RS analysis threshold) |
-| Frame reordering between signed frames | Low | Sign at maximum rate (5/s) to minimize gaps |
+| Partial corruption exceeding ECC capacity | Low | Increase Reed-Solomon redundancy symbols |
+| Frame reordering between signed frames | Low | Multi-frame spreading, sign at maximum rate |
 | Quantum computing breaking Ed25519 | Future | ML-DSA (post-quantum) backend planned in roadmap |
 
 ---

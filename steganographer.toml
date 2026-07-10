@@ -12,6 +12,11 @@
 [global]
 # Logging verbosity: "trace" | "debug" | "info" | "warn" | "error"
 log_level = "info"
+# Hash algorithm for frame data: "blake3" (default), "sha256", "sha3-256"
+# hash_algorithm = "blake3"
+# Path to a file containing the LSB embedding key (hex, 64 chars = 32 bytes).
+# Overrides the inline `key` field in [video.stego.lsb_signature] and [audio.stego.lsb_signature].
+# key_file = "keys/stego.key"
 
 # ─── Video Pipeline ───────────────────────────────────────────────────────────
 #
@@ -21,121 +26,104 @@ log_level = "info"
 [video]
 
 # ─── Video Pipeline Settings ──────────────────────────────────────────────────
-# Controls the GStreamer pipeline parameters: resolution, framerate, opacity.
-# These values are read by run.sh for live pipeline construction.
 
 [video.pipeline]
-# Video resolution (width × height in pixels).
-# Common values: 640×480 (VGA), 1280×720 (HD), 1920×1080 (Full HD)
 width = 640
 height = 480
-# Target framerate in frames per second.
-# Common values: 15, 24, 25, 30, 60
 framerate = 30
 # Overlay opacity / steganographic intensity (0.0 – 1.0).
-#   1.0 = full intensity (default)
-#   0.5 = half intensity / semi-transparent overlays
-#   0.0 = overlays disabled (LSB still active)
 opacity = 1.0
 
 [video.pipeline.payload]
 # Payload type embedded per frame: "signature" (default) | "custom"
 type = "signature"
-# Payload size in bytes. Default: 104 (8 frame_index + 32 BLAKE3 + 64 Ed25519)
-size = 104
+# Payload size in bytes. Default: 109 (4 magic + 1 version + 8 frame_index + 32 hash + 64 signature)
+size = 109
 # Signing backend: "ed25519" (default, BLAKE3+Ed25519) | "ethereum" (Keccak-256+secp256k1 EIP-191)
-# The "ethereum" backend requires building with --features ethereum
 signing_backend = "ed25519"
+# Enable payload encryption (ChaCha20-Poly1305 AEAD).
+# encrypt = true
+# Encryption key (hex-encoded 32 bytes = 64 hex chars).
+# encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Path to encryption key file (overrides encryption_key).
+# encryption_key_file = "keys/encryption.key"
+# Error correction: "none" (default) | "reed_solomon"
+# error_correction = "reed_solomon"
+# Multi-frame signature spreading: spread one signature across N frames (1 = no spreading).
+# multi_frame_spread = 1
 
 [video.input]
-# Endpoint type: "device" | "file" | "network"
 type = "device"
-# Backend: "v4l2" (Linux), "avfoundation" (macOS), omit for test source
 # backend = "v4l2"
 # device = "/dev/video0"
 # backend = "avfoundation"
 # device = "FaceTime HD Camera"
-# For file input:
 # type = "file"
 # path = "input_video.raw"
 
 [video.output]
-# Output endpoint
 type = "device"
-# For virtual camera output (Linux):
 # backend = "v4l2loopback"
 # device = "/dev/video42"
-# For file output:
 # type = "file"
 # path = "output_video.raw"
 
 [video.stego]
 # Ordered list of stego modules applied per frame.
-# Available: "lsb_signature", "overlay"
-# Order matters: LSB embeds first, overlay renders on top.
-pipeline = ["lsb_signature", "overlay"]
+# Available: "lsb_signature", "overlay", "info_bar"
+# Order matters: LSB embeds first, overlay/info_bar render on top.
+pipeline = ["lsb_signature", "overlay", "info_bar"]
 
 [video.stego.lsb_signature]
-# Number of least-significant bits to use per pixel byte.
-# Range: 1–4. Lower = less visible distortion, higher = more capacity.
-#   1 bit: imperceptible (±1/256 per channel), needs 864 bytes minimum
-#   2 bit: barely visible (±3/256), needs 432 bytes minimum
-#   3 bit: slightly visible (±7/256), needs 288 bytes minimum
-#   4 bit: noticeable (±15/256), needs 216 bytes minimum
+# Number of least-significant bits to use per pixel byte (1–4).
 bits = 1
 # 32-byte hex-encoded key (64 hex characters).
 # Used for PRNG index permutation in audio; included for config consistency.
 # Generate with: steganographer keygen --output mykey
 key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Alternatively, load key from file (overrides `key`):
+# key_file = "keys/stego.key"
 
 [video.stego.overlay]
 # Visible text watermark burned into the video frame.
-# Static text string rendered via built-in 8×8 bitmap font.
-text = "CONFIDENTIAL"
-# Position on frame: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center"
+# Supports {timestamp}, {frame_index}, {date}, {time} placeholders.
+text = "CONFIDENTIAL {timestamp}"
 position = "bottom-right"
-# Font size in pixels (scale multiplier × 8px base). 16 = 2× scale.
 font_size = 16
 
+[video.stego.info_bar]
+# Exoteric information bar with timestamp, barcode, and QR code.
+label = "STEGANOGRAPHER"
+show_barcode = true
+show_qr = true
+show_timestamp = true
+
 # ─── Audio Pipeline ───────────────────────────────────────────────────────────
-#
-# Real-time audio capture → steganographic embedding → output.
-# Supports PulseAudio, PipeWire (Linux), Core Audio (macOS), and test sources.
 
 [audio]
 
 [audio.input]
 type = "device"
-# Linux:
 # backend = "pulseaudio"
 # backend = "pipewire"
-# macOS:
 # backend = "coreaudio"
-# For file input:
 # type = "file"
 # path = "input_audio.raw"
 
 [audio.output]
 type = "device"
 # backend = "pulseaudio"
-# backend = "pipewire"
-# For file output:
 # type = "file"
 # path = "output_audio.raw"
 
 [audio.stego]
-# Available audio stego modules: "lsb_signature"
 pipeline = ["lsb_signature"]
 
 [audio.stego.lsb_signature]
-# Number of LSBs per 16-bit audio sample.
-# Range: 1–4. At 1 bit: ~90 dB SNR (completely inaudible).
-#   1 bit: inaudible, needs 864 samples minimum
-#   2 bit: inaudible, needs 432 samples minimum
-#   3 bit: barely audible in silence, needs 288 samples minimum
-#   4 bit: faint noise in quiet passages, needs 216 samples minimum
+# Number of LSBs per 16-bit audio sample (1–4).
 bits = 1
 # 32-byte hex-encoded key for pseudo-random sample index permutation.
 # Each frame uses: seed = key XOR frame_index → ChaCha8 PRNG → Fisher-Yates shuffle.
-# This makes the embedding pattern unpredictable without the key.
 key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+# Alternatively, load key from file:
+# key_file = "keys/audio_stego.key"

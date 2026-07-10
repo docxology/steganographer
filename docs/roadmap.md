@@ -7,9 +7,9 @@ gantt
     axisFormat %b %Y
     section Core
         v0.1.0 LSB + Ed25519 + Dashboard :done, v01, 2024-01, 2024-06
-        v0.2.0 DCT + Audio Enhance :active, v02, 2024-06, 2024-12
+        v0.2.0 Advanced Stego + Crypto :active, v02, 2024-06, 2024-12
     section Advanced
-        v0.3.0 Spread Spectrum + ML-DSA :v03, 2025-01, 2025-06
+        v0.3.0 Spread Spectrum + Container I/O :v03, 2025-01, 2025-06
         v1.0.0 Production Ready :v10, 2025-06, 2025-12
 ```
 
@@ -56,6 +56,17 @@ gantt
 - **Release Acceptance Criteria** — Documented in `TODO.md`: tests, docs, security, build gates (NEW)
 - **Version API** — `GET /api/version` endpoint returns crate name and version as JSON (NEW)
 - **Metrics Reset API** — `POST /api/metrics/reset` endpoint resets all dashboard counters (NEW)
+- **`info` Command** — `steganographer info` reports steganographic capacity of media files (NEW)
+- **`config check` Command** — Validates TOML configuration without running pipelines (NEW)
+- **Configurable Hash Algorithm** — BLAKE3 (default), SHA-256, or SHA-3 via `[global] hash_algorithm` (NEW)
+- **Key File References** — `key_file` field in TOML config to reference `.key`/`.pub` files instead of inline hex (NEW)
+- **DCT-Domain Embedding** — `dct_video` stego type for compression-resistant steganography (NEW)
+- **Spread-Spectrum Embedding** — `spread_spectrum_video` and `spread_spectrum_audio` for noise-resistant embedding via PN-sequence modulation (NEW)
+- **Payload Encryption** — ChaCha20-Poly1305 AEAD encryption of embedded payload via `PayloadConfig.encrypt` (NEW)
+- **Error Correction Codes** — Reed-Solomon codes over GF(2⁸) for partial corruption recovery (NEW)
+- **Multi-Frame Signatures** — Spread one signature across N frames via `PayloadConfig.multi_frame_spread` (NEW)
+- **`--format json` for Encode** — Machine-readable JSON output for the encode command (NEW)
+- **`--embedding-key` for Verify** — Extraction key for audio/spread-spectrum verification (NEW)
 - **132 Tests** — 56 core unit + 58 core integration + 12 dashboard + 1 GStreamer + 5 Ethereum (feature-gated)
 
 ---
@@ -68,7 +79,6 @@ gantt
 | --- | --- | --- | --- |
 | **Container format support** | High | Medium | Read/write MP4, MKV, WAV files (not just raw) via GStreamer decodebin/encodebin |
 | **Batch processing** | High | Low | Encode/verify entire directories of files |
-| **Key file config** | Medium | Low | Reference `.key`/`.pub` files from TOML config instead of inline hex |
 | **YUV420 overlay** | Medium | Medium | Support text overlay in YUV color space |
 
 ---
@@ -79,12 +89,9 @@ gantt
 
 | Feature | Priority | Complexity | Description |
 | --- | --- | --- | --- |
-| **DCT-domain embedding** | High | High | Embed in frequency domain for H.264/JPEG robustness |
-| **Spread-spectrum** | High | High | PN-sequence modulation for noise/compression resistance |
-| **Multi-frame signatures** | Medium | Medium | Spread one signature across N frames for redundancy |
-| **Error correction codes** | Medium | Medium | Reed-Solomon or LDPC codes for partial recovery |
+| **Container format I/O** | High | Medium | MP4/MKV/WAV support via GStreamer decodebin/encodebin |
 | **Native GStreamer plugin** | Medium | High | Full `BaseTransform` implementation for zero-copy processing |
-| **Encryption** | Medium | Medium | AES-256-GCM encrypt payload before LSB embedding |
+| **Certificate chain support** | Medium | Medium | X.509 or WebPKI for identity binding |
 
 ---
 
@@ -94,12 +101,12 @@ gantt
 
 | Feature | Priority | Complexity | Description |
 | --- | --- | --- | --- |
-| **Video Seal integration** | High | Medium | Meta's neural-network robust watermarking |
 | **WASM build** | Medium | High | Browser-based steganography via WebAssembly |
 | **Post-quantum signatures** | Medium | Medium | ML-DSA (FIPS 204) as Ed25519 alternative |
 | **Streaming authentication** | Medium | High | Merkle tree chains for authenticated video segments |
 | **Cloud API** | Low | High | REST/gRPC service for server-side watermarking |
 | **Hardware acceleration** | Low | High | GPU-accelerated hashing and embedding |
+| **Video Seal integration** | Low | High | Meta's neural-network robust watermarking |
 
 ---
 
