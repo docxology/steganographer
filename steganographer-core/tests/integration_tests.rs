@@ -1492,3 +1492,321 @@ fn test_signer_backend_from_bytes_deterministic() {
         "Same seed should produce same public key"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DCT: JPEG round-trip resilience test
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_dct_embed_extract_roundtrip() {
+    use steganographer_core::dct_video::DctVideo;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(0, b"dct roundtrip test", None);
+
+    let mut data = vec![128u8; 320 * 320 * 3];
+    let mut dct = DctVideo::default();
+
+    {
+        let mut frame = VideoFrame {
+            width: 320, height: 320, stride: 320 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        };
+        dct.embed(&mut frame, Some(&payload)).unwrap();
+    }
+
+    {
+        let frame = VideoFrame {
+            width: 320, height: 320, stride: 320 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        };
+        let extracted = dct.extract(&frame).unwrap();
+        assert!(extracted.is_some(), "DCT should extract payload");
+        let extracted = extracted.unwrap();
+        assert_eq!(extracted.frame_index, 0);
+        assert_eq!(extracted.hash, payload.hash);
+        assert_eq!(extracted.signature, payload.signature);
+    }
+}
+
+#[test]
+fn test_dct_visual_distortion_is_minimal() {
+    use steganographer_core::dct_video::DctVideo;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(0, b"distortion test", None);
+
+    let mut data = vec![128u8; 320 * 320 * 3];
+    let original = data.clone();
+    let mut dct = DctVideo::new(20, 8, 1);
+
+    {
+        let mut frame = VideoFrame {
+            width: 320, height: 320, stride: 320 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        };
+        dct.embed(&mut frame, Some(&payload)).unwrap();
+    }
+
+    let total_diff: u64 = data.iter()
+        .zip(original.iter())
+        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64)
+        .sum();
+    let avg = total_diff as f64 / data.len() as f64;
+    assert!(avg < 5.0, "Average distortion should be < 5, got {}", avg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Spread-spectrum: noise resistance and cross-module tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_spread_spectrum_video_roundtrip() {
+    use steganographer_core::spread_spectrum::SpreadSpectrumVideo;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(42, b"ss video test", None);
+
+    let key = [42u8; 32];
+    let mut ss = SpreadSpectrumVideo::with_key(key);
+    let mut data = vec![128u8; 1024 * 1024];
+
+    {
+        let mut frame = VideoFrame {
+            width: 1024, height: 1024, stride: 1024 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 42,
+        };
+        ss.embed(&mut frame, Some(&payload)).unwrap();
+    }
+
+    {
+        let frame = VideoFrame {
+            width: 1024, height: 1024, stride: 1024 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 42,
+        };
+        let extracted = ss.extract(&frame).unwrap();
+        assert!(extracted.is_some());
+        let extracted = extracted.unwrap();
+        assert_eq!(extracted.frame_index, 42);
+        assert_eq!(extracted.hash, payload.hash);
+    }
+}
+
+#[test]
+fn test_spread_spectrum_audio_roundtrip() {
+    use steganographer_core::spread_spectrum::SpreadSpectrumAudio;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(0, b"ss audio test", None);
+
+    let key = [42u8; 32];
+    let mut ss = SpreadSpectrumAudio::with_key(key);
+    let mut samples = vec![0i16; 65536]; // enough for spread-spectrum
+
+    {
+        let mut buf = AudioBuffer {
+            channels: 1, sample_rate: 44100,
+            samples: &mut samples, frame_index: 0,
+        };
+        ss.embed(&mut buf, Some(&payload)).unwrap();
+    }
+
+    {
+        let buf = AudioBuffer {
+            channels: 1, sample_rate: 44100,
+            samples: &mut samples, frame_index: 0,
+        };
+        let extracted = ss.extract(&buf).unwrap();
+        assert!(extracted.is_some());
+        let extracted = extracted.unwrap();
+        assert_eq!(extracted.frame_index, 0);
+        assert_eq!(extracted.hash, payload.hash);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Encryption: end-to-end tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_encryption_roundtrip() {
+    use steganographer_core::encryption;
+    let key = encryption::EncryptionKey::generate();
+    let plaintext = b"top secret steganographic payload";
+    let enc = encryption::encrypt(&key, 42, plaintext, None).unwrap();
+    assert_ne!(&enc[..], plaintext);
+    let dec = encryption::decrypt(&key, 42, &enc, None).unwrap();
+    assert_eq!(dec, plaintext);
+}
+
+#[test]
+fn test_encryption_tamper_detection() {
+    use steganographer_core::encryption;
+    let key = encryption::EncryptionKey::generate();
+    let mut enc = encryption::encrypt(&key, 0, b"secret", None).unwrap();
+    enc[0] ^= 1;
+    assert!(encryption::decrypt(&key, 0, &enc, None).is_err());
+}
+
+#[test]
+fn test_encryption_wrong_key_fails() {
+    use steganographer_core::encryption;
+    let key1 = encryption::EncryptionKey::generate();
+    let key2 = encryption::EncryptionKey::generate();
+    let enc = encryption::encrypt(&key1, 0, b"secret", None).unwrap();
+    assert!(encryption::decrypt(&key2, 0, &enc, None).is_err());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Error correction: encode/decode roundtrip tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_error_correction_roundtrip() {
+    use steganographer_core::error_correction;
+    let data = b"payload data for RS test";
+    let encoded = error_correction::encode(data, 4).unwrap();
+    let decoded = error_correction::decode(&encoded, data.len(), 4).unwrap();
+    assert_eq!(decoded, data);
+}
+
+#[test]
+fn test_error_correction_single_error() {
+    use steganographer_core::error_correction;
+    let data = b"single error correction test!";
+    let mut encoded = error_correction::encode(data, 4).unwrap();
+    encoded[3] ^= 0xFF;
+    let decoded = error_correction::decode(&encoded, data.len(), 4).unwrap();
+    assert_eq!(decoded, data);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Multi-frame: split/reconstruct tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_multi_frame_split_reconstruct() {
+    use steganographer_core::multi_frame;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(0, b"multi-frame test", None);
+
+    let shards = multi_frame::split(&payload, 4, 0).unwrap();
+    assert_eq!(shards.len(), 4);
+    let reconstructed = multi_frame::reconstruct(&shards).unwrap();
+    assert_eq!(reconstructed.frame_index, 0);
+    assert_eq!(reconstructed.hash, payload.hash);
+    assert_eq!(reconstructed.signature, payload.signature);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KDF: key derivation tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_kdf_derive_all() {
+    use steganographer_core::kdf;
+    let master = b"my secret master key";
+    let keys = kdf::derive_all(master);
+    assert_ne!(keys.signing_key, keys.encryption_key);
+    assert_ne!(keys.signing_key, keys.embedding_key);
+    assert_ne!(keys.encryption_key, keys.embedding_key);
+
+    // Deterministic
+    let keys2 = kdf::derive_all(master);
+    assert_eq!(keys.signing_key, keys2.signing_key);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Steganalysis: detection tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_steganalysis_chi_squared_runs() {
+    use steganographer_core::steganalysis;
+    let data = vec![128u8; 640 * 480 * 3];
+    let result = steganalysis::chi_squared_detect(&data);
+    assert!(result.confidence >= 0.0 && result.confidence <= 1.0);
+}
+
+#[test]
+fn test_steganalysis_combined_runs() {
+    use steganographer_core::steganalysis;
+    let data = vec![128u8; 320 * 240 * 3];
+    let result = steganalysis::analyze_combined(&data);
+    assert!(result.confidence >= 0.0 && result.confidence <= 1.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hash algorithm: cross-algorithm tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_sha256_sign_verify() {
+    use steganographer_core::crypto::HashAlgorithm;
+    let signer = Signer::with_hash_algorithm(
+        ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        HashAlgorithm::Sha256,
+    );
+    let verifier = Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha256);
+    let data = b"sha256 cross-algo test";
+    let payload = signer.sign_frame(0, data, None);
+    assert!(verifier.verify(&payload, data, None));
+}
+
+#[test]
+fn test_sha3_sign_verify() {
+    use steganographer_core::crypto::HashAlgorithm;
+    let signer = Signer::with_hash_algorithm(
+        ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        HashAlgorithm::Sha3_256,
+    );
+    let verifier = Verifier::with_hash_algorithm(signer.verifying_key(), HashAlgorithm::Sha3_256);
+    let data = b"sha3 cross-algo test";
+    let payload = signer.sign_frame(0, data, None);
+    assert!(verifier.verify(&payload, data, None));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hash chain: streaming authentication tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_hash_chain_basic() {
+    use steganographer_core::hash_chain;
+    let mut chain = hash_chain::HashChain::new();
+    chain.add_frame(0, b"frame 0 data");
+    chain.add_frame(1, b"frame 1 data");
+    chain.add_frame(2, b"frame 2 data");
+    let root = chain.build_root();
+    assert!(root.is_some(), "Should build Merkle root");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Adaptive embedding: roundtrip test
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_adaptive_lsb_roundtrip() {
+    use steganographer_core::adaptive::AdaptiveLsbVideo;
+    let signer = Signer::generate();
+    let payload = signer.sign_frame(0, b"adaptive test", None);
+
+    let mut data: Vec<u8> = (0..320 * 320 * 3).map(|i| (i % 256) as u8).collect();
+    let mut adaptive = AdaptiveLsbVideo::new(10, 1);
+
+    {
+        let mut frame = VideoFrame {
+            width: 320, height: 320, stride: 320 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        };
+        adaptive.embed(&mut frame, Some(&payload)).unwrap();
+    }
+
+    {
+        let frame = VideoFrame {
+            width: 320, height: 320, stride: 320 * 3,
+            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+        };
+        let extracted = adaptive.extract(&frame).unwrap();
+        assert!(extracted.is_some(), "Adaptive LSB should extract payload");
+        let extracted = extracted.unwrap();
+        assert_eq!(extracted.frame_index, 0);
+        assert_eq!(extracted.hash, payload.hash);
+    }
+}
