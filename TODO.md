@@ -3,151 +3,103 @@
 Scoped improvements and future plans.
 See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
-> **Status note (2026-07-22, v0.2.0):** All Critical, Major, Medium, and Minor
-> findings from the 2026-07-22 deep review + 8-agent RedTeam adversarial
-> analysis have been resolved in v0.2.0. The items below are the remaining
-> genuinely-open work — new findings, strategic decisions, and future features.
-> Each item is scoped with file:line evidence where applicable.
+> **Status note (2026-07-23, v0.3.0):** All Critical, Major, Medium, and Minor
+> findings from the 2026-07-22 deep review + 8-agent RedTeam adversarial analysis
+> have been resolved. The v0.3.0 release added Berlekamp-Massey decoder
+> infrastructure, live pipeline `--signing-key`, nightly fuzz CI, and recorded the
+> C2PA interoperability decision. The items below are genuinely-open work.
 
 ---
 
 ## 🚨 CRITICAL — None Open
 
-All Critical findings from the audit are resolved in v0.2.0:
-
-- [x] ~~Real Ed25519 private key committed to this public repo~~ — scrubbed from
-  git history via `git filter-repo`, key rotated, `.gitignore` hardened, gitleaks
-  CI gate added. See [`docs/key-rotation.md`](docs/key-rotation.md).
-- [x] ~~Regenerable build artifacts committed alongside the key~~ — removed from
-  git tracking, `output/` added to `.gitignore`.
-- [x] ~~No key lifecycle model~~ — key rotation documented, revocation procedure
-  published, secret-scanning CI gate active. Full key-lifecycle system (rotation
-  API + revoked-keys list checked at verify time) remains a Backlog item below.
-- [x] ~~Live dashboard has zero authentication~~ — default bind `127.0.0.1`,
-  `--auth-token` Bearer auth on POST routes (constant-time via `subtle`), CORS
-  restricted, `--host` flag for explicit `0.0.0.0` opt-in.
+All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
 
 ---
 
 ## 🔴 MAJOR — None Open
 
-All Major crypto/functional findings from the audit are resolved in v0.2.0:
-
-- [x] ~~AEAD nonce reuse across batch encodes~~ — `encryption.rs` now prepends a
-  4-byte random salt to the nonce. Each invocation gets a unique nonce.
-- [x] ~~CLI spread-spectrum embedding never uses the secret key~~ — `embed_ss_bit`
-  now uses `ss.key()` to seed the PN-sequence RNG. Round-trip verified.
-- [x] ~~Unbounded RS decode brute force DoS~~ — `decode()` now caps
-  `parity_count` (≤16) and `data_len` (≤65536).
-- [x] ~~`dct_video` CLI stego type silently falls back to LSB~~ — now errors
-  clearly on both encode and verify sides.
-- [x] ~~Zero automated test coverage for `steganographer-cli`~~ — 10 CLI
-  integration tests added covering all stego types + encrypt/ECC round-trips.
-- [x] ~~Unvalidated config `bits` field panics the live pipeline~~ —
-  `LsbVideo::try_new()` / `LsbAudio::try_new()` added, CLI callers wired.
+All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
 
 ---
 
 ## 🟡 MEDIUM — None Open
 
-All Medium findings from the audit are resolved in v0.2.0:
-
-- [x] ~~No slow-KDF / salt for master-secret derivation~~ — entropy warning added
-  for master secrets < 32 bytes. `--master-secret-file` / `--master-secret-stdin`
-  alternatives added.
-- [x] ~~Inconsistent failure mode for missing `--embedding-key`~~ — `lsb_audio`
-  verify now `bail!`s like `spread_spectrum_video`.
-- [x] ~~`--quiet` can hide live session public key~~ — `eprintln!` used instead
-  of `log::info!` in `cmd_video.rs` and `cmd_audio.rs`.
-- [x] ~~`AGENTS.md` doc drift understates crypto surface~~ — all per-crate
-  AGENTS.md files updated with correct module/subcommand/test counts.
-- [x] ~~Duplicated KDF context strings~~ — `cmd_encode.rs` now calls
-  `kdf::derive_all()` instead of hand-copying context strings.
-- [x] ~~`deny.toml` advisory policy doesn't match comment~~ — fixed: `deny =
-  ["medium", "high", "critical"]`.
-- [x] ~~`Cargo.lock` is gitignored~~ — committed for reproducible builds.
-- [x] ~~`docs/threat-model.md` internal contradiction~~ — T2 residual risk
-  scoped to acknowledge T4 (signature stripping).
-- [x] ~~Fuzz harness isn't wired to cargo-fuzz~~ — proper `Cargo.toml` + 3
-  `fuzz_target!` binaries + README.
-- [x] ~~CI has no Windows job~~ — `docs/platforms.md` softened to
-  "Community-Supported — No CI Coverage".
-- [x] ~~Dockerfile runs as root~~ — non-root `USER stego` added, CMD uses
-  `--host 127.0.0.1`, digest-pinning guidance added.
+All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
 
 ---
 
 ## 🟢 MINOR — None Open
 
-All Minor findings from the audit are resolved in v0.2.0:
-
-- [x] ~~Stale test counts (187/266/271)~~ — all updated to 282 across every file.
-- [x] ~~Stale CLI subcommand count (6/8)~~ — all updated to 10.
-- [x] ~~Stale module count (16)~~ — updated to 21.
-- [x] ~~`docs/roadmap.md` fictional Gantt dates~~ — real dates (2026-2027).
-- [x] ~~`rand` version fragmentation~~ — informational only, no CVE. Workspace
-  pins `rand = "0.8"`.
-- [x] ~~Latent `unreachable!()` in `gf_inv`~~ — replaced with logged 0-return.
-- [x] ~~Secrets passed as CLI arguments~~ — `--master-secret-file` / `--master-secret-stdin`
-  alternatives added with warning on `--master-secret`.
-- [x] ~~Local build note (MSRV)~~ — `rust-toolchain.toml` pins stable + clippy
-  + rustfmt for deterministic toolchain.
+All resolved in v0.2.0–v0.3.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
 
 ---
 
 ## 📐 Strategic — from RedTeam Adversarial Analysis
 
-These findings are architectural/strategic decisions, not code bugs. They
-require design discussion before implementation.
+These are architectural/strategic decisions, not code bugs.
 
-- **Key lifecycle system (8/8 agent convergence).** The cryptographic primitives
-  are sound. The v0.2.0 fixes (key rotation docs, secret-scanning CI) address
-  the immediate gap. The remaining work: ship a minimal revocation mechanism
-  (a published revoked-keys list checked at verify time) before investing in
-  post-quantum/certificate-chain items.
-  - [ ] **Key lifecycle: rotation API + revocation list** — minimum viable: API
-    endpoint or CLI command to revoke a key, and a published revoked-keys list
-    that `verify` checks against.
+- [ ] **Key lifecycle: rotation API + revocation list** — minimum viable: CLI
+  command to revoke a key, and a published revoked-keys list that `verify` checks
+  against. The v0.2.0 fixes (key rotation docs, secret-scanning CI) address the
+  immediate gap; this is the full system.
+  - **Scope**: Add `steganographer revoke --key <hex>` command that appends to a
+    `revoked-keys.json` file. Modify `verify` to check the signer's public key
+    against this list and warn/fail if revoked. Publish the list alongside signed
+    media for third-party verification.
+  - **Files**: `steganographer-cli/src/cmd_encode.rs` (new `revoke` subcommand),
+    `steganographer-core/src/crypto.rs` (revocation check in `Verifier`),
+    `steganographer-cli/src/main.rs` (new `Commands::Revoke` variant).
 
-- **Headline claim vs shipped reality.** `docs/steganography-theory.md:271`
-  states the current default pipeline is intra-frame LSB ("maximizes capacity
-  at the cost of robustness"). The genuinely robust approach (learned
-  watermarking encoder, VideoSeal-style) is roadmap-only.
-  - [ ] **Narrow leading claim** — update README/intro to match the default
-    pipeline's actual robustness, or move the robust method up the roadmap.
-  - [ ] **Learned watermarking encoder** — research + prototype a neural
-    watermarking approach resistant to re-encoding/cropping/AI upscaling.
-
-- **C2PA interoperability decision.**
-  - [ ] **Record architectural decision** — in `docs/architecture.md`, decide
-    whether/how to interoperate with or emit C2PA (Content Credentials)
-    manifests alongside the custom format.
+- [ ] **Learned watermarking encoder** — research + prototype a neural watermarking
+  approach resistant to re-encoding/cropping/AI upscaling (VideoSeal-style).
+  This is a major research effort, not a code fix.
+  - **Scope**: Literature review of HiDDeN, StegaStamp, RivaGAN, VideoSeal.
+    Prototype with PyTorch, evaluate against JPEG/PNG compression, H.264/265
+    transcoding, and resize/crop attacks. If viable, implement as a new
+    `steganographer-core/src/neural_stego.rs` module.
+  - **Dependency**: Requires ML model training infrastructure (GPU, dataset).
 
 ---
 
-## 🔜 Upcoming (Minor Improvements)
+## 🔜 Upcoming (Scoped Improvements)
 
-- [ ] **Berlekamp-Massey decoder** — full multi-error RS correction. The current
-  `error_correction.rs` implements brute-force single-error correction (now
-  bounded — see v0.2.0 fix). A real Berlekamp-Massey decoder is both more
-  capable *and* polynomial-time bounded. No BM algorithm exists anywhere in
-  the codebase (`grep -i berlekamp` = 0 hits).
+- [ ] **Berlekamp-Massey multi-error correction** — the BM/Chien/Forney
+  infrastructure is built (`error_correction.rs` lines 275–410). Single-error
+  correction works via brute-force fallback. Multi-error correction via BM
+  needs a convention fix: the error locator polynomial's roots must correctly
+  map to codeword positions for this non-systematic evaluation-based RS code.
+  Two tests are `#[ignore]`d with explanation.
+  - **Scope**: Debug the BM syndrome/Chien/Forney convention mismatch. The
+    syndrome computation uses high-frequency DFT coefficients
+    (`S_p = sum_i r[i] * alpha^((k+p)*i)` for `p = 0..parity_count-1`). The
+    error locator should have roots at `alpha^(-i)` for error at position `i`,
+    but the exact mapping between BM output and Chien search evaluation points
+    needs verification against a known-error test case.
+  - **Files**: `steganographer-core/src/error_correction.rs` (fix convention in
+    `chien_search()` and `forney()`, un-ignore 2 tests).
 
 - [ ] **DCT raw-byte CLI path** — wire the CLI's `dct_video` stego type through
-  the real `DctVideo` core library implementation (currently errors clearly
-  instead of silently falling back to LSB, which is the correct stopgap).
+  the real `DctVideo` core library implementation. Currently errors clearly
+  instead of silently falling back to LSB (correct stopgap in v0.2.0).
+  - **Scope**: The core `DctVideo` works with `SignaturePayload` (structured),
+    but the CLI raw-byte path uses a length-prefixed format. Need to either:
+    (a) adapt the CLI path to use `SignaturePayload` directly, or
+    (b) add a raw-byte embed/extract API to `DctVideo`.
+  - **Files**: `steganographer-cli/src/cmd_encode.rs` (`embed_raw_dct_video`),
+    `steganographer-cli/src/cmd_verify.rs` (`extract_payload` dct_video branch),
+    `steganographer-core/src/dct_video.rs` (possibly add raw-byte API).
 
-- [ ] **`cargo-release` workflow** — automated version bumps and CHANGELOG
-  updates for consistent releases.
+- [ ] **`cargo-release` workflow** — automated version bumps and CHANGELOG updates.
+  - **Scope**: Add `release.toml` config, `cargo-release` as dev-dependency,
+    automate: version bump, CHANGELOG section move, tag, push.
+  - **Files**: New `release.toml`, `Cargo.toml` (dev-dependency).
 
-- [ ] **Fuzz CI integration** — add a short timed fuzz run (e.g. 60s per target)
-  to CI. The fuzz targets are now properly structured (`steganographer-core/fuzz/`),
-  just need a CI job with nightly Rust.
-
-- [ ] **Live pipeline `--signing-key` option** — the live video/audio pipelines
-  (`cmd_video.rs`, `cmd_audio.rs`) generate ephemeral keypairs with no way to
-  specify a persistent signing key. Adding `--signing-key` would enable
-  reproducible verification across sessions.
+- [ ] **Live test-count badge** — replace static shields.io badge with a
+  CI-computed count to prevent future drift.
+  - **Scope**: Add a CI step that counts `#[test]` functions and updates the
+    README badge, or use a dynamic badge endpoint.
+  - **Files**: `.github/workflows/ci.yml`, `README.md`.
 
 ---
 
@@ -157,27 +109,47 @@ Larger items requiring design work or architecture changes.
 
 ### Core Improvements
 
-- [ ] **Post-quantum signatures** — ML-DSA (FIPS 204) as Ed25519 alternative
-- [ ] **Hybrid signing** — Ed25519 + ML-DSA via multi-frame spreading
-- [ ] **Certificate chain support** — X.509 or WebPKI for identity binding
+- [ ] **Post-quantum signatures** — ML-DSA (FIPS 204) as Ed25519 alternative.
+  - **Scope**: Add `pq` feature, implement `MlDsaBackend` alongside
+    `Ed25519Backend`. Research `pqcrypto-dilithium` crate or bind to liboqs.
+  - **Dependency**: FIPS 204 finalization, Rust PQ crate maturity.
+
+- [ ] **Hybrid signing** — Ed25519 + ML-DSA via multi-frame spreading.
+  - **Scope**: Use `multi_frame.rs` to split a hybrid signature across frames.
+  - **Dependency**: Post-quantum signatures above.
+
+- [ ] **Certificate chain support** — X.509 or WebPKI for identity binding.
+  - **Scope**: Add `--cert <path>` flag, verify chain during `steganographer
+    verify`. Use `x509-parser` crate.
+  - **Dependency**: Key lifecycle system (revocation list) above.
 
 ### Platform & Distribution
 
-- [ ] **WASM build** — browser-based encode/verify via WebAssembly
-- [ ] **`cargo install` support** — publish to crates.io (make GStreamer optional)
-- [ ] **Homebrew formula** — `brew install steganographer`
-- [ ] **Windows CI** — add Windows matrix entry to `.github/workflows/ci.yml`
-  (currently documented as "Community-Supported — No CI Coverage")
-- [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines
+- [ ] **WASM build** — browser-based encode/verify via WebAssembly.
+  - **Scope**: Make GStreamer optional, build `steganographer-core` to wasm32,
+    expose encode/verify via JS bindings.
+  - **Dependency**: GStreamer feature-gating.
+
+- [ ] **`cargo install` support** — publish to crates.io (make GStreamer optional).
+  - **Scope**: Feature-gate GStreamer behind `gst` feature. Publish
+    `steganographer-core` and `steganographer-cli` to crates.io.
+
+- [ ] **Homebrew formula** — `brew install steganographer`.
+  - **Scope**: Homebrew tap, formula that builds from source with GStreamer.
+
+- [ ] **Windows CI** — add Windows matrix entry to CI.
+  - **Scope**: Add `windows-latest` to CI matrix, install GStreamer MSVC,
+    handle any Windows-specific build issues.
+
+- [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines.
+  - **Scope**: Implement `gst::BaseTransform` in `steganographer-gst`,
+    register as a real GStreamer element (not just AppSink/AppSrc wrapper).
 
 ### Dashboard Enhancements
 
-- [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC
-
-### Documentation & Tooling
-
-- [ ] **Live test-count badge** — replace static badge with a CI-computed count
-  to prevent future drift
+- [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
+  - **Scope**: Use `wgpu` or `webrtc-rs` for browser-to-server streaming,
+    reducing latency from ~100ms (WebSocket) to ~20ms (WebRTC).
 
 ---
 
