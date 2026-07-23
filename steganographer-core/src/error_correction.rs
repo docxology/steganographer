@@ -227,6 +227,13 @@ pub fn decode(encoded: &[u8], data_len: usize, parity_count: usize) -> anyhow::R
     let lambda = berlekamp_massey(&syndromes);
     let error_positions = chien_search(&lambda, n);
 
+    log::debug!(
+        "RS decode: syndromes={:?}, lambda={:?}, error_positions={:?}",
+        syndromes,
+        lambda,
+        error_positions
+    );
+
     if !error_positions.is_empty() && error_positions.len() <= parity_count / 2 {
         let error_magnitudes = forney(&syndromes, &lambda, &error_positions);
 
@@ -361,15 +368,13 @@ fn berlekamp_massey(syndromes: &[u8]) -> Vec<u8> {
 }
 
 /// Chien search: find the roots of the error locator polynomial Lambda(x).
-/// For standard RS BM convention, a root at alpha^(-i) = alpha^(255-i)
+/// For the evaluation-based RS code with DFT syndromes, a root at alpha^i
 /// means position i is in error.
 fn chien_search(lambda: &[u8], n: usize) -> Vec<usize> {
     let mut error_positions = Vec::new();
     for i in 0..n {
-        // alpha^(-i) = alpha^(255-i) for i in 1..255, alpha^0 for i=0
-        let i_mod = i % 255;
-        let x_inv = if i_mod == 0 { 1u8 } else { gf_pow(ALPHA, (255 - i_mod) as u32) };
-        if gf_poly_eval(lambda, x_inv) == 0 {
+        let x = gf_pow(ALPHA, i as u32);
+        if gf_poly_eval(lambda, x) == 0 {
             error_positions.push(i);
         }
     }
@@ -394,15 +399,14 @@ fn forney(syndromes: &[u8], lambda: &[u8], error_positions: &[usize]) -> Vec<(us
 
     let mut errors = Vec::new();
     for &pos in error_positions {
-        let pos_mod = pos % 255;
-        let x_inv = if pos_mod == 0 { 1u8 } else { gf_pow(ALPHA, (255 - pos_mod) as u32) };
+        let x = gf_pow(ALPHA, pos as u32);
 
-        let omega_val = gf_poly_eval(omega_trunc, x_inv);
+        let omega_val = gf_poly_eval(omega_trunc, x);
 
         let mut lambda_prime_val = 0u8;
         for (i, &li) in lambda.iter().enumerate().skip(1) {
             if i % 2 == 1 {
-                lambda_prime_val ^= gf_mul(li, gf_pow(x_inv, (i - 1) as u32));
+                lambda_prime_val ^= gf_mul(li, gf_pow(x, (i - 1) as u32));
             }
         }
 
@@ -592,25 +596,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Multi-error BM/Chien/Forney pipeline needs convention fix for non-systematic code"]
+    #[ignore = "BM multi-error needs syndrome convention fix for non-systematic evaluation code"]
     fn test_two_error_correction() {
-        // Multi-error correction requires the BM/Chien/Forney pipeline to be
-        // fully wired for this non-systematic evaluation code. Single-error
-        // correction (the realistic case for 104-byte steganographic payloads)
-        // is fully working. This test is #[ignore]d until the BM convention
-        // issue is resolved.
-        // With parity=4, we can correct up to 2 errors.
-        let data = b"two error test data!";
+        // Small payload for fast brute-force fallback + BM multi-error attempt
+        let data = b"2err";
         let parity = 4;
         let mut encoded = encode(data, parity).unwrap();
-        encoded[2] ^= 0x42;
-        encoded[7] ^= 0xAB;
+        encoded[1] ^= 0x42;
+        encoded[5] ^= 0xAB;
         let decoded = decode(&encoded, data.len(), parity).unwrap();
         assert_eq!(decoded, data, "Should correct two errors with parity=4");
     }
 
     #[test]
-    #[ignore = "Multi-error BM/Chien/Forney pipeline needs convention fix for non-systematic code"]
+    #[ignore = "BM multi-error needs syndrome convention fix for non-systematic evaluation code"]
     fn test_two_errors_with_higher_parity() {
         let data = b"multi-error correction test payload";
         let parity = 8;

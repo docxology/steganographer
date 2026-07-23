@@ -223,6 +223,16 @@ enum Commands {
         auth_token: Option<String>,
     },
 
+    /// Revoke a signing key (add to revoked-keys list)
+    Revoke {
+        /// Public key to revoke (hex-encoded, 32 bytes)
+        #[arg(long)]
+        public_key: String,
+        /// Path to the revoked-keys file (default: keys/revoked.json)
+        #[arg(long, short, default_value = "keys/revoked.json")]
+        output: String,
+    },
+
     /// Validate a TOML configuration file without running any pipeline
     Config {
         #[arg(default_value = "check")]
@@ -360,32 +370,36 @@ fn main() -> anyhow::Result<()> {
             cmd_encode::derive_keys(&secret_hex, &output)
         }
 
-        Commands::Config { action } => {
-            match action.as_str() {
-                "check" => {
-                    match steganographer_core::config::Config::from_file(&cli.config) {
-                        Ok(cfg) => {
-                            let mut sections = vec!["global"];
-                            if cfg.video.is_some() { sections.push("video"); }
-                            if cfg.audio.is_some() { sections.push("audio"); }
-                            println!("✓ Configuration valid: {}", cli.config);
-                            println!("  Sections: {}", sections.join(", "));
-                            if let Some(ref algo) = cfg.global.hash_algorithm {
-                                println!("  Hash algorithm: {}", algo);
-                            }
-                            if let Some(ref kf) = cfg.global.key_file {
-                                println!("  Key file: {}", kf);
-                            }
-                            Ok(())
-                        }
-                        Err(e) => {
-                            eprintln!("✗ Configuration error in {}: {}", cli.config, e);
-                            std::process::exit(1);
-                        }
+        Commands::Config { action } => match action.as_str() {
+            "check" => match steganographer_core::config::Config::from_file(&cli.config) {
+                Ok(cfg) => {
+                    let mut sections = vec!["global"];
+                    if cfg.video.is_some() {
+                        sections.push("video");
                     }
+                    if cfg.audio.is_some() {
+                        sections.push("audio");
+                    }
+                    println!("✓ Configuration valid: {}", cli.config);
+                    println!("  Sections: {}", sections.join(", "));
+                    if let Some(ref algo) = cfg.global.hash_algorithm {
+                        println!("  Hash algorithm: {}", algo);
+                    }
+                    if let Some(ref kf) = cfg.global.key_file {
+                        println!("  Key file: {}", kf);
+                    }
+                    Ok(())
                 }
-                _ => anyhow::bail!("Unknown config action: {}. Use 'check'.", action),
-            }
+                Err(e) => {
+                    eprintln!("✗ Configuration error in {}: {}", cli.config, e);
+                    std::process::exit(1);
+                }
+            },
+            _ => anyhow::bail!("Unknown config action: {}. Use 'check'.", action),
+        },
+
+        Commands::Revoke { public_key, output } => {
+            cmd_encode::revoke_key(&public_key, &output)
         }
 
         Commands::Dashboard { port, backend, host, auth_token } => {
