@@ -4,7 +4,7 @@
 ![Tests](https://img.shields.io/badge/tests-10-brightgreen)
 User-facing command-line binary for all steganographic functions.
 
-Built with [Clap](https://docs.rs/clap) for argument parsing with 10 subcommands.
+Built with [Clap](https://docs.rs/clap) for argument parsing with 11 subcommands.
 
 ## Commands
 

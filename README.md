@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 282 tests, 0 failures
+cargo test --workspace   # 286 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -119,7 +119,7 @@ Four Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│  steganographer-cli       (binary)           │  Clap CLI: 10 subcommands
+│  steganographer-cli       (binary)           │  Clap CLI: 11 subcommands
 ├──────────────────────────────────────────────┤
 │  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
@@ -218,7 +218,7 @@ bits = 2
 
 ## ✅ Tests
 
-282 tests across 4 crates — all passing:
+286 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -230,7 +230,7 @@ bits = 2
 | **Total** | **282** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 282 tests
+cargo test --workspace                # All 286 tests
 cargo test -p steganographer-core     # Core only (247 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```

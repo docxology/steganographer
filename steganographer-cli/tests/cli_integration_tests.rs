@@ -470,3 +470,53 @@ fn test_info_reports_capacity() {
     assert_eq!(code, 0, "info should succeed: {}", stdout);
     assert!(stdout.contains("capacity") || stdout.contains("Capacity"), "info should report capacity: {}", stdout);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Revoke command
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_revoke_creates_revoked_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let revoked_path = tmp.path().join("revoked.json");
+    let pub_key = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
+    let (code, stdout, _) = run_cli(&[
+        "revoke",
+        "--public-key", pub_key,
+        "--output", revoked_path.to_str().unwrap(),
+    ]);
+
+    assert_eq!(code, 0, "revoke failed: {}", stdout);
+    assert!(revoked_path.exists(), "revoked.json should be created");
+    assert!(stdout.contains("Key revoked"), "should report revocation: {}", stdout);
+
+    let content = std::fs::read_to_string(&revoked_path).unwrap();
+    assert!(content.contains(pub_key), "revoked.json should contain the key");
+
+    // Revoke same key again — should say "already revoked"
+    let (code, stdout, _) = run_cli(&[
+        "revoke",
+        "--public-key", pub_key,
+        "--output", revoked_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "revoke (duplicate) failed: {}", stdout);
+    assert!(stdout.contains("already revoked"), "should report duplicate: {}", stdout);
+}
+
+#[test]
+fn test_revoke_invalid_key_length() {
+    let tmp = tempfile::tempdir().unwrap();
+    let revoked_path = tmp.path().join("revoked.json");
+
+    let (code, stdout, stderr) = run_cli(&[
+        "revoke",
+        "--public-key", "tooshort",
+        "--output", revoked_path.to_str().unwrap(),
+    ]);
+
+    assert_ne!(code, 0, "revoke with short key should fail");
+    // The error message should appear somewhere in the output
+    let combined = format!("{}\n{}", stdout, stderr);
+    assert!(combined.contains("32 bytes") || combined.contains("hex") || combined.contains("Invalid") || combined.contains("Public key must be"), "should mention key issue: {}", combined);
+}

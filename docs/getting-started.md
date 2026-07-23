@@ -60,7 +60,7 @@ cargo build --workspace --release
 ## Run Tests
 
 ```bash
-# All workspace tests (282 tests)
+# All workspace tests (286 tests)
 cargo test --workspace
 
 # Core only (247 tests)
