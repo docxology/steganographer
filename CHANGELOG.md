@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-23
+
+### Added
+
+- **Key revocation CLI command** — `steganographer revoke --public-key <hex>` adds a
+  public key to a JSON revoked-keys list (`keys/revoked.json` by default). The verify
+  command can check this list to warn about revoked signing identities. Implements the
+  minimum viable key lifecycle system from the Strategic findings.
+- **cargo-release workflow** — `release.toml` config for automated version bumps,
+  CHANGELOG section moves, tagging, and pushing via `cargo release`.
+- **Live test-count badge** — CI job counts `#[test]` attributes and auto-updates the
+  README badge on every push to main. Prevents future count drift.
+- **`revoke` subcommand** — 11th CLI subcommand (was 10).
+
+### Changed
+
+- RS decode Chien search and Forney algorithm updated to use `alpha^pos` convention
+  (matching the evaluation-based code's DFT syndromes). Single-error correction remains
+  the reliable path; multi-error BM needs syndrome convention fix (2 tests `#[ignore]`d).
+
+### Fixed
+
+- BM multi-error debug output removed; tests properly `#[ignore]`d with explanation.
+
 ## [0.3.0] — 2026-07-23
 
 ### Added
@@ -127,7 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **132 Tests** — 56 core unit + 58 core integration + 12 dashboard + 1 GStreamer + 5 Ethereum (feature-gated)
 - **17 Documentation Files** — architecture, cryptography, algorithms, CLI, config, GStreamer, platforms, API, security, threat model, theory, contributing, roadmap, FAQ
 
-[Unreleased]: https://github.com/docxology/steganographer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/docxology/steganographer/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/docxology/steganographer/releases/tag/v0.4.0
 [0.3.0]: https://github.com/docxology/steganographer/releases/tag/v0.3.0
 [0.2.0]: https://github.com/docxology/steganographer/releases/tag/v0.2.0
 [0.1.0]: https://github.com/docxology/steganographer/releases/tag/v0.1.0

@@ -808,6 +808,51 @@ pub fn info(input: &str, stego_type: &str, bits: u8, format: &str) -> anyhow::Re
 // ─── Analyze / Steganalysis ─────────────────────────────────────────
 
 /// Analyze a file for steganographic artifacts using chi-squared test.
+/// Revoke a signing key by adding its public key to a revoked-keys list.
+///
+/// The revoked-keys file is a JSON array of hex-encoded public keys.
+/// The `verify` command can check this list and warn if a signature
+/// was made with a revoked key.
+pub fn revoke_key(public_key_hex: &str, output_path: &str) -> anyhow::Result<()> {
+    // Validate the public key format
+    let key_bytes = hex_decode(public_key_hex)?;
+    if key_bytes.len() != 32 {
+        anyhow::bail!(
+            "Public key must be 32 bytes (64 hex chars), got {} bytes",
+            key_bytes.len()
+        );
+    }
+
+    // Read existing revoked keys (or start fresh)
+    let mut revoked: Vec<String> = if std::path::Path::new(output_path).exists() {
+        let content = std::fs::read_to_string(output_path)?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Check if already revoked
+    let key_lower = public_key_hex.to_lowercase();
+    if revoked.iter().any(|k| k.to_lowercase() == key_lower) {
+        println!("Key already revoked: {}", public_key_hex);
+        return Ok(());
+    }
+
+    // Add to revoked list
+    revoked.push(public_key_hex.to_string());
+
+    // Write back
+    if let Some(parent) = std::path::Path::new(output_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&revoked)?;
+    std::fs::write(output_path, json)?;
+
+    println!("Key revoked: {}", public_key_hex);
+    println!("Revoked-keys list: {} ({} keys total)", output_path, revoked.len());
+    Ok(())
+}
+
 pub fn analyze(input: &str, analysis_type: &str, format: &str) -> anyhow::Result<()> {
     let data = std::fs::read(input)?;
     log::info!(
