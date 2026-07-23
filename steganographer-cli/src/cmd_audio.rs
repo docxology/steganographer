@@ -91,7 +91,7 @@ fn build_audio_stego(
                     anyhow::anyhow!("Pipeline includes 'lsb_signature' but no config")
                 })?;
             let key = lsb_cfg.key_bytes()?;
-            let lsb = steganographer_core::lsb_audio::LsbAudio::new(lsb_cfg.bits, key);
+            let lsb = steganographer_core::lsb_audio::LsbAudio::try_new(lsb_cfg.bits, key)?;
             log::info!("Using LSB audio module ({} bits)", lsb_cfg.bits);
             return Ok(Box::new(lsb));
         }

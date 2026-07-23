@@ -19,9 +19,22 @@ impl LsbVideo {
     ///
     /// # Arguments
     /// * `bits` — Number of least-significant bits to use per pixel byte (1–4).
+    ///
+    /// # Panics
+    /// Panics if `bits` is not in 1..=4. For fallible construction, use [`try_new`](Self::try_new).
     pub fn new(bits: u8) -> Self {
         assert!((1..=4).contains(&bits), "LSB bits must be 1–4");
         Self { bits }
+    }
+
+    /// Create a new LSB video module, returning an error on invalid bits.
+    ///
+    /// Use this when `bits` comes from untrusted input (config, CLI args).
+    pub fn try_new(bits: u8) -> anyhow::Result<Self> {
+        if !(1..=4).contains(&bits) {
+            anyhow::bail!("LSB bits must be 1–4, got {}", bits);
+        }
+        Ok(Self { bits })
     }
 
     /// Serialize payload to a bit vector, prefixed by a 32-bit length (in bits).

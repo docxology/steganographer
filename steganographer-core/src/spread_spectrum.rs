@@ -76,6 +76,11 @@ impl SpreadSpectrumVideo {
         Self::new(key, DEFAULT_AMPLITUDE, DEFAULT_SPREAD)
     }
 
+    /// Returns the secret key used for PN sequence generation.
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
     /// Generate a PN sequence of `len` values in {-1, +1} for the given
     /// bit position and frame index.
     fn pn_sequence(&self, len: usize, bit_pos: usize, frame_index: u64) -> Vec<i32> {

@@ -8,9 +8,9 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: LSB video/audio, crypto, overlay, info_bar, signer_backend, metrics, config, DCT video, encryption, error_correction, multi_frame, spread_spectrum (16 modules, 115 unit tests, 59 integration tests) |
+| `steganographer-core/` | Crate | Pure algorithms: LSB video/audio, crypto, overlay, info_bar, signer_backend, metrics, config, DCT video, encryption, error_correction, multi_frame, spread_spectrum, adaptive, hash_chain, kdf, mdct_audio, steganalysis (21 modules, 178 unit tests, 76 integration tests) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines (4 modules) |
-| `steganographer-cli/` | Crate | CLI binary: 8 Clap subcommands — video, audio, encode, verify, keygen, info, config, dashboard (5 modules) |
+| `steganographer-cli/` | Crate | CLI binary: 10 Clap subcommands — video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard (5 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
 | `config/` | Config | Example TOML configuration files |
 | `docs/` | Docs | 17 comprehensive documentation files |
@@ -21,7 +21,7 @@
 
 - **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
 - **Source files**: 27 Rust source files + 6 static web assets across 4 crates
-- **Test files**: 2 integration test files (59 tests) + inline unit tests (115 tests) + dashboard tests (12) = **187 total tests**
+- **Test files**: 2 integration test files (76 tests) + inline unit tests (178 tests) + dashboard tests (23) = **272 total tests**
 - **Doc files**: 17 markdown documentation files + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -29,9 +29,9 @@
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 174 tests (Ed25519 default)
+cargo test -p steganographer-core              # 247 tests (Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 187 total tests
+cargo test --workspace                         # 272 total tests
 ./run.sh                                       # Interactive menu
 ```
 

@@ -44,7 +44,12 @@ fn gf_inv(a: u8) -> u8 {
             return x;
         }
     }
-    unreachable!()
+    // If we reach here, GF arithmetic is broken — return 0 rather than panicking.
+    // This is defense-in-depth: under correct GF(2^8) math, every nonzero element
+    // has an inverse, so this line is unreachable. Returning 0 instead of
+    // unreachable!() prevents a hard panic from a future math bug.
+    log::error!("gf_inv: no inverse found for {} — GF arithmetic may be broken", a);
+    0
 }
 
 /// GF(2^8) exponentiation: base^exp
@@ -112,6 +117,23 @@ pub fn encode(data: &[u8], parity_count: usize) -> anyhow::Result<Vec<u8>> {
 pub fn decode(encoded: &[u8], data_len: usize, parity_count: usize) -> anyhow::Result<Vec<u8>> {
     if parity_count == 0 {
         return Ok(encoded[..data_len].to_vec());
+    }
+
+    // Symmetric bounds with encode() — prevents DoS via crafted large data_len
+    if parity_count > 16 {
+        anyhow::bail!("Parity count too high (max 16), got {}", parity_count);
+    }
+    // Cap data_len to a realistic ceiling — the largest legitimate payload
+    // is SignaturePayload::SERIALIZED_SIZE (104 bytes) + optional ECC + encryption
+    // overhead. 65,536 is generous but prevents the O(n * 255 * k²) brute-force
+    // loop from running on attacker-controlled lengths.
+    const MAX_DATA_LEN: usize = 65_536;
+    if data_len > MAX_DATA_LEN {
+        anyhow::bail!(
+            "Data length too large for RS decode (max {}, got {})",
+            MAX_DATA_LEN,
+            data_len
+        );
     }
 
     let k = data_len;

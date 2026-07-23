@@ -150,7 +150,7 @@ fn build_video_stego_chain(
                     .lsb_signature
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'lsb_signature' but no [lsb_signature] config"))?;
-                let lsb = steganographer_core::lsb_video::LsbVideo::new(lsb_cfg.bits);
+                let lsb = steganographer_core::lsb_video::LsbVideo::try_new(lsb_cfg.bits)?;
                 modules.push(Box::new(lsb));
                 log::info!("Added LSB video module ({} bits)", lsb_cfg.bits);
             }

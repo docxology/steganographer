@@ -22,9 +22,22 @@ impl LsbAudio {
     /// # Arguments
     /// * `bits` — Number of LSBs to use per sample (1–4).
     /// * `key` — 32-byte key for deterministic index permutation.
+    ///
+    /// # Panics
+    /// Panics if `bits` is not in 1..=4. For fallible construction, use [`try_new`](Self::try_new).
     pub fn new(bits: u8, key: [u8; 32]) -> Self {
         assert!((1..=4).contains(&bits), "LSB bits must be 1–4");
         Self { bits, key }
+    }
+
+    /// Create a new LSB audio module, returning an error on invalid bits.
+    ///
+    /// Use this when `bits` comes from untrusted input (config, CLI args).
+    pub fn try_new(bits: u8, key: [u8; 32]) -> anyhow::Result<Self> {
+        if !(1..=4).contains(&bits) {
+            anyhow::bail!("LSB bits must be 1–4, got {}", bits);
+        }
+        Ok(Self { bits, key })
     }
 
     /// Returns the current number of LSBs used per sample.

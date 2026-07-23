@@ -10,17 +10,17 @@
 //! - **Algorithm**: ChaCha20-Poly1305 (RFC 8439) — authenticated encryption
 //!   with associated data (AEAD).
 //! - **Key**: 32 bytes (256-bit), shared between encoder and verifier.
-//! - **Nonce**: 12 bytes, derived deterministically from the frame index
-//!   to avoid transmitting a per-payload nonce. The nonce is
-//!   `counter_bytes[0..12]` where counter = frame_index. This is safe
-//!   because each frame index is unique per key.
-//! - **Output**: `ciphertext || tag` (16-byte Poly1305 tag appended).
+//! - **Nonce**: 12 bytes, composed of a 4-byte random salt (unique per
+//!   invocation) + 8-byte frame index. The salt is prepended to the
+//!   ciphertext so the receiver can reconstruct the nonce. This prevents
+//!   nonce reuse across batch encodes that share a key.
+//! - **Output**: `salt(4) || ciphertext || tag` (4 + plaintext.len() + 16 bytes).
 //!
 //! ## Security Notes
 //!
 //! - The same key must never be reused with different payloads under the
-//!   same nonce. Since the nonce is derived from the frame index, each
-//!   frame gets a unique nonce.
+//!   same nonce. The random salt ensures each invocation gets a unique nonce
+//!   even when the frame index is identical (e.g. batch processing).
 //! - The encryption key is separate from the signing key, though both
 //!   can be derived from the same master secret via HKDF or similar.
 
@@ -39,6 +39,9 @@ pub const TAG_SIZE: usize = 16;
 
 /// Nonce size for ChaCha20-Poly1305 (96-bit).
 pub const NONCE_SIZE: usize = 12;
+
+/// Size of the random salt prepended to ciphertext (32-bit).
+pub const SALT_SIZE: usize = 4;
 
 /// An encryption key for payload encryption.
 #[derive(Clone)]
@@ -90,24 +93,25 @@ impl std::fmt::Debug for EncryptionKey {
     }
 }
 
-/// Derive a 12-byte nonce from a frame index.
+/// Derive a 12-byte nonce from a random salt and frame index.
 ///
-/// The frame index is encoded as a 12-byte big-endian value to ensure
-/// uniqueness per frame within a single key's lifetime.
-fn derive_nonce(frame_index: u64) -> [u8; NONCE_SIZE] {
+/// The nonce is `salt[0..4] || frame_index_be[0..8]` (12 bytes total).
+/// The salt ensures uniqueness across invocations with the same frame_index.
+fn derive_nonce(salt: &[u8; SALT_SIZE], frame_index: u64) -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
-    // Use big-endian frame index in the last 8 bytes for clarity
-    nonce[4..12].copy_from_slice(&frame_index.to_be_bytes());
+    nonce[0..SALT_SIZE].copy_from_slice(salt);
+    nonce[SALT_SIZE..NONCE_SIZE].copy_from_slice(&frame_index.to_be_bytes());
     nonce
 }
 
 /// Encrypt a payload using ChaCha20-Poly1305.
 ///
-/// Returns `ciphertext || tag` (plaintext.len() + 16 bytes).
+/// Returns `salt(4) || ciphertext || tag` (plaintext.len() + 4 + 16 bytes).
+/// The 4-byte random salt is prepended so the receiver can reconstruct the nonce.
 ///
 /// # Arguments
 /// * `key` — The 256-bit encryption key.
-/// * `frame_index` — Used to derive a unique nonce per frame.
+/// * `frame_index` — Used as part of the nonce derivation.
 /// * `plaintext` — The data to encrypt.
 /// * `aad` — Optional additional authenticated data (authenticated but not encrypted).
 pub fn encrypt(
@@ -117,7 +121,11 @@ pub fn encrypt(
     aad: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(key.as_bytes().into());
-    let nonce_bytes = derive_nonce(frame_index);
+
+    // Generate a random salt for this invocation to prevent nonce reuse
+    let mut salt = [0u8; SALT_SIZE];
+    OsRng.fill_bytes(&mut salt);
+    let nonce_bytes = derive_nonce(&salt, frame_index);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let payload = match aad {
@@ -131,9 +139,15 @@ pub fn encrypt(
         },
     };
 
-    cipher
+    let ciphertext = cipher
         .encrypt(nonce, payload)
-        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+
+    // Prepend salt to ciphertext: salt || ciphertext || tag
+    let mut result = Vec::with_capacity(SALT_SIZE + ciphertext.len());
+    result.extend_from_slice(&salt);
+    result.extend_from_slice(&ciphertext);
+    Ok(result)
 }
 
 /// Decrypt a payload encrypted with [`encrypt`].
@@ -144,7 +158,7 @@ pub fn encrypt(
 /// # Arguments
 /// * `key` — The 256-bit encryption key.
 /// * `frame_index` — Must match the frame index used during encryption.
-/// * `ciphertext` — The encrypted data (ciphertext || tag).
+/// * `ciphertext` — The encrypted data (salt || ciphertext || tag).
 /// * `aad` — Optional additional authenticated data (must match encryption).
 pub fn decrypt(
     key: &EncryptionKey,
@@ -152,17 +166,27 @@ pub fn decrypt(
     ciphertext: &[u8],
     aad: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
+    if ciphertext.len() < SALT_SIZE + TAG_SIZE {
+        anyhow::bail!("Ciphertext too short: need at least {} bytes, got {}", SALT_SIZE + TAG_SIZE, ciphertext.len());
+    }
+
     let cipher = ChaCha20Poly1305::new(key.as_bytes().into());
-    let nonce_bytes = derive_nonce(frame_index);
+
+    // Extract the salt from the first 4 bytes
+    let mut salt = [0u8; SALT_SIZE];
+    salt.copy_from_slice(&ciphertext[..SALT_SIZE]);
+    let actual_ciphertext = &ciphertext[SALT_SIZE..];
+
+    let nonce_bytes = derive_nonce(&salt, frame_index);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let payload = match aad {
         Some(a) => Payload {
-            msg: ciphertext,
+            msg: actual_ciphertext,
             aad: a,
         },
         None => Payload {
-            msg: ciphertext,
+            msg: actual_ciphertext,
             aad: &[],
         },
     };
@@ -195,7 +219,7 @@ mod tests {
         let key = EncryptionKey::generate();
         let plaintext = b"top secret steganographic payload";
         let enc = encrypt(&key, 42, plaintext, None).unwrap();
-        assert_ne!(&enc[..], plaintext);
+        assert_ne!(&enc[SALT_SIZE..], plaintext);
         let dec = decrypt(&key, 42, &enc, None).unwrap();
         assert_eq!(dec, plaintext);
     }
@@ -229,8 +253,8 @@ mod tests {
     fn test_tamper_detection() {
         let key = EncryptionKey::generate();
         let mut enc = encrypt(&key, 0, b"secret", None).unwrap();
-        // Flip a bit in the ciphertext
-        enc[0] ^= 1;
+        // Flip a bit in the ciphertext (after the salt)
+        enc[SALT_SIZE] ^= 1;
         assert!(decrypt(&key, 0, &enc, None).is_err());
     }
 
@@ -260,8 +284,8 @@ mod tests {
         let key = EncryptionKey::generate();
         let plaintext = b"payload data";
         let enc = encrypt(&key, 0, plaintext, None).unwrap();
-        // ciphertext = plaintext.len() + 16 (tag)
-        assert_eq!(enc.len(), plaintext.len() + TAG_SIZE);
+        // ciphertext = salt(4) + plaintext.len() + tag(16)
+        assert_eq!(enc.len(), plaintext.len() + SALT_SIZE + TAG_SIZE);
     }
 
     #[test]
@@ -270,6 +294,20 @@ mod tests {
         let enc0 = encrypt(&key, 0, b"same data", None).unwrap();
         let enc1 = encrypt(&key, 1, b"same data", None).unwrap();
         assert_ne!(enc0, enc1);
+    }
+
+    #[test]
+    fn test_same_frame_index_different_salt() {
+        // Critical: encrypting the same data with the same frame_index
+        // must produce different ciphertexts due to the random salt.
+        // This is the fix for the nonce-reuse vulnerability in batch mode.
+        let key = EncryptionKey::generate();
+        let enc0 = encrypt(&key, 0, b"same data", None).unwrap();
+        let enc1 = encrypt(&key, 0, b"same data", None).unwrap();
+        assert_ne!(enc0, enc1, "Same frame_index must produce different ciphertexts due to random salt");
+        // Both must still decrypt correctly
+        assert_eq!(decrypt(&key, 0, &enc0, None).unwrap(), b"same data");
+        assert_eq!(decrypt(&key, 0, &enc1, None).unwrap(), b"same data");
     }
 
     #[test]

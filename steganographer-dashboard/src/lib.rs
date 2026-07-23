@@ -110,6 +110,9 @@ pub struct DashboardState {
     pub live_config: Mutex<LiveConfig>,
     /// When the dashboard session was started.
     pub session_start: std::time::Instant,
+    /// Shared secret token for authenticating mutating API calls.
+    /// If `None`, auth is disabled (local-only mode).
+    pub auth_token: Option<String>,
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -135,6 +138,11 @@ static DOCS: &[(&str, &str)] = &[
 
 /// Create the Axum router for the dashboard.
 pub fn create_router(state: Arc<DashboardState>) -> Router {
+    // Restrict CORS to localhost only — no permissive cross-origin access
+    let cors = CorsLayer::new()
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([axum::http::header::CONTENT_TYPE]);
+
     Router::new()
         .route("/", get(serve_index))
         .route("/style.css", get(serve_css))
@@ -152,15 +160,41 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/api/version", get(api_version))
         .route("/api/docs", get(api_docs_list))
         .route("/api/docs/{name}", get(api_docs_content))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
 }
 
+/// Check the Authorization header against the configured auth token.
+/// Returns true if auth is disabled (no token set) or the token matches.
+fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) -> bool {
+    let Some(ref token) = expected_token else {
+        return true; // Auth disabled in local-only mode
+    };
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth.to_str() {
+            if let Some(bearer) = auth_str.strip_prefix("Bearer ") {
+                return subtle::ConstantTimeEq::ct_eq(
+                    bearer.as_bytes(),
+                    token.as_bytes(),
+                )
+                .into();
+            }
+        }
+    }
+    false
+}
+
 /// Start the dashboard server.
-pub async fn start_server(state: Arc<DashboardState>, port: u16) -> anyhow::Result<()> {
+///
+/// # Arguments
+/// * `state` — Shared dashboard state.
+/// * `port` — TCP port to listen on.
+/// * `host` — Bind address. Use "127.0.0.1" for local-only (default/recommended).
+///   Use "0.0.0.0" only on trusted networks with auth enabled.
+pub async fn start_server(state: Arc<DashboardState>, port: u16, host: &str) -> anyhow::Result<()> {
     let app = create_router(state);
-    let addr = format!("0.0.0.0:{}", port);
-    log::info!("Dashboard starting at http://localhost:{}", port);
+    let addr = format!("{}:{}", host, port);
+    log::info!("Dashboard starting at http://localhost:{} (bound to {})", port, host);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -260,8 +294,16 @@ async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
 /// POST /api/config — update live configuration from the dashboard UI.
 async fn api_config_post(
     State(state): State<Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
     Json(new_cfg): Json<LiveConfig>,
-) -> String {
+) -> impl axum::response::IntoResponse {
+    if !check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
+        );
+    }
+
     log::info!(
         "Config updated: opacity={:.2}, lsb_bits={}, backend={}, overlay='{}', sign_rate={}ms, qr_scale={}%, res={}",
         new_cfg.opacity, new_cfg.lsb_bits, new_cfg.signing_backend,
@@ -271,7 +313,10 @@ async fn api_config_post(
     let mut cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
     *cfg = new_cfg;
 
-    serde_json::json!({ "status": "ok" }).to_string()
+    (
+        axum::http::StatusCode::OK,
+        serde_json::json!({ "status": "ok" }).to_string(),
+    )
 }
 
 /// GET /api/session — return session summary stats for export.
@@ -300,8 +345,20 @@ async fn api_version() -> String {
 }
 
 /// POST /api/metrics/reset — reset all metrics counters.
-async fn api_metrics_reset(State(state): State<Arc<DashboardState>>) -> String {
+async fn api_metrics_reset(
+    State(state): State<Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    if !check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
+        );
+    }
     state.metrics.reset();
     log::info!("Metrics counters reset via API");
-    serde_json::json!({ "status": "ok", "message": "Metrics reset" }).to_string()
+    (
+        axum::http::StatusCode::OK,
+        serde_json::json!({ "status": "ok", "message": "Metrics reset" }).to_string(),
+    )
 }
