@@ -134,6 +134,7 @@ static DOCS: &[(&str, &str)] = &[
     ("security.md", include_str!("../../docs/security.md")),
     ("steganography-theory.md", include_str!("../../docs/steganography-theory.md")),
     ("threat-model.md", include_str!("../../docs/threat-model.md")),
+    ("key-rotation.md", include_str!("../../docs/key-rotation.md")),
 ];
 
 /// Create the Axum router for the dashboard.

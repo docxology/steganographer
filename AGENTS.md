@@ -13,7 +13,7 @@
 | `steganographer-cli/` | Crate | CLI binary: 10 Clap subcommands — video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard (5 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
 | `config/` | Config | Example TOML configuration files |
-| `docs/` | Docs | 17 comprehensive documentation files |
+| `docs/` | Docs | 18 comprehensive documentation files |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
 | `run.sh` | Script | Interactive terminal menu (6 options: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info) |
 
@@ -22,7 +22,7 @@
 - **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
 - **Source files**: 27 Rust source files + 6 static web assets across 4 crates
 - **Test files**: 3 integration test files (76+10 tests) + inline unit tests (178 tests) + dashboard tests (23) = **282 total tests**
-- **Doc files**: 17 markdown documentation files + README.md / AGENTS.md per crate
+- **Doc files**: 18 markdown documentation files + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
 ## Build & Test

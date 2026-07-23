@@ -4,7 +4,7 @@
 
 Comprehensive documentation suite for the steganographer project, covering steganographic theory, cryptographic foundations, system architecture, dashboard operations, and user guides.
 
-## Contents (17 files)
+## Contents (18 files)
 
 | File                      | Topic                                                                                                |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -24,6 +24,7 @@ Comprehensive documentation suite for the steganographer project, covering stega
 | `roadmap.md`              | Short/medium/long term plans — timestamp watermarks + JSON verify output now implemented             |
 | `faq.md`                  | 30+ Q&As on concepts, build, usage, crypto, dashboard, MetaMask, template placeholders, JSON output  |
 | `threat-model.md`         | Attacker models, LSB statistical detection, JPEG/MP3 robustness, countermeasures                     |
+| `key-rotation.md`         | Key rotation record — 2026-07-22 daf.key incident report, new public key, revocation procedure      |
 
 ## Cross-references
 

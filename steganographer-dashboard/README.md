@@ -1,7 +1,7 @@
 # steganographer-dashboard
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-12-brightgreen)
+![Tests](https://img.shields.io/badge/tests-23-brightgreen)
 Web-based live dashboard for real-time round-trip steganography verification with three tabs: **Video**, **Audio**, and **Documentation**.
 
 ## Features

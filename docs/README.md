@@ -55,7 +55,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 - **Run**: `./run.sh` (interactive menu, reads `steganographer.toml`)
 - **Dashboard**: `./run.sh` → option `d` or `a` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace` (190 tests across 4 crates)
+- **Test**: `cargo test --workspace` (282 tests across 4 crates)
 - **CLI**: `cargo run -p steganographer-cli -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
@@ -88,7 +88,7 @@ block-beta
 | **MetaMask** | Connect Ethereum wallet for secp256k1 signing |
 | **Stego Info** | Capacity, utilization, payload size — recalculated in real time |
 | **Audio Tab** | Microphone capture, waveform/spectrum visualization, audio LSB signing |
-| **Docs Tab** | Browse all 17 project docs in-dashboard with syntax highlighting |
+| **Docs Tab** | Browse all 18 project docs in-dashboard with syntax highlighting |
 | **Dynamic LSB** | Encode/decode handlers stay in sync when LSB slider changes (1–4 bits) |
 | **Signature Preview** | Decoded payload shows first 16 bytes of Ed25519/secp256k1 signature |
 | **Record & Save** | Record signed video (WebM) or audio (WAV) with embedded integrity data |
@@ -97,10 +97,11 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):    56 tests (crypto, LSB, overlay, config, audio, metrics, signer_backend)
-steganographer-core (integ):   58 tests (E2E, pipeline, template, info_bar, signer_backend)
-steganographer-dashboard:      12 tests (LiveConfig, DashboardState, router, API)
-steganographer-gst:             1 test  (plugin skeleton)
+steganographer-core (unit):   171 tests (crypto, LSB, overlay, config, audio, metrics, signer_backend, encryption, ECC, KDF, multi_frame, spread_spectrum, DCT, MDCT, adaptive, hash_chain, steganalysis)
+steganographer-core (integ):   76 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC)
+steganographer-cli (integ):    10 tests (keygen, encode→verify round-trip, encryption, ECC, spread_spectrum, dct_video error, config, info)
+steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
+steganographer-gst:            1 test  (plugin skeleton)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        190 tests, 0 failures
+Total:                        282 tests, 0 failures
 ```

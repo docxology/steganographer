@@ -321,7 +321,7 @@ async fn test_api_docs_list_returns_array() {
     let arr: Vec<String> = serde_json::from_str(&body).expect("valid JSON array");
     assert!(arr.contains(&"README.md".to_string()), "should include README.md");
     assert!(arr.contains(&"threat-model.md".to_string()), "should include threat-model.md");
-    assert!(arr.len() >= 17, "should have at least 17 doc files, got {}", arr.len());
+    assert!(arr.len() >= 18, "should have at least 18 doc files, got {}", arr.len());
 }
 
 #[tokio::test]
