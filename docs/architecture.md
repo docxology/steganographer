@@ -224,6 +224,40 @@ The Rust `VideoPipelineConfig` struct mirrors this TOML section with `_or_defaul
 
 ---
 
+## Architectural Decision: C2PA Interoperability
+
+**Status:** Deferred — monitor, do not implement yet.
+
+**Context:** C2PA (Coalition for Content Provenance and Authenticity) / Content
+Credentials is a mature, industry-backed standard (Adobe, Google, Microsoft) for
+content provenance. It defines manifest stores embedded in media files (JPEG, PNG,
+MP4) that record creation/editing history, signing identity, and assertions.
+
+**Decision:** Steganographer will **not** emit or consume C2PA manifests in the
+near term. The custom steganographic format (BLAKE3 + Ed25519 + LSB embedding)
+serves a different use case — real-time per-frame signing of live streams — that
+C2PA's file-based manifest model does not directly address.
+
+**Rationale:**
+1. C2PA operates on finished files, not live streams. Steganographer's core
+   value is signing frames as they are captured, before they hit a container.
+2. C2PA's manifest store adds ~2-10KB per file, which would be impractical for
+   per-frame embedding in a live pipeline.
+3. The custom format's QR overlay provides human-visible provenance that C2PA
+   does not offer.
+
+**Revisit when:**
+- C2PA adds a streaming/real-time profile
+- A user needs to produce C2PA-compliant output from Steganographer-signed media
+- The project targets content authentication workflows where C2PA is a hard
+  requirement (e.g., newsroom ingest, legal evidence)
+
+**If implemented:** Add a `steganographer c2pa-export` command that reads a
+signed media file and produces a C2PA manifest from the embedded signatures,
+rather than replacing the custom format.
+
+---
+
 ## Further Reading
 
 - [Configuration](configuration.md) — Full TOML schema with `[video.pipeline]`
