@@ -3,153 +3,189 @@
 Scoped improvements and future plans.
 See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
-> **Status note (2026-07-23, v0.3.0):** All Critical, Major, Medium, and Minor
-> findings from the 2026-07-22 deep review + 8-agent RedTeam adversarial analysis
-> have been resolved. The v0.3.0 release added Berlekamp-Massey decoder
-> infrastructure, live pipeline `--signing-key`, nightly fuzz CI, and recorded the
-> C2PA interoperability decision. The items below are genuinely-open work.
+> **Status (2026-07-23, v0.5.0):** All Critical/Major/Medium/Minor audit
+> findings resolved. Key lifecycle (revoke + verify-time check), cargo-release,
+> live test-count badge, BM decoder infrastructure, live `--signing-key`, fuzz
+> CI, C2PA decision — all shipped. Below is the remaining open work.
 
 ---
 
-## 🚨 CRITICAL — None Open
+## 🔜 Upcoming
 
-All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
+### BM Multi-Error Correction Convention Fix
 
----
+**Status:** Infrastructure built, convention mismatch identified, 2 tests `#[ignore]`d.
 
-## 🔴 MAJOR — None Open
+The Berlekamp-Massey / Chien search / Forney pipeline is implemented in
+`error_correction.rs` (lines 275–410). Single-error correction works reliably
+via bounded brute-force. Multi-error correction via BM fails because the error
+locator polynomial's roots don't map to the correct codeword positions for this
+non-systematic evaluation-based RS code.
 
-All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
+**Root cause:** The syndrome computation uses high-frequency DFT coefficients
+(`S_p = sum_i r[i] * alpha^((k+p)*i)` for `p = 0..parity_count-1`). The BM
+algorithm produces a Lambda polynomial, but Chien search evaluates it at either
+`alpha^i` or `alpha^(-i)` — neither convention yields roots at the actual error
+positions. The fundamental issue is that standard BM expects syndromes from a
+systematic/cyclic code, not a non-systematic evaluation code. The correct
+syndrome for this code structure may require computing residuals from Lagrange
+interpolation rather than DFT coefficients.
 
----
+**Scope:**
+- Determine correct syndrome definition for evaluation-based RS codes
+  (likely: interpolate from first k received values, compute residuals at
+  positions k..n-1, use those as syndromes for BM)
+- Fix `compute_syndromes()` to use the correct formula
+- Verify Chien search convention matches the corrected syndromes
+- Un-ignore `test_two_error_correction` and `test_two_errors_with_higher_parity`
 
-## 🟡 MEDIUM — None Open
+**Files:** `steganographer-core/src/error_correction.rs`
 
-All resolved in v0.2.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
-
----
-
-## 🟢 MINOR — None Open
-
-All resolved in v0.2.0–v0.3.0 (see [CHANGELOG.md](CHANGELOG.md) for details).
-
----
-
-## 📐 Strategic — from RedTeam Adversarial Analysis
-
-These are architectural/strategic decisions, not code bugs.
-
-- [ ] **Key lifecycle: rotation API + revocation list** — minimum viable: CLI
-  command to revoke a key, and a published revoked-keys list that `verify` checks
-  against. The v0.2.0 fixes (key rotation docs, secret-scanning CI) address the
-  immediate gap; this is the full system.
-  - **Scope**: Add `steganographer revoke --key <hex>` command that appends to a
-    `revoked-keys.json` file. Modify `verify` to check the signer's public key
-    against this list and warn/fail if revoked. Publish the list alongside signed
-    media for third-party verification.
-  - **Files**: `steganographer-cli/src/cmd_encode.rs` (new `revoke` subcommand),
-    `steganographer-core/src/crypto.rs` (revocation check in `Verifier`),
-    `steganographer-cli/src/main.rs` (new `Commands::Revoke` variant).
-
-- [ ] **Learned watermarking encoder** — research + prototype a neural watermarking
-  approach resistant to re-encoding/cropping/AI upscaling (VideoSeal-style).
-  This is a major research effort, not a code fix.
-  - **Scope**: Literature review of HiDDeN, StegaStamp, RivaGAN, VideoSeal.
-    Prototype with PyTorch, evaluate against JPEG/PNG compression, H.264/265
-    transcoding, and resize/crop attacks. If viable, implement as a new
-    `steganographer-core/src/neural_stego.rs` module.
-  - **Dependency**: Requires ML model training infrastructure (GPU, dataset).
+**Impact:** Enables multi-error RS correction (currently only single-error works).
+Low practical urgency — steganographic payloads are ~104 bytes, single-error
+correction covers the realistic noise scenario.
 
 ---
 
-## 🔜 Upcoming (Scoped Improvements)
+### DCT Raw-Byte CLI Path
 
-- [ ] **Berlekamp-Massey multi-error correction** — the BM/Chien/Forney
-  infrastructure is built (`error_correction.rs` lines 275–410). Single-error
-  correction works via brute-force fallback. Multi-error correction via BM
-  needs a convention fix: the error locator polynomial's roots must correctly
-  map to codeword positions for this non-systematic evaluation-based RS code.
-  Two tests are `#[ignore]`d with explanation.
-  - **Scope**: Debug the BM syndrome/Chien/Forney convention mismatch. The
-    syndrome computation uses high-frequency DFT coefficients
-    (`S_p = sum_i r[i] * alpha^((k+p)*i)` for `p = 0..parity_count-1`). The
-    error locator should have roots at `alpha^(-i)` for error at position `i`,
-    but the exact mapping between BM output and Chien search evaluation points
-    needs verification against a known-error test case.
-  - **Files**: `steganographer-core/src/error_correction.rs` (fix convention in
-    `chien_search()` and `forney()`, un-ignore 2 tests).
+**Status:** Currently errors clearly (correct stopgap since v0.2.0).
 
-- [ ] **DCT raw-byte CLI path** — wire the CLI's `dct_video` stego type through
-  the real `DctVideo` core library implementation. Currently errors clearly
-  instead of silently falling back to LSB (correct stopgap in v0.2.0).
-  - **Scope**: The core `DctVideo` works with `SignaturePayload` (structured),
-    but the CLI raw-byte path uses a length-prefixed format. Need to either:
-    (a) adapt the CLI path to use `SignaturePayload` directly, or
-    (b) add a raw-byte embed/extract API to `DctVideo`.
-  - **Files**: `steganographer-cli/src/cmd_encode.rs` (`embed_raw_dct_video`),
-    `steganographer-cli/src/cmd_verify.rs` (`extract_payload` dct_video branch),
-    `steganographer-core/src/dct_video.rs` (possibly add raw-byte API).
+The core `DctVideo` module (`dct_video.rs`) works with `SignaturePayload`
+(structured 109-byte payload). The CLI's `dct_video` stego type uses a
+length-prefixed raw-byte format that doesn't match. When a user runs
+`steganographer encode --stego-type dct_video`, it returns an error instead
+of silently falling back to LSB.
 
-- [ ] **`cargo-release` workflow** — automated version bumps and CHANGELOG updates.
-  - **Scope**: Add `release.toml` config, `cargo-release` as dev-dependency,
-    automate: version bump, CHANGELOG section move, tag, push.
-  - **Files**: New `release.toml`, `Cargo.toml` (dev-dependency).
+**Scope:**
+- Option A (preferred): Adapt the CLI path to construct a `SignaturePayload`,
+  pass it to `DctVideo::embed()`, and use `DctVideo::extract()` on verify.
+  This requires the CLI to create a `Signer` + `SignaturePayload` before
+  calling the DctVideo module, rather than passing raw bytes.
+- Option B: Add a `embed_raw()` / `extract_raw()` API to `DctVideo` that
+  handles length-prefixed bytes directly. More work but keeps CLI structure
+  unchanged.
 
-- [ ] **Live test-count badge** — replace static shields.io badge with a
-  CI-computed count to prevent future drift.
-  - **Scope**: Add a CI step that counts `#[test]` functions and updates the
-    README badge, or use a dynamic badge endpoint.
-  - **Files**: `.github/workflows/ci.yml`, `README.md`.
+**Files:**
+- `steganographer-cli/src/cmd_encode.rs` — `embed_raw_dct_video()` (currently errors)
+- `steganographer-cli/src/cmd_verify.rs` — `extract_payload()` dct_video branch (currently errors)
+- `steganographer-core/src/dct_video.rs` — possibly add raw-byte API (Option B)
+
+**Impact:** Enables DCT-domain embedding (JPEG/compression-resistant) via CLI.
+The core library already works and is tested — this is a CLI wiring task.
 
 ---
 
-## 📋 Backlog (Future Features)
-
-Larger items requiring design work or architecture changes.
+## 📋 Backlog
 
 ### Core Improvements
 
 - [ ] **Post-quantum signatures** — ML-DSA (FIPS 204) as Ed25519 alternative.
-  - **Scope**: Add `pq` feature, implement `MlDsaBackend` alongside
-    `Ed25519Backend`. Research `pqcrypto-dilithium` crate or bind to liboqs.
-  - **Dependency**: FIPS 204 finalization, Rust PQ crate maturity.
+  - **Scope:** Add `pq` feature to `steganographer-core`. Implement
+    `MlDsaBackend` alongside `Ed25519Backend` implementing `SignerBackend`
+    trait. Wire into CLI as `--backend mldsa`. Evaluate `pqcrypto-dilithium`
+    crate or FFI to liboqs.
+  - **Files:** `steganographer-core/src/signer_backend.rs`,
+    `steganographer-core/Cargo.toml`, `steganographer-cli/src/main.rs`
+  - **Dependency:** FIPS 204 finalization, Rust PQ crate maturity.
+  - **Signature size:** ML-DSA-44 → 2420 bytes (vs Ed25519's 64 bytes) —
+    requires multi-frame spreading or increased embedding capacity.
 
 - [ ] **Hybrid signing** — Ed25519 + ML-DSA via multi-frame spreading.
-  - **Scope**: Use `multi_frame.rs` to split a hybrid signature across frames.
-  - **Dependency**: Post-quantum signatures above.
+  - **Scope:** Use `multi_frame.rs` XOR secret sharing to split a hybrid
+    signature (Ed25519 || ML-DSA) across N frames. The verifier recovers
+    both signatures, checks both. If either is valid, the content is
+    authenticated (backward-compatible PQ migration).
+  - **Files:** `steganographer-core/src/multi_frame.rs`,
+    `steganographer-core/src/signer_backend.rs`
+  - **Dependency:** Post-quantum signatures above.
 
 - [ ] **Certificate chain support** — X.509 or WebPKI for identity binding.
-  - **Scope**: Add `--cert <path>` flag, verify chain during `steganographer
-    verify`. Use `x509-parser` crate.
-  - **Dependency**: Key lifecycle system (revocation list) above.
+  - **Scope:** Add `--cert <path>` flag to `encode` and `verify`. During
+    verify, parse the X.509 certificate chain with `x509-parser` crate,
+    validate the chain, extract the public key, and check it against the
+    embedded signature. Store the certificate fingerprint in the payload.
+  - **Files:** `steganographer-cli/src/cmd_verify.rs`,
+    `steganographer-cli/src/main.rs`, `steganographer-core/Cargo.toml`
+  - **Dependency:** Key lifecycle system (shipped in v0.4.0–v0.5.0).
 
 ### Platform & Distribution
 
 - [ ] **WASM build** — browser-based encode/verify via WebAssembly.
-  - **Scope**: Make GStreamer optional, build `steganographer-core` to wasm32,
-    expose encode/verify via JS bindings.
-  - **Dependency**: GStreamer feature-gating.
+  - **Scope:** Feature-gate GStreamer behind `gst` feature in
+    `steganographer-core` and `steganographer-cli`. Build
+    `steganographer-core` to `wasm32-unknown-unknown`. Expose encode/verify
+    via `wasm-bindgen` JS bindings. The dashboard could then use in-browser
+    steganography instead of WebSocket round-trips.
+  - **Files:** `steganographer-core/Cargo.toml` (feature gating),
+    `steganographer-core/src/lib.rs` (conditional exports),
+    new `steganographer-wasm/` crate with bindings.
+  - **Dependency:** GStreamer feature-gating (also needed for crates.io).
 
-- [ ] **`cargo install` support** — publish to crates.io (make GStreamer optional).
-  - **Scope**: Feature-gate GStreamer behind `gst` feature. Publish
-    `steganographer-core` and `steganographer-cli` to crates.io.
+- [ ] **`cargo install` support** — publish to crates.io.
+  - **Scope:** Feature-gate GStreamer behind `gst` feature (default off for
+    `cargo install`, on for the dashboard/full CLI). Publish
+    `steganographer-core` and `steganographer-cli` to crates.io. Users can
+    `cargo install steganographer` for core encode/verify without GStreamer;
+    `cargo install steganographer --features gst` for live pipelines.
+  - **Files:** All `Cargo.toml` files, `steganographer-gst/Cargo.toml`
+    (make optional).
+  - **Dependency:** WASM build's feature-gating work (shared).
 
 - [ ] **Homebrew formula** — `brew install steganographer`.
-  - **Scope**: Homebrew tap, formula that builds from source with GStreamer.
+  - **Scope:** Create a Homebrew tap (`docxology/homebrew-steganographer`).
+    Formula builds from source with GStreamer dependency. Support both
+    `brew install steganographer` (core) and
+    `brew install steganographer --with-gstreamer` (full).
+  - **Dependency:** crates.io publish or tagged GitHub releases.
 
 - [ ] **Windows CI** — add Windows matrix entry to CI.
-  - **Scope**: Add `windows-latest` to CI matrix, install GStreamer MSVC,
-    handle any Windows-specific build issues.
+  - **Scope:** Add `windows-latest` to the CI matrix in
+    `.github/workflows/ci.yml`. Install GStreamer MSVC runtime and
+    development headers. Handle any Windows-specific build issues (path
+    separators, DLL loading, GStreamer plugin paths). Update
+    `docs/platforms.md` to remove "No CI Coverage" caveat.
+  - **Files:** `.github/workflows/ci.yml`, `docs/platforms.md`
+  - **Risk:** GStreamer on Windows can be finicky; may need `PKG_CONFIG`
+    workarounds or vcpkg.
 
 - [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines.
-  - **Scope**: Implement `gst::BaseTransform` in `steganographer-gst`,
-    register as a real GStreamer element (not just AppSink/AppSrc wrapper).
+  - **Scope:** Implement `gst::BaseTransform` subclass in
+    `steganographer-gst` that does in-place LSB embedding during the
+    transform pass. Register as a real GStreamer element via
+    `gst::Element.register()`. This eliminates the AppSink/AppSrc
+    round-trip (copy buffer → embed → copy back) for a ~2x throughput
+    improvement in live pipelines.
+  - **Files:** `steganographer-gst/src/plugin.rs` (currently a skeleton),
+    new `steganographer-gst/src/transform.rs`
+  - **Dependency:** GStreamer Rust bindings `BaseTransform` support.
 
 ### Dashboard Enhancements
 
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
-  - **Scope**: Use `wgpu` or `webrtc-rs` for browser-to-server streaming,
-    reducing latency from ~100ms (WebSocket) to ~20ms (WebRTC).
+  - **Scope:** Use `webrtc-rs` crate on the server side and browser
+    `RTCPeerConnection` on the client. Encode frames as VP8/Opus in RTP
+    packets. Reduces latency from ~100ms (WebSocket + JPEG encode/decode)
+    to ~20ms (WebRTC direct). Requires adding a WHIP/WHEP signaling
+    endpoint to the Axum server.
+  - **Files:** `steganographer-dashboard/src/lib.rs` (new `/whip` and
+    `/whep` endpoints), `steganographer-dashboard/src/static/app.js`
+    (WebRTC client), `steganographer-dashboard/Cargo.toml` (`webrtc-rs`)
+  - **Dependency:** Significant refactor of dashboard streaming architecture.
+
+### Research
+
+- [ ] **Learned watermarking encoder** — neural network-based watermarking
+  resistant to re-encoding/cropping/AI upscaling (VideoSeal-style).
+  - **Scope:** Literature review of HiDDeN, StegaStamp, RivaGAN, VideoSeal.
+    Prototype with PyTorch, evaluate against JPEG/PNG compression, H.264/265
+    transcoding, and resize/crop attacks. If viable, implement as a new
+    `steganographer-core/src/neural_stego.rs` module or as an ONNX runtime
+    inference path.
+  - **Dependency:** Requires ML model training infrastructure (GPU, dataset).
+  - **Impact:** Would close the gap between the current LSB default
+    ("maximizes capacity at the cost of robustness") and the marketing claim
+    of surviving transcoding/AI upscaling.
 
 ---
 
