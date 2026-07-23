@@ -1,0 +1,30 @@
+[package]
+name = "steganographer-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+steganographer-core = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "fuzz_lsb_video_extract"
+path = "fuzz_targets/fuzz_lsb_video_extract.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_payload_from_bytes"
+path = "fuzz_targets/fuzz_payload_from_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_rs_decode"
+path = "fuzz_targets/fuzz_rs_decode.rs"
+test = false
+doc = false

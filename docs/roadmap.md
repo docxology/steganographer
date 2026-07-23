@@ -3,17 +3,17 @@
 ```mermaid
 gantt
     title Steganographer Release Timeline
-    dateFormat YYYY-MM
+    dateFormat YYYY-MM-DD
     axisFormat %b %Y
     section Core
-        v0.1.0 LSB + Ed25519 + Dashboard :done, v01, 2024-01, 2024-06
-        v0.2.0 Advanced Stego + Crypto :active, v02, 2024-06, 2024-12
+        v0.1.0 LSB + Ed25519 + Dashboard :done, v01, 2026-03-06, 2026-06-30
+        v0.2.0 Advanced Stego + Crypto + Security Hardening :active, v02, 2026-07-01, 2026-12-31
     section Advanced
-        v0.3.0 Spread Spectrum + Container I/O :v03, 2025-01, 2025-06
-        v1.0.0 Production Ready :v10, 2025-06, 2025-12
+        v0.3.0 Key Lifecycle + Revocation :v03, 2027-01-01, 2027-06-30
+        v1.0.0 Production Ready :v10, 2027-07-01, 2027-12-31
 ```
 
-## Current State (v0.1.0)
+## Current State (v0.1.0 — released 2026-03-06)
 
 ### ✅ Implemented
 
@@ -23,21 +23,20 @@ gantt
 - **Info Bar** — Exoteric QR code, Code-128 barcode, and metadata overlay
 - **BLAKE3 + Ed25519** — Per-frame hashing and signing with 109-byte payload
 - **GStreamer Integration** — AppSink/AppSrc video/audio pipelines
-- **CLI** — 6 subcommands (video, audio, encode, verify, keygen, dashboard)
+- **CLI** — 10 subcommands (video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard)
 - **Configuration** — Full TOML config with modular pipeline chains
-- **Config-Driven Pipelines** — `[video.pipeline]` section for resolution, framerate, opacity, payload (NEW)
-- **Comprehensive Theory Docs** — Steganography theory, deep cryptography, steganalysis resistance (NEW)
-- **Web Dashboard** — Live round-trip steganography verification GUI (Axum + WebSocket) (NEW)
-- **QR Data Matrix Overlay** — Client-side 13×13 binary grid encoding metadata per frame (NEW)
-- **Live Config API** — Real-time opacity, LSB bits, overlay text, sign rate controls via `POST /api/config` (NEW)
-- **MetaMask / Ethereum** — Browser-based `personal_sign` via EIP-1193 (NEW)
-- **Pluggable Signing Backends** — Ed25519 and Ethereum/secp256k1 (NEW)
+- **Config-Driven Pipelines** — `[video.pipeline]` section for resolution, framerate, opacity, payload
+- **Web Dashboard** — Live round-trip steganography verification GUI (Axum + WebSocket)
+- **QR Data Matrix Overlay** — Client-side 13×13 binary grid encoding metadata per frame
+- **Live Config API** — Real-time opacity, LSB bits, overlay text, sign rate controls via `POST /api/config`
+- **MetaMask / Ethereum** — Browser-based `personal_sign` via EIP-1193
+- **Pluggable Signing Backends** — Ed25519 and Ethereum/secp256k1
 - **Documentation** — Architecture, crypto, algorithms, API, security, platform guides
-- **Timestamp Watermarks** — Dynamic `{timestamp}`, `{frame_index}`, `{date}`, `{time}` substitution in overlay text (NEW)
-- **JSON Verify Output** — `--format json` for verify command for machine-readable output (NEW)
-- **Audio Dashboard Tab** — Real-time audio steganography with microphone capture, waveform/spectrum visualization, LSB embed/extract, WAV recording (NEW)
-- **Documentation Tab** — In-dashboard markdown viewer for all project docs with search and syntax highlighting (NEW)
-- **Dynamic LSB Configuration** — Encode and decode handlers read `lsb_bits` from `LiveConfig` each frame, staying in sync when slider changes (NEW)
+- **Timestamp Watermarks** — Dynamic `{timestamp}`, `{frame_index}`, `{date}`, `{time}` substitution in overlay text
+- **JSON Verify Output** — `--format json` for verify command for machine-readable output
+- **Audio Dashboard Tab** — Real-time audio steganography with microphone capture, waveform/spectrum visualization, LSB embed/extract, WAV recording
+- **Documentation Tab** — In-dashboard markdown viewer for all project docs with search and syntax highlighting
+- **Dynamic LSB Configuration** — Encode and decode handlers read `lsb_bits` from `LiveConfig` each frame, staying in sync when slider changes
 - **Signature Preview** — Decoded payload shows first 16 bytes of Ed25519/secp256k1 signature in both video and audio panels (NEW)
 - **Three-Tab Dashboard** — Video | Audio | Documentation tabs with unified styling and smooth transitions (NEW)
 - **Keyboard Shortcuts** — Space=camera, R=record, 1/2/3=tabs, +/-=LSB, E=export session (NEW)
@@ -67,7 +66,7 @@ gantt
 - **Multi-Frame Signatures** — Spread one signature across N frames via `PayloadConfig.multi_frame_spread` (NEW)
 - **`--format json` for Encode** — Machine-readable JSON output for the encode command (NEW)
 - **`--embedding-key` for Verify** — Extraction key for audio/spread-spectrum verification (NEW)
-- **132 Tests** — 56 core unit + 58 core integration + 12 dashboard + 1 GStreamer + 5 Ethereum (feature-gated)
+- **272 Tests** — 171 core unit + 76 core integration + 23 dashboard + 1 GStreamer + 1 doc-test (1 ignored)
 
 ---
 

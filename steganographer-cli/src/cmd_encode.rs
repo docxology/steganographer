@@ -113,22 +113,22 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
         anyhow::bail!("Master secret cannot be empty");
     }
 
-    // Simple HKDF-like derivation: BLAKE3 derive_key with context strings
-    let signing_key = blake3::derive_key("steganographer-signing-v1", &master);
-    let encryption_key = blake3::derive_key("steganographer-encryption-v1", &master);
-    let embedding_key = blake3::derive_key("steganographer-embedding-v1", &master);
+    // Derive keys via the library's KDF module (single source of truth for
+    // context strings — previously these were hand-copied here, which risked
+    // silent desync if kdf.rs's contexts changed)
+    let keys = steganographer_core::kdf::derive_all(&master);
 
     std::fs::create_dir_all(output_dir)?;
 
     let signing_pub = {
-        let sk = ed25519_dalek::SigningKey::from_bytes(&signing_key);
+        let sk = ed25519_dalek::SigningKey::from_bytes(&keys.signing_key);
         sk.verifying_key().to_bytes()
     };
 
     let paths: [(String, Vec<u8>, &str); 4] = [
         (
             format!("{}/signing.key", output_dir),
-            signing_key.to_vec(),
+            keys.signing_key.to_vec(),
             "Signing key (Ed25519 private)",
         ),
         (
@@ -138,12 +138,12 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
         ),
         (
             format!("{}/encryption.key", output_dir),
-            encryption_key.to_vec(),
+            keys.encryption_key.to_vec(),
             "Encryption key (ChaCha20-Poly1305)",
         ),
         (
             format!("{}/embedding.key", output_dir),
-            embedding_key.to_vec(),
+            keys.embedding_key.to_vec(),
             "Embedding key (LSB PRNG)",
         ),
     ];
@@ -975,7 +975,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
+pub fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     if s.len() % 2 != 0 {
         anyhow::bail!("Hex string must have even length");
     }

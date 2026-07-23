@@ -14,6 +14,8 @@ flowchart LR
     CLI --> VERIFY["verify\n🔓 Signature verification"]
     CLI --> KEYGEN["keygen\n🔑 Key generation"]
     CLI --> INFO["info\n📊 Capacity reporting"]
+    CLI --> ANALYZE["analyze\n🔬 Steganographic analysis"]
+    CLI --> DERIVE["derive\n🔑 Key derivation"]
     CLI --> CONFIG["config\n⚙️ Config validation"]
     CLI --> DASH["dashboard\n🌐 Web GUI"]
     style CLI fill:#333,stroke:#e53935,color:#e0e0e0
@@ -324,6 +326,73 @@ steganographer --config my-config.toml config check
 ✓ Configuration valid: config/example.toml
   Sections: global, video, audio
   Hash algorithm: blake3
+```
+
+---
+
+### `analyze` — Steganographic Analysis
+
+Analyze a file for steganographic artifacts using statistical tests.
+
+```bash
+steganographer analyze [OPTIONS] --input <FILE>
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--input <FILE>` | Required | Input file to analyze |
+| `--analysis-type <TYPE>` | `chi_squared` | Analysis type: `chi_squared` |
+| `--format <FORMAT>` | `plain` | Output format: `plain` or `json` |
+
+**Examples**:
+
+```bash
+# Basic chi-squared analysis
+steganographer analyze --input signed.rgb
+
+# JSON output for CI integration
+steganographer analyze --input signed.rgb --format json
+```
+
+---
+
+### `derive` — Key Derivation
+
+Derive signing, encryption, and embedding keys from a single master secret using BLAKE3 `derive_key`.
+
+```bash
+steganographer derive [OPTIONS] --output <DIR>
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--master-secret <HEX>` | — | Master secret (hex-encoded). **WARNING**: visible in shell history and `ps` output. |
+| `--master-secret-file <PATH>` | — | Read master secret from a file (hex-encoded). Safer than `--master-secret`. |
+| `--master-secret-stdin` | `false` | Read master secret from stdin (hex-encoded). |
+| `--output <DIR>` | `keys` | Output directory for derived keys |
+
+**Outputs**:
+- `signing.key` / `signing.pub` — Ed25519 signing keypair
+- `encryption.key` — ChaCha20-Poly1305 encryption key
+- `embedding.key` — LSB PRNG embedding key
+
+> **Security note:** BLAKE3 `derive_key` is a fast KDF, not a slow password
+> hashing function. The master secret must be high-entropy random data (at
+> least 32 bytes / 64 hex chars). A memorable passphrase will be
+> brute-forceable at hash speed. A warning is printed if the secret is
+> shorter than 32 bytes.
+
+**Examples**:
+
+```bash
+# From a file (recommended)
+steganographer derive --master-secret-file secret.hex --output keys
+
+# From stdin
+echo "a1b2c3..." | steganographer derive --master-secret-stdin --output keys
+
+# Direct argument (not recommended — visible in ps/history)
+steganographer derive --master-secret a1b2c3... --output keys
 ```
 
 ---
