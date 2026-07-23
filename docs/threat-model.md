@@ -72,7 +72,7 @@ flowchart LR
 | **Impact** | Medium — subtle edits could alter evidence (timestamps, faces, text) |
 | **Countermeasure** | BLAKE3 hash covers the ENTIRE raw RGB/PCM buffer. ANY modification to even 1 byte invalidates the hash, which invalidates the signature |
 | **Detection** | Extract hash from LSB → recompute BLAKE3 over current frame → compare. Mismatch = tampered |
-| **Residual Risk** | None — cryptographic hash guarantees any modification is detected |
+| **Residual Risk** | Minimal for tampering itself — the cryptographic hash guarantees any byte-level modification is detected. However, T2 only covers modification *detection*, not prevention: an adversary who strips the entire signature (see T4) removes the ability to detect tampering at all. The system is tamper-*evident*, not tamper-*proof*. |
 
 ### T3: Frame Splice/Reorder
 

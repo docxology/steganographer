@@ -4,7 +4,7 @@
 
 ### lib.rs
 
-Entry point. Declares and re-exports: `video`, `audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`, `signer_backend`, `metrics`.
+Entry point. Declares and re-exports: `video`, `audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`, `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`, `error_correction`, `multi_frame`, `kdf`, `adaptive`, `hash_chain`, `steganalysis`, `mdct_audio`.
 
 ### video.rs
 

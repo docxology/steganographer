@@ -35,3 +35,6 @@ gstreamer = { version = "0.23", features = ["v1_22"] }
 clap = { workspace = true }
 clap_complete = "4"
 clap_mangen = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

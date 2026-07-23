@@ -54,10 +54,10 @@ pub fn run(
 
     if let Some(ref s) = signer {
         let pub_key = s.verifying_key();
-        log::info!(
-            "Generated signing key. Public key (hex): {}",
-            hex_encode(&pub_key.to_bytes())
-        );
+        let pub_hex = hex_encode(&pub_key.to_bytes());
+        // Print to stderr unconditionally so --quiet doesn't hide the public key.
+        // The stream is unverifiable without it.
+        eprintln!("Generated signing key. Public key (hex): {}", pub_hex);
     }
 
     // Run the pipeline with a composite stego that applies all modules

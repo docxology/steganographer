@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 272 tests, 0 failures
+cargo test --workspace   # 282 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -218,7 +218,7 @@ bits = 2
 
 ## ✅ Tests
 
-272 tests across 4 crates — all passing:
+282 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -229,7 +229,7 @@ bits = 2
 | **Total** | **187** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 272 tests
+cargo test --workspace                # All 282 tests
 cargo test -p steganographer-core     # Core only (247 tests)
 cargo test -p steganographer-dashboard # Dashboard only (12 tests)
 ```

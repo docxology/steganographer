@@ -183,9 +183,17 @@ enum Commands {
 
     /// Derive keys (signing, encryption, embedding) from a master secret
     Derive {
-        /// Master secret (hex-encoded, any length)
+        /// Master secret (hex-encoded, any length).
+        /// WARNING: this is visible in shell history and `ps` output.
+        /// Prefer --master-secret-file for interactive use.
         #[arg(long)]
-        master_secret: String,
+        master_secret: Option<String>,
+        /// Read master secret from a file (hex-encoded). Safer than --master-secret.
+        #[arg(long)]
+        master_secret_file: Option<String>,
+        /// Read master secret from stdin (hex-encoded). Use `-` as the value.
+        #[arg(long)]
+        master_secret_stdin: bool,
         /// Output directory for derived keys
         #[arg(long, short, default_value = "keys")]
         output: String,
@@ -303,8 +311,45 @@ fn main() -> anyhow::Result<()> {
             cmd_encode::analyze(&input, &analysis_type, &format)
         }
 
-        Commands::Derive { master_secret, output } => {
-            cmd_encode::derive_keys(&master_secret, &output)
+        Commands::Derive { master_secret, master_secret_file, master_secret_stdin, output } => {
+            // Resolve the master secret from one of three sources
+            let secret_hex = if master_secret_stdin {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf.trim().to_string()
+            } else if let Some(path) = master_secret_file {
+                std::fs::read_to_string(&path)?
+                    .trim()
+                    .to_string()
+            } else if let Some(s) = master_secret {
+                log::warn!(
+                    "Reading master secret from --master-secret (visible in shell history / ps). \
+                     Consider --master-secret-file or --master-secret-stdin for better security."
+                );
+                s
+            } else {
+                anyhow::bail!(
+                    "No master secret provided. Use --master-secret <hex>, \
+                     --master-secret-file <path>, or --master-secret-stdin."
+                );
+            };
+
+            // Warn about low-entropy secrets (short hex strings are brute-forceable
+            // at BLAKE3 speed — this KDF is designed for already-high-entropy key
+            // material, not passphrases)
+            let raw_bytes = cmd_encode::hex_decode(&secret_hex)
+                .map_err(|e| anyhow::anyhow!("Master secret is not valid hex: {}", e))?;
+            if raw_bytes.len() < 32 {
+                log::warn!(
+                    "Master secret is only {} bytes — BLAKE3 derive_key is NOT a slow KDF. \
+                     Short or memorable passphrases can be brute-forced at hash speed. \
+                     Use at least 32 bytes (64 hex chars) of high-entropy random data.",
+                    raw_bytes.len()
+                );
+            }
+
+            cmd_encode::derive_keys(&secret_hex, &output)
         }
 
         Commands::Config { action } => {

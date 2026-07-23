@@ -6,7 +6,7 @@ Source modules for the CLI binary.
 
 | File | Lines | Purpose |
 | ------ | ------- | --------- |
-| `main.rs` | ~170 | Clap `#[derive(Parser)]` CLI with 6 subcommands, logging init, dispatch |
+| `main.rs` | ~360 | Clap `#[derive(Parser)]` CLI with 10 subcommands, logging init, dispatch |
 | `cmd_video.rs` | ~130 | Loads config, builds GStreamer video source/sink pipelines, runs `run_video_filter()` |
 | `cmd_audio.rs` | ~100 | Loads config, builds GStreamer audio source/sink pipelines, runs `run_audio_filter()` |
 | `cmd_encode.rs` | ~150 | Reads raw file → auto-generates signing key → embeds LSB → writes output. Also handles `keygen` |

@@ -31,10 +31,9 @@ pub fn run(
             hash_algo,
         );
         log::info!("Hash algorithm: {}", hash_algo.name());
-        log::info!(
-            "Generated signing key. Public key (hex): {}",
-            hex_encode(&s.verifying_key().to_bytes())
-        );
+        // Print to stderr unconditionally so --quiet doesn't hide the public key.
+        let pub_hex = hex_encode(&s.verifying_key().to_bytes());
+        eprintln!("Generated signing key. Public key (hex): {}", pub_hex);
         Some(s)
     } else {
         None

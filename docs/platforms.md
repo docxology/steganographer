@@ -150,7 +150,12 @@ pactl load-module module-null-sink sink_name=stego_sink sink_properties=device.d
 
 ---
 
-## Windows (Experimental)
+## Windows (Community-Supported — No CI Coverage)
+
+> **Note:** Windows builds are not tested in CI. There is no Windows matrix
+> entry in `.github/workflows/ci.yml`. The instructions below are
+> community-contributed and may not reflect the current state of the code.
+> Treat Windows support as best-effort until a CI job is added.
 
 ### Prerequisites
 
@@ -191,14 +196,16 @@ steganographer video --source "ksvideosrc ! videoconvert ! video/x-raw,format=RG
 ### Build in Docker (no local GStreamer needed)
 
 ```dockerfile
-FROM rust:1.94-bookworm
+# Simplified Docker example — see /Dockerfile for the production multi-stage build
+FROM rust:1.97-bookworm
 
 RUN apt-get update && apt-get install -y \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /build
 COPY . .
 RUN cargo build --workspace --release
 ```

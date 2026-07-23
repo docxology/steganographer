@@ -2,10 +2,17 @@
 # Run: cargo deny check
 
 [advisories]
-# Warn for advisories with severity >= medium
+# Deny advisories with severity >= medium (matches the policy comment)
+# The `deny` list causes cargo-deny to fail (exit non-zero) on these.
 version-scope = "*"
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
+# Deny unmaintained crates and medium+ severity advisories
+unmaintained = "workspace"
+# Deny any advisory with severity medium or higher
+deny = ["medium", "high", "critical"]
+# Warn on low-severity advisories
+warn = ["low"]
 
 [licenses]
 # Allow only MIT and Apache-2.0 licensed dependencies

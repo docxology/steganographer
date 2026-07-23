@@ -4,8 +4,8 @@
 
 ### main.rs
 
-- `Cli` — `#[derive(Parser)]` with `--config` and `--log-level` global flags
-- `Commands` — `Video`, `Audio`, `Encode`, `Verify`, `Keygen`, `Dashboard` variants
+- `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, and `--quiet` global flags
+- `Commands` — `Video`, `Audio`, `Encode`, `Verify`, `Keygen`, `Info`, `Analyze`, `Derive`, `Config`, `Dashboard` variants
 - `main()` — initializes `env_logger`, dispatches to `cmd_*::run()`
 
 ### cmd_video.rs
