@@ -245,7 +245,17 @@ fn finish_verification(
         let is_valid = verifier.verify(&payload, data, None);
         if is_valid {
             log::info!("Signature verification: VALID");
-            ("valid".to_string(), "Signature is valid".to_string())
+            // Check if this key has been revoked
+            let revoked_warning = check_revoked_key(pk_hex);
+            if let Some(ref warning) = revoked_warning {
+                log::warn!("{}", warning);
+                (
+                    "valid_revoked".to_string(),
+                    format!("Signature is valid but key has been REVOKED: {}", warning),
+                )
+            } else {
+                ("valid".to_string(), "Signature is valid".to_string())
+            }
         } else {
             log::warn!("Signature verification: INVALID");
             ("invalid".to_string(), "Signature is INVALID".to_string())
@@ -702,6 +712,26 @@ fn read_input(path: &str, format: &str, stego_type: &str) -> anyhow::Result<(Vec
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Check if a public key has been revoked by looking it up in keys/revoked.json.
+/// Returns Some(warning_message) if the key is revoked, None otherwise.
+fn check_revoked_key(public_key_hex: &str) -> Option<String> {
+    let revoked_path = std::path::Path::new("keys/revoked.json");
+    if !revoked_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(revoked_path).ok()?;
+    let revoked: Vec<String> = serde_json::from_str(&content).ok()?;
+    let key_lower = public_key_hex.to_lowercase();
+    if revoked.iter().any(|k| k.to_lowercase() == key_lower) {
+        Some(format!(
+            "Public key {} is in the revoked-keys list (keys/revoked.json)",
+            public_key_hex
+        ))
+    } else {
+        None
+    }
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {

@@ -55,7 +55,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 - **Run**: `./run.sh` (interactive menu, reads `steganographer.toml`)
 - **Dashboard**: `./run.sh` → option `d` or `a` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace` (282 tests across 4 crates)
+- **Test**: `cargo test --workspace` (286 tests across 4 crates)
 - **CLI**: `cargo run -p steganographer-cli -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
@@ -103,5 +103,5 @@ steganographer-cli (integ):    10 tests (keygen, encode→verify round-trip, enc
 steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
 steganographer-gst:            1 test  (plugin skeleton)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        282 tests, 0 failures
+Total:                        286 tests, 0 failures
 ```

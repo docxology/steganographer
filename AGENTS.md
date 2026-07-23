@@ -21,7 +21,7 @@
 
 - **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
 - **Source files**: 27 Rust source files + 6 static web assets across 4 crates
-- **Test files**: 3 integration test files (76+10 tests) + inline unit tests (178 tests) + dashboard tests (23) = **282 total tests**
+- **Test files**: 3 integration test files (76+10 tests) + inline unit tests (178 tests) + dashboard tests (23) = **286 total tests**
 - **Doc files**: 18 markdown documentation files + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -31,7 +31,7 @@
 cargo build --workspace
 cargo test -p steganographer-core              # 247 tests (171 unit + 76 integration, Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 282 total tests
+cargo test --workspace                         # 286 total tests
 ./run.sh                                       # Interactive menu
 ```
 

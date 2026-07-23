@@ -23,7 +23,7 @@ gantt
 - **Info Bar** — Exoteric QR code, Code-128 barcode, and metadata overlay
 - **BLAKE3 + Ed25519** — Per-frame hashing and signing with 109-byte payload
 - **GStreamer Integration** — AppSink/AppSrc video/audio pipelines
-- **CLI** — 10 subcommands (video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard)
+- **CLI** — 11 subcommands (video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard)
 - **Configuration** — Full TOML config with modular pipeline chains
 - **Config-Driven Pipelines** — `[video.pipeline]` section for resolution, framerate, opacity, payload
 - **Web Dashboard** — Live round-trip steganography verification GUI (Axum + WebSocket)
