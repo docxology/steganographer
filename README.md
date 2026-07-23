@@ -130,10 +130,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 174 | [Architecture](docs/architecture.md) |
-| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 12 | [API Reference](docs/api-reference.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 247 | [Architecture](docs/architecture.md) |
+| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 1 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 0 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 10 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -222,16 +222,17 @@ bits = 2
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 115 | `steganographer-core/src/*.rs` |
-| Core integration tests | 59 | `steganographer-core/tests/integration_tests.rs` |
-| Dashboard tests | 12 | `steganographer-dashboard/tests/dashboard_tests.rs` |
-| GStreamer + Ethereum | 1 + 0 | Plugin skeleton + feature-gated (no inline tests) |
-| **Total** | **187** | **0 failures** |
+| Core unit tests | 171 | `steganographer-core/src/*.rs` |
+| Core integration tests | 76 | `steganographer-core/tests/integration_tests.rs` |
+| CLI integration tests | 10 | `steganographer-cli/tests/cli_integration_tests.rs` |
+| Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
+| GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
+| **Total** | **282** | **0 failures** |
 
 ```bash
 cargo test --workspace                # All 282 tests
 cargo test -p steganographer-core     # Core only (247 tests)
-cargo test -p steganographer-dashboard # Dashboard only (12 tests)
+cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 
 ---

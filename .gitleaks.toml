@@ -15,6 +15,7 @@ paths = [
   '''\.gitleaks\.toml''',
   '''steganographer-core/src/config\.rs''',
   '''steganographer-core/tests/.*''',
+  '''steganographer-cli/tests/.*''',
 ]
 # Allow the well-known example/fixture/test key patterns
 regexes = [

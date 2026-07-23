@@ -124,7 +124,7 @@ graph TD
 
 | Module | Purpose | Lines |
 | --- | --- | --- |
-| `main.rs` | Clap CLI entry point, 6 subcommands (incl. dashboard) | ~200 |
+| `main.rs` | Clap CLI entry point, 10 subcommands (incl. dashboard, analyze, derive, info, config) | ~360 |
 | `cmd_video.rs` | Live video pipeline command | ~130 |
 | `cmd_audio.rs` | Live audio pipeline command | ~90 |
 | `cmd_encode.rs` | Offline encoding + key generation | ~135 |
