@@ -594,6 +594,7 @@ pub struct DashboardState {
     pub last_encoded_audio: Mutex<Option<EncodedAudioChunk>>,
     pub live_config: Mutex<LiveConfig>,
     pub session_start: std::time::Instant,
+    pub auth_token: Option<String>,
 }
 ```
 
@@ -602,9 +603,15 @@ pub struct DashboardState {
 | Function | Signature | Description |
 | -------- | ----------- | ------------- |
 | `create_router` | `fn create_router(state: Arc<DashboardState>) -> Router` | Create Axum router with all routes |
-| `start_server` | `async fn start_server(state, port) -> Result<()>` | Start HTTP server on given port |
+| `start_server` | `async fn start_server(state, port, host) -> Result<()>` | Start HTTP server bound to `host:port` |
 
 ### HTTP Routes
+
+> **Security:** POST routes (`/api/config`, `/api/metrics/reset`) require a
+> `Authorization: Bearer <token>` header if `auth_token` is set in
+> `DashboardState`. If `auth_token` is `None` (local-only mode), auth is
+> disabled. The dashboard defaults to binding `127.0.0.1`; use `--host 0.0.0.0`
+> for network access (requires `--auth-token` for safety).
 
 | Method | Path | Handler | Description |
 | ------ | ---- | ------- | ----------- |

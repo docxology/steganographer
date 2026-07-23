@@ -29,7 +29,7 @@
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 247 tests (Ed25519 default)
+cargo test -p steganographer-core              # 247 tests (171 unit + 76 integration, Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
 cargo test --workspace                         # 282 total tests
 ./run.sh                                       # Interactive menu
