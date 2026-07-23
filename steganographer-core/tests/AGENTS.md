@@ -6,7 +6,7 @@ Integration tests that exercise cross-module interactions and end-to-end workflo
 
 ## Coverage
 
-58 tests in `integration_tests.rs` (~1100 lines) covering:
+76 tests in `integration_tests.rs` (~1100 lines) covering:
 
 | Category | Count | Tests |
 | ---------- | ------- | ------- |

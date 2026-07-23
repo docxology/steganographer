@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-187_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-282_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -251,7 +251,7 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 
 ## 📚 Documentation
 
-17 comprehensive guides in [`docs/`](docs/):
+18 comprehensive guides in [`docs/`](docs/):
 
 | Guide | Description |
 | ------- | ------------- |
@@ -262,7 +262,8 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | [**Steganography Theory**](docs/steganography-theory.md) | Information-theoretic security foundations |
 | [**Security**](docs/security.md) | Cachin's ε-security, deployment guidance |
 | [**Threat Model**](docs/threat-model.md) | Adversary model, attack catalog, mitigations |
-| [**CLI Reference**](docs/cli-reference.md) | All 6 commands with examples |
+| [**Key Rotation**](docs/key-rotation.md) | Key rotation record, incident report, revocation procedure |
+| [**CLI Reference**](docs/cli-reference.md) | All 10 commands with examples |
 | [**API Reference**](docs/api-reference.md) | HTTP + WebSocket endpoints, JSON schemas |
 | [**Configuration**](docs/configuration.md) | Full TOML schema, template variables |
 | [**GStreamer**](docs/gstreamer.md) | Pipeline integration, AppSink/AppSrc |
