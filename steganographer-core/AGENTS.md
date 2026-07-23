@@ -45,4 +45,4 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 
 ## Test Coverage
 
-115 unit tests (inline) + 59 integration tests = **174 total**
+178 unit tests (inline) + 76 integration tests = **254 total**

@@ -51,4 +51,4 @@ The dashboard supports live LSB bit-depth changes (1–4) via the UI slider. Bot
 
 ## Test Coverage
 
-12 tests in `tests/dashboard_tests.rs`
+23 tests in `tests/dashboard_tests.rs`

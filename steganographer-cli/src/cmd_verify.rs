@@ -290,19 +290,17 @@ fn extract_payload(
             extract_raw_lsb_video(data, bits)
         }
         "lsb_audio" => {
-            let key = if let Some(key_hex) = embedding_key_hex {
-                let key_bytes = hex_decode(key_hex)?;
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&key_bytes);
-                arr
-            } else {
-                [0u8; 32]
-            };
+            let key_hex = embedding_key_hex.ok_or_else(|| {
+                anyhow::anyhow!("Audio verification requires --embedding-key")
+            })?;
+            let key_bytes = hex_decode(key_hex)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&key_bytes);
             let samples: Vec<i16> = data
                 .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
-            extract_raw_lsb_audio(&samples, 1, &key)
+            extract_raw_lsb_audio(&samples, 1, &arr)
         }
         "spread_spectrum_video" => {
             let key_hex = embedding_key_hex.ok_or_else(|| {
@@ -314,10 +312,14 @@ fn extract_payload(
             extract_raw_ss_video(data, &arr)
         }
         "dct_video" => {
-            // DCT extraction of raw bytes is not yet implemented for arbitrary payloads
-            // Return None and let the caller handle it
-            let _ = (width, height, opts);
-            Ok(None)
+            // DCT extraction of raw bytes is not yet implemented.
+            // The core library's DctVideo works with SignaturePayload (structured),
+            // not the length-prefixed raw-byte format used by the CLI.
+            anyhow::bail!(
+                "dct_video verification is not yet implemented for raw-byte payloads. \
+                 Use 'lsb_video' or 'spread_spectrum_video' instead, or use the \
+                 GStreamer pipeline which supports DCT via the core library."
+            );
         }
         _ => Ok(None),
     }

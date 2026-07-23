@@ -198,6 +198,13 @@ enum Commands {
         /// Signing backend: "ed25519" or "ethereum"
         #[arg(long, default_value = "ed25519")]
         backend: String,
+        /// Bind address: "127.0.0.1" (default, local-only) or "0.0.0.0" (all interfaces)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Auth token for mutating API endpoints (POST /api/config, POST /api/metrics/reset).
+        /// If set, clients must send `Authorization: Bearer <token>`. If omitted, auth is disabled.
+        #[arg(long)]
+        auth_token: Option<String>,
     },
 
     /// Validate a TOML configuration file without running any pipeline
@@ -328,9 +335,17 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Dashboard { port, backend } => {
+        Commands::Dashboard { port, backend, host, auth_token } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
+
+            if host == "0.0.0.0" && auth_token.is_none() {
+                log::warn!(
+                    "Dashboard binding to 0.0.0.0 without --auth-token: \
+                    mutating endpoints (POST /api/config, POST /api/metrics/reset) \
+                    will be accessible without authentication. Consider using --auth-token."
+                );
+            }
 
             let identity_backend: Box<dyn steganographer_core::SignerBackend> = match backend.as_str() {
                 #[cfg(feature = "ethereum")]
@@ -348,13 +363,14 @@ fn main() -> anyhow::Result<()> {
                 last_encoded_audio: std::sync::Mutex::new(None),
                 live_config: std::sync::Mutex::new(steganographer_dashboard::LiveConfig::default()),
                 session_start: std::time::Instant::now(),
+                auth_token,
             });
 
-            log::info!("Starting dashboard on port {} with {} backend", port, backend);
+            log::info!("Starting dashboard on {}:{} with {} backend", host, port, backend);
             log::info!("Identity: {}", identity_backend.display_identity());
 
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(steganographer_dashboard::start_server(state, port))?;
+            rt.block_on(steganographer_dashboard::start_server(state, port, &host))?;
             Ok(())
         }
     }

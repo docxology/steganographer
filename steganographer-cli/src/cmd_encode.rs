@@ -418,17 +418,16 @@ fn embed_payload(
             })
         }
         "dct_video" => {
-            let mut dct = steganographer_core::dct_video::DctVideo::default();
-            let mut frame = VideoFrame {
-                width,
-                height,
-                stride: width * 3,
-                format: VideoFormat::Rgb8,
-                data,
-                frame_index: 0,
-            };
-            embed_raw_dct_video(&mut frame, payload_bytes, &mut dct)?;
-            Ok(StegoResult { audio_key_hex: None })
+            // DCT embedding for raw-byte payloads is not yet implemented.
+            // The core library's DctVideo works with SignaturePayload (structured),
+            // but the CLI raw-byte path uses a length-prefixed format that
+            // doesn't map cleanly to the block-based DCT embedding.
+            // Previously this silently fell back to LSB, which was misleading.
+            anyhow::bail!(
+                "dct_video CLI stego type is not yet implemented for raw-byte payloads. \
+                 Use 'lsb_video' or 'spread_spectrum_video' instead, or use the \
+                 GStreamer pipeline which supports DCT via the core library."
+            );
         }
         _ => anyhow::bail!("Unsupported stego type: {}", stego_type),
     }
@@ -568,19 +567,23 @@ fn embed_ss_bit(
     bit: u8,
     bit_pos: usize,
     frame_index: u64,
-    _ss: &steganographer_core::spread_spectrum::SpreadSpectrumVideo,
+    ss: &steganographer_core::spread_spectrum::SpreadSpectrumVideo,
 ) {
     let spread = 64usize;
     let amplitude = 3i32;
     if start + spread > data.len() {
         return;
     }
-    // Simple PN sequence: use bit_pos and frame_index as seed
+    // Seed PN sequence using the secret key — matches the extraction side
+    // (cmd_verify.rs:extract_ss_bit) and the library (spread_spectrum.rs:pn_sequence).
+    // Previously this was `fb ^ bb` only (no key), making embedding fully public
+    // and breaking the round-trip with verify.
+    let key = ss.key();
     let mut seed = [0u8; 32];
     let fb = frame_index.to_le_bytes();
     let bb = (bit_pos as u64).to_le_bytes();
     for i in 0..32 {
-        seed[i] = fb[i % 8] ^ bb[i % 8];
+        seed[i] = key[i] ^ fb[i % 8] ^ bb[i % 8];
     }
     let mut rng = rand::rngs::StdRng::from_seed(seed);
     let pn: Vec<i32> = (0..spread)
@@ -1090,7 +1093,7 @@ pub fn encode_multi_frame_file(
 
         let payload = signer.sign_frame(frame_idx, &frame_data, None);
 
-        let mut lsb = LsbVideo::new(bits);
+        let mut lsb = LsbVideo::try_new(bits)?;
         let mut frame = VideoFrame {
             width, height, stride: width * 3,
             format: VideoFormat::Rgb8,

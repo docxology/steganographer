@@ -83,6 +83,7 @@ fn test_dashboard_state_construction() {
         last_encoded_audio: Mutex::new(None),
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
+        auth_token: None,
     };
     assert_eq!(state.signing_backend, "ed25519");
     assert_eq!(state.width, 1280);
@@ -140,6 +141,7 @@ async fn test_router_creation() {
         last_encoded_audio: Mutex::new(None),
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
+        auth_token: None,
     });
     let _router = steganographer_dashboard::create_router(state);
 }
@@ -159,6 +161,7 @@ fn test_dashboard_state_session_start() {
         last_encoded_audio: Mutex::new(None),
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
+        auth_token: None,
     };
     let after = std::time::Instant::now();
     // session_start should be between before and after
@@ -218,6 +221,7 @@ fn test_app() -> (axum::Router, Arc<DashboardState>) {
         last_encoded_audio: Mutex::new(None),
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
+        auth_token: None,
     });
     let router = steganographer_dashboard::create_router(state.clone());
     (router, state)

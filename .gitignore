@@ -1,8 +1,27 @@
+# Build artifacts
 /target
-Cargo.lock
 **/*.rs.bk
 *.pdb
+
+# Cargo.lock — committed for reproducible builds (binary + Docker)
+# (intentionally NOT gitignored)
+
+# IDE files
 *.swp
 *.swo
 *~
+.vscode/
+.idea/
+
+# OS files
 .DS_Store
+
+# Keys and output (sensitive — mirrors .dockerignore)
+keys/
+output/
+*.key
+*.pub
+!config/example.toml
+
+# Docker
+.docker/
