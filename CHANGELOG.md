@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-23
+
+### Added
+
+- **Berlekamp-Massey RS decoder infrastructure** — `error_correction.rs` now includes
+  proper syndrome computation, Berlekamp-Massey algorithm, Chien search, and Forney
+  algorithm functions. Single-error correction works via brute-force (reliable for
+  small steganographic payloads); multi-error correction via BM is implemented but
+  needs convention fixes for the non-systematic evaluation code (2 tests `#[ignore]`d).
+- **Live pipeline `--signing-key` option** — `steganographer video --signing-key <path>`
+  and `steganographer audio --signing-key <path>` now accept a persistent Ed25519 signing
+  key file instead of generating an ephemeral keypair per run. Enables reproducible
+  verification across sessions.
+- **Fuzz CI job** — Nightly fuzz job in CI (`.github/workflows/ci.yml`) running all 3
+  fuzz targets for 60s each with `cargo +nightly fuzz`.
+- **GF(2^8) polynomial helpers** — `gf_poly_eval`, `gf_poly_mul`, `gf_div` functions
+  added to `error_correction.rs` for the BM/Chien/Forney pipeline.
+- **4 new error correction tests** — `test_two_error_correction`, `test_two_errors_with_higher_parity`
+  (ignored — BM convention fix needed), `test_gf_poly_eval`, `test_gf_poly_mul`.
+- **C2PA interoperability decision** — Recorded in `docs/architecture.md`: deferred,
+  monitor but do not implement. Rationale: C2PA operates on files, not live streams.
+  Revisit when C2PA adds a streaming profile.
+- **Dashboard DOCS array** — `key-rotation.md` added to the embedded docs list so the
+  in-dashboard documentation viewer can serve it.
+
+### Changed
+
+- RS decode now uses syndrome-based error detection (polynomial-time) before falling
+  back to brute-force correction, rather than pure brute-force.
+- Test badge updated to 286 (was 282).
+- Doc file count updated to 18 in all references (was 17 — `key-rotation.md` added
+  in v0.2.0 but missed in some count references).
+
+### Fixed
+
+- **Stale doc counts** — All test counts, module counts, and subcommand counts
+  corrected across every file (zero stale references remaining per comprehensive grep).
+
 ## [0.2.0] — 2026-07-22
 
 ### Security (Critical)
@@ -89,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **132 Tests** — 56 core unit + 58 core integration + 12 dashboard + 1 GStreamer + 5 Ethereum (feature-gated)
 - **17 Documentation Files** — architecture, cryptography, algorithms, CLI, config, GStreamer, platforms, API, security, threat model, theory, contributing, roadmap, FAQ
 
-[Unreleased]: https://github.com/docxology/steganographer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/docxology/steganographer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/docxology/steganographer/releases/tag/v0.3.0
 [0.2.0]: https://github.com/docxology/steganographer/releases/tag/v0.2.0
 [0.1.0]: https://github.com/docxology/steganographer/releases/tag/v0.1.0

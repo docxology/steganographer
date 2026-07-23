@@ -47,6 +47,10 @@ enum Commands {
         sink: Option<String>,
         #[arg(long)]
         max_frames: Option<u64>,
+        /// Path to signing key file (hex-encoded 32-byte Ed25519 private key).
+        /// If omitted, an ephemeral keypair is generated per run.
+        #[arg(long)]
+        signing_key: Option<String>,
     },
 
     /// Run live audio pipeline: capture → steganography → virtual device
@@ -57,6 +61,10 @@ enum Commands {
         sink: Option<String>,
         #[arg(long)]
         max_buffers: Option<u64>,
+        /// Path to signing key file (hex-encoded 32-byte Ed25519 private key).
+        /// If omitted, an ephemeral keypair is generated per run.
+        #[arg(long)]
+        signing_key: Option<String>,
     },
 
     /// Encode steganographic data into a file (offline)
@@ -247,12 +255,12 @@ fn main() -> anyhow::Result<()> {
     log::info!("Config: {}", cli.config);
 
     match cli.command {
-        Commands::Video { source, sink, max_frames } => {
-            cmd_video::run(&cli.config, source, sink, max_frames)
+        Commands::Video { source, sink, max_frames, signing_key } => {
+            cmd_video::run(&cli.config, source, sink, max_frames, signing_key)
         }
 
-        Commands::Audio { source, sink, max_buffers } => {
-            cmd_audio::run(&cli.config, source, sink, max_buffers)
+        Commands::Audio { source, sink, max_buffers, signing_key } => {
+            cmd_audio::run(&cli.config, source, sink, max_buffers, signing_key)
         }
 
         Commands::Encode {

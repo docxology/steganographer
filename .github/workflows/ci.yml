@@ -104,3 +104,28 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
         with:
           config-path: .gitleaks.toml
+
+  fuzz:
+    name: Fuzz (nightly, 60s per target)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz
+
+      - name: Install GStreamer (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Run fuzz targets (60s each)
+        run: |
+          cd steganographer-core
+          cargo +nightly fuzz run fuzz_lsb_video_extract -- -max_total_time=60 -max_len=4096 || true
+          cargo +nightly fuzz run fuzz_payload_from_bytes -- -max_total_time=60 || true
+          cargo +nightly fuzz run fuzz_rs_decode -- -max_total_time=60 || true

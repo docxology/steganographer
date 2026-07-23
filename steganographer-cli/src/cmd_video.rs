@@ -7,6 +7,7 @@ pub fn run(
     source: Option<String>,
     sink: Option<String>,
     max_frames: Option<u64>,
+    signing_key: Option<String>,
 ) -> anyhow::Result<()> {
     let cfg = Config::from_file(config_path)?;
     log::info!("Running video pipeline");
@@ -35,18 +36,36 @@ pub fn run(
 
     log::info!("Stego pipeline has {} modules", stego_modules.len());
 
-    // Create signer if LSB signature is configured
-    let hash_algo = steganographer_core::crypto::HashAlgorithm::parse(
-        cfg.global.hash_algorithm_name()
-    );
+    let hash_algo =
+        steganographer_core::crypto::HashAlgorithm::parse(cfg.global.hash_algorithm_name());
     let signer = if video_cfg.stego.lsb_signature.is_some()
-        || video_cfg.stego.pipeline.iter().any(|s| s == "spread_spectrum" || s == "dct")
+        || video_cfg
+            .stego
+            .pipeline
+            .iter()
+            .any(|s| s == "spread_spectrum" || s == "dct")
     {
-        let s = steganographer_core::crypto::Signer::with_hash_algorithm(
-            ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
-            hash_algo,
-        );
-        log::info!("Hash algorithm: {}", hash_algo.name());
+        let s = if let Some(ref key_path) = signing_key {
+            // Load persistent signing key from file
+            let key_hex = std::fs::read_to_string(key_path)?;
+            let key_bytes = hex_decode(key_hex.trim())?;
+            if key_bytes.len() != 32 {
+                anyhow::bail!("Signing key must be 32 bytes (64 hex chars), got {}", key_bytes.len());
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&key_bytes);
+            let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
+            log::info!("Using persistent signing key from: {}", key_path);
+            steganographer_core::crypto::Signer::with_hash_algorithm(sk, hash_algo)
+        } else {
+            // Generate ephemeral keypair
+            let s = steganographer_core::crypto::Signer::with_hash_algorithm(
+                ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+                hash_algo,
+            );
+            log::info!("Hash algorithm: {}", hash_algo.name());
+            s
+        };
         Some(s)
     } else {
         None
@@ -219,4 +238,17 @@ fn build_video_stego_chain(
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        anyhow::bail!("Hex string must have even length");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid hex at position {}: {}", i, e))
+        })
+        .collect()
 }
