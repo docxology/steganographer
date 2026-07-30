@@ -4,12 +4,19 @@
 
 use serde::Deserialize;
 
+use crate::ots_config::OtsConfig;
+
 /// Top-level configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub global: GlobalConfig,
     pub video: Option<VideoConfig>,
     pub audio: Option<AudioConfig>,
+    /// Optional OpenTimestamps attestation configuration.
+    /// When absent or `enabled = false`, OTS is completely disabled and the
+    /// project behaves exactly as before. See [`crate::ots_config`].
+    #[serde(default)]
+    pub ots: Option<OtsConfig>,
 }
 
 /// Global settings.
@@ -231,6 +238,17 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         Self::from_toml(&contents)
     }
+
+    /// Get the resolved OTS configuration, or a disabled default if the
+    /// `[ots]` block was absent from the TOML.
+    pub fn ots_config(&self) -> OtsConfig {
+        self.ots.clone().unwrap_or_default()
+    }
+
+    /// Whether OTS stamping is enabled in this configuration.
+    pub fn ots_enabled(&self) -> bool {
+        self.ots.as_ref().is_some_and(|o| o.is_enabled())
+    }
 }
 
 impl LsbSignatureConfig {
@@ -444,6 +462,37 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             key_file: None,
         };
         assert_eq!(cfg.hash_algorithm_name(), "blake3");
+    }
+
+    #[test]
+    fn test_config_without_ots_section() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        assert!(cfg.ots.is_none());
+        assert!(!cfg.ots_enabled());
+        assert!(!cfg.ots_config().is_enabled());
+    }
+
+    #[test]
+    fn test_config_with_ots_enabled() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[ots]
+enabled = true
+method = "ethereum"
+interval_secs = 120
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        assert!(cfg.ots_enabled());
+        let ots = cfg.ots_config();
+        assert!(ots.is_enabled());
+        assert_eq!(ots.method, "ethereum");
+        assert_eq!(ots.interval_secs, 120);
     }
 
     #[test]

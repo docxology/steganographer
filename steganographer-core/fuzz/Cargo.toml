@@ -28,3 +28,12 @@ name = "fuzz_rs_decode"
 path = "fuzz_targets/fuzz_rs_decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_packet_decode"
+path = "fuzz_targets/fuzz_packet_decode.rs"
+test = false
+doc = false
+
+# Keep cargo-fuzz's instrumented package independent from the release workspace.
+[workspace]

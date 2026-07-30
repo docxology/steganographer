@@ -7,21 +7,69 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Verifier};
+use steganographer_core::dct_video::DctVideo;
 use steganographer_core::encryption;
 use steganographer_core::error_correction;
+use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+
+use crate::carrier_binding;
+use crate::media_io;
 
 // ─── Options & Results ──────────────────────────────────────────────
 
 /// Options controlling the verify process.
+#[derive(Clone)]
 pub struct VerifyOptions {
+    pub bits: VerifyBits,
     pub decrypt: bool,
     pub decryption_key: Option<String>,
     pub decryption_key_file: Option<String>,
+    pub embedding_key_file: Option<String>,
     pub ecc: bool,
     pub ecc_parity: usize,
     pub spread: u32,
     pub hash_algorithm: Option<String>,
     pub input_format: Option<String>,
+    pub raw_width: Option<u32>,
+    pub raw_height: Option<u32>,
+}
+
+/// LSB extraction strength selected by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyBits {
+    Auto,
+    Exact(u8),
+}
+
+impl VerifyBits {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let bits: u8 = value
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--bits must be 'auto' or an integer from 1 to 4"))?;
+        if !(1..=4).contains(&bits) {
+            anyhow::bail!("--bits must be 'auto' or an integer from 1 to 4");
+        }
+        Ok(Self::Exact(bits))
+    }
+
+    fn candidates(self) -> &'static [u8] {
+        const AUTO: &[u8] = &[1, 2, 3, 4];
+        const ONE: &[u8] = &[1];
+        const TWO: &[u8] = &[2];
+        const THREE: &[u8] = &[3];
+        const FOUR: &[u8] = &[4];
+        match self {
+            Self::Auto => AUTO,
+            Self::Exact(1) => ONE,
+            Self::Exact(2) => TWO,
+            Self::Exact(3) => THREE,
+            Self::Exact(4) => FOUR,
+            Self::Exact(_) => unreachable!("VerifyBits::Exact is validated at construction"),
+        }
+    }
 }
 
 /// Machine-readable verification result (serializable to JSON).
@@ -34,6 +82,8 @@ pub struct VerifyResult {
     pub signature_preview: Option<String>,
     pub status: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsb_bits: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,16 +103,28 @@ pub fn run(
     format: &str,
 ) -> anyhow::Result<()> {
     let opts = VerifyOptions {
+        bits: VerifyBits::Auto,
         decrypt: false,
         decryption_key: None,
         decryption_key_file: None,
+        embedding_key_file: None,
         ecc: false,
         ecc_parity: 4,
         spread: 1,
         hash_algorithm: None,
         input_format: None,
+        raw_width: None,
+        raw_height: None,
     };
-    run_with_key(config_path, input, public_key_hex, stego_type, format, None, &opts)
+    run_with_key(
+        config_path,
+        input,
+        public_key_hex,
+        stego_type,
+        format,
+        None,
+        &opts,
+    )
 }
 
 /// Run verification with full options.
@@ -94,8 +156,37 @@ pub fn run_with_key(
             },
             video: None,
             audio: None,
+            ots: None,
         }
     });
+
+    let configured_payload = cfg
+        .video
+        .as_ref()
+        .and_then(|video| video.pipeline.as_ref())
+        .and_then(|pipeline| pipeline.payload.as_ref());
+    let mut effective_opts = opts.clone();
+    if let Some(payload) = configured_payload {
+        effective_opts.decrypt |= payload.encrypt_enabled();
+        effective_opts.ecc |= payload
+            .error_correction
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("reed_solomon"));
+        if effective_opts.spread == 1 {
+            effective_opts.spread = payload.spread_count();
+        }
+        if effective_opts.decryption_key_file.is_none() && effective_opts.decryption_key.is_none() {
+            effective_opts.decryption_key_file = payload.encryption_key_file.clone();
+            effective_opts.decryption_key = payload.encryption_key.clone();
+        }
+    }
+    let opts = &effective_opts;
+    if opts.ecc && !(1..=16).contains(&opts.ecc_parity) {
+        anyhow::bail!(
+            "--ecc-parity must be in the range 1-16 when ECC is enabled, got {}",
+            opts.ecc_parity
+        );
+    }
 
     let hash_algo = opts
         .hash_algorithm
@@ -108,24 +199,49 @@ pub fn run_with_key(
         .input_format
         .as_deref()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| detect_format(input, stego_type));
+        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
 
     // Read input
-    let (data, width, height) = read_input(input, &input_format, stego_type)?;
-    log::info!("Read {} bytes from {}", data.len(), input);
+    let media = media_io::read_input_with_dimensions(
+        input,
+        &input_format,
+        stego_type,
+        opts.raw_width,
+        opts.raw_height,
+    )?;
+    let data = &media.data;
+    let (width, height) = (media.width, media.height);
+    log::info!("Read {} decoded bytes from {}", data.len(), input);
+
+    let embedding_key = resolve_embedding_key(embedding_key_hex, opts, &cfg, stego_type)?;
 
     // Multi-frame: read all files and reconstruct
     if opts.spread > 1 {
         return verify_multi_frame(
-            input, &data, width, height, public_key_hex, stego_type, format,
-            embedding_key_hex, opts, &hash_algo,
+            input,
+            data,
+            width,
+            height,
+            public_key_hex,
+            stego_type,
+            format,
+            opts,
+            &hash_algo,
+            &cfg,
         );
     }
 
     // Extract raw payload bytes from the media
-    let extracted = extract_payload(&data, width, height, stego_type, embedding_key_hex, opts)?;
-    let raw_data = match extracted {
-        Some(bytes) => bytes,
+    let extracted = extract_payload(
+        data,
+        width,
+        height,
+        stego_type,
+        embedding_key.as_ref(),
+        opts,
+    )?;
+    let (raw_data, detected_bits) = match extracted {
+        Some(extracted) => (extracted.bytes, extracted.lsb_bits),
         None => {
             let result = VerifyResult {
                 found: false,
@@ -135,6 +251,7 @@ pub fn run_with_key(
                 signature_preview: None,
                 status: "no_signature".to_string(),
                 message: "No steganographic signature found in the file".to_string(),
+                lsb_bits: None,
                 encrypted: None,
                 ecc_corrected: None,
                 hash_algorithm: Some(hash_algo.name().to_string()),
@@ -144,22 +261,7 @@ pub fn run_with_key(
         }
     };
 
-    // Apply error correction if enabled
-    let payload_data = if opts.ecc {
-        let data_len = raw_data.len().saturating_sub(opts.ecc_parity);
-        match error_correction::decode(&raw_data, data_len, opts.ecc_parity) {
-            Ok(decoded) => {
-                log::info!("RS decoded: {} -> {} bytes", raw_data.len(), decoded.len());
-                decoded
-            }
-            Err(e) => {
-                log::warn!("RS decode failed: {}, using raw data", e);
-                raw_data[..data_len].to_vec()
-            }
-        }
-    } else {
-        raw_data
-    };
+    let payload_data = apply_ecc_transform(&raw_data, opts)?;
 
     // Check if the payload data looks like a valid SignaturePayload
     if payload_data.len() >= SignaturePayload::SERIALIZED_SIZE {
@@ -171,7 +273,19 @@ pub fn run_with_key(
             // Direct SignaturePayload
             let payload = SignaturePayload::from_bytes(&arr)?;
             return finish_verification(
-                payload, &data, public_key_hex, stego_type, format, false, false, &hash_algo,
+                payload,
+                data,
+                width,
+                height,
+                public_key_hex,
+                stego_type,
+                format,
+                false,
+                opts.ecc,
+                detected_bits,
+                raw_data.len(),
+                &hash_algo,
+                &cfg,
             );
         }
     }
@@ -193,7 +307,19 @@ pub fn run_with_key(
             if SignaturePayload::has_valid_magic(&arr) {
                 let payload = SignaturePayload::from_bytes(&arr)?;
                 return finish_verification(
-                    payload, &data, public_key_hex, stego_type, format, true, opts.ecc, &hash_algo,
+                    payload,
+                    data,
+                    width,
+                    height,
+                    public_key_hex,
+                    stego_type,
+                    format,
+                    true,
+                    opts.ecc,
+                    detected_bits,
+                    raw_data.len(),
+                    &hash_algo,
+                    &cfg,
                 );
             }
         }
@@ -208,6 +334,7 @@ pub fn run_with_key(
         signature_preview: None,
         status: "extracted".to_string(),
         message: format!("Extracted {} bytes of payload data", payload_data.len()),
+        lsb_bits: detected_bits,
         encrypted: Some(opts.decrypt),
         ecc_corrected: Some(opts.ecc),
         hash_algorithm: Some(hash_algo.name().to_string()),
@@ -221,15 +348,31 @@ pub fn run_with_key(
 fn finish_verification(
     payload: SignaturePayload,
     data: &[u8],
+    width: u32,
+    height: u32,
     public_key_hex: Option<&str>,
     stego_type: &str,
     format: &str,
     was_encrypted: bool,
     was_ecc: bool,
+    lsb_bits: Option<u8>,
+    embedded_payload_len: usize,
     hash_algo: &HashAlgorithm,
+    cfg: &steganographer_core::config::Config,
 ) -> anyhow::Result<()> {
     let hash_hex = hex_encode(&payload.hash);
     let sig_preview = hex_encode(&payload.signature.to_bytes()[..16]);
+
+    // Compute the canonical carrier bytes once — used for both signature
+    // verification and the optional OTS proof check.
+    let canonical = carrier_binding::canonicalize(
+        data,
+        stego_type,
+        lsb_bits.unwrap_or(1),
+        width,
+        height,
+        embedded_payload_len,
+    )?;
 
     let (status, message) = if let Some(pk_hex) = public_key_hex {
         let pk_bytes = hex_decode(pk_hex)?;
@@ -242,7 +385,7 @@ fn finish_verification(
             ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)?,
             *hash_algo,
         );
-        let is_valid = verifier.verify(&payload, data, None);
+        let is_valid = verifier.verify(&payload, &canonical, None);
         if is_valid {
             log::info!("Signature verification: VALID");
             // Check if this key has been revoked
@@ -275,15 +418,86 @@ fn finish_verification(
         signature_preview: Some(sig_preview),
         status,
         message,
+        lsb_bits,
         encrypted: Some(was_encrypted),
         ecc_corrected: Some(was_ecc),
         hash_algorithm: Some(hash_algo.name().to_string()),
     };
     print_result(&result, format)?;
+
+    // ─── Optional OpenTimestamps post-signature verification ──────────
+    // If OTS is enabled in the config, attempt to find and verify a proof
+    // for the SHA-256 of the signed carrier data. This is best-effort: if
+    // no proof exists or the OTS server is unreachable, the signature
+    // verification result above is not affected.
+    if cfg.ots_enabled() {
+        let ots_cfg = cfg.ots_config();
+        let client = steganographer_core::OTSClient::from_config(&ots_cfg);
+        let digest = steganographer_core::OTSClient::compute_sha256_digest(&canonical);
+        let digest_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let proof_path = client.proof_path_for(&digest_hex);
+        if proof_path.exists() {
+            log::info!("Found OTS proof at {}", proof_path.display());
+            match steganographer_core::OTSClient::load_proof(&proof_path) {
+                Ok(proof) => {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    match rt.block_on(client.verify(&proof)) {
+                        Ok(vr) => {
+                            if format == "json" {
+                                println!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "ots": {
+                                            "verified": vr.verified,
+                                            "method": vr.method,
+                                            "timestamp": vr.timestamp,
+                                            "details": vr.details,
+                                        }
+                                    })
+                                );
+                            } else {
+                                let status_str = if vr.verified {
+                                    "\u{2713} VERIFIED"
+                                } else {
+                                    "\u{2717} NOT VERIFIED"
+                                };
+                                println!("  OTS:         {}", status_str);
+                                if let Some(ts) = vr.timestamp {
+                                    println!("  OTS time:    {} (Unix)", ts);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("OTS verify failed: {}", e);
+                            if format != "json" {
+                                println!("  OTS:         verification failed ({})", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("OTS proof load failed: {}", e);
+                }
+            }
+        } else {
+            log::debug!("No OTS proof found for digest {}", digest_hex);
+            if format != "json" {
+                println!(
+                    "  OTS:         no proof found (stamping was not active or proof file missing)"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
 // ─── Extraction ─────────────────────────────────────────────────────
+
+struct ExtractedPayload {
+    bytes: Vec<u8>,
+    lsb_bits: Option<u8>,
+}
 
 /// Extract raw payload bytes from media.
 fn extract_payload(
@@ -291,48 +505,142 @@ fn extract_payload(
     width: u32,
     height: u32,
     stego_type: &str,
-    embedding_key_hex: Option<&str>,
+    embedding_key: Option<&[u8; 32]>,
     opts: &VerifyOptions,
-) -> anyhow::Result<Option<Vec<u8>>> {
+) -> anyhow::Result<Option<ExtractedPayload>> {
     match stego_type {
         "lsb_video" => {
-            let bits = 1u8; // verify always uses 1-bit
-            extract_raw_lsb_video(data, bits)
+            let mut fallback = None;
+            for &bits in opts.bits.candidates() {
+                if let Some(bytes) = extract_raw_lsb_video(data, bits)? {
+                    let extracted = ExtractedPayload {
+                        bytes,
+                        lsb_bits: Some(bits),
+                    };
+                    if candidate_has_valid_signature(&extracted.bytes, opts) {
+                        return Ok(Some(extracted));
+                    }
+                    fallback.get_or_insert(extracted);
+                }
+            }
+            Ok(fallback)
         }
         "lsb_audio" => {
-            let key_hex = embedding_key_hex.ok_or_else(|| {
-                anyhow::anyhow!("Audio verification requires --embedding-key")
+            let key = embedding_key.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Audio verification requires an embedding key from --embedding-key, \
+                         --embedding-key-file, or configuration"
+                )
             })?;
-            let key_bytes = hex_decode(key_hex)?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&key_bytes);
             let samples: Vec<i16> = data
                 .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
-            extract_raw_lsb_audio(&samples, 1, &arr)
+            let mut fallback = None;
+            for &bits in opts.bits.candidates() {
+                if let Some(bytes) = extract_raw_lsb_audio(&samples, bits, key)? {
+                    let extracted = ExtractedPayload {
+                        bytes,
+                        lsb_bits: Some(bits),
+                    };
+                    if candidate_has_valid_signature(&extracted.bytes, opts) {
+                        return Ok(Some(extracted));
+                    }
+                    fallback.get_or_insert(extracted);
+                }
+            }
+            Ok(fallback)
         }
         "spread_spectrum_video" => {
-            let key_hex = embedding_key_hex.ok_or_else(|| {
-                anyhow::anyhow!("Spread-spectrum verification requires --embedding-key")
+            let key = embedding_key.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Spread-spectrum verification requires an embedding key from \
+                     --embedding-key, --embedding-key-file, or configuration"
+                )
             })?;
-            let key_bytes = hex_decode(key_hex)?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&key_bytes);
-            extract_raw_ss_video(data, &arr)
+            Ok(
+                extract_raw_ss_video(data, key)?.map(|bytes| ExtractedPayload {
+                    bytes,
+                    lsb_bits: None,
+                }),
+            )
         }
         "dct_video" => {
-            // DCT extraction of raw bytes is not yet implemented.
-            // The core library's DctVideo works with SignaturePayload (structured),
-            // not the length-prefixed raw-byte format used by the CLI.
-            anyhow::bail!(
-                "dct_video verification is not yet implemented for raw-byte payloads. \
-                 Use 'lsb_video' or 'spread_spectrum_video' instead, or use the \
-                 GStreamer pipeline which supports DCT via the core library."
-            );
+            let mut owned = data.to_vec();
+            let frame = VideoFrame {
+                width,
+                height,
+                stride: width
+                    .checked_mul(3)
+                    .ok_or_else(|| anyhow::anyhow!("Image stride overflow"))?,
+                format: VideoFormat::Rgb8,
+                data: &mut owned,
+                frame_index: 0,
+            };
+            let dct = DctVideo::default();
+            Ok(dct.extract(&frame)?.map(|payload| ExtractedPayload {
+                bytes: payload.to_bytes().to_vec(),
+                lsb_bits: None,
+            }))
         }
         _ => Ok(None),
     }
+}
+
+fn parse_key_32(value: &str, label: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = hex_decode(value)?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "{} must be exactly 32 bytes (64 hex chars), got {} bytes",
+            label,
+            bytes.len()
+        );
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn candidate_has_valid_signature(raw_data: &[u8], opts: &VerifyOptions) -> bool {
+    let payload_data = match apply_ecc_transform(raw_data, opts) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    if has_signature_payload(&payload_data) {
+        return true;
+    }
+    if !opts.decrypt {
+        return false;
+    }
+    let key = match resolve_decryption_key(opts) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    encryption::decrypt(&key, 0, &payload_data, None)
+        .map(|plaintext| has_signature_payload(&plaintext))
+        .unwrap_or(false)
+}
+
+fn has_signature_payload(data: &[u8]) -> bool {
+    data.len() >= SignaturePayload::SERIALIZED_SIZE
+        && SignaturePayload::has_valid_magic(&data[..SignaturePayload::SERIALIZED_SIZE])
+}
+
+fn apply_ecc_transform(raw_data: &[u8], opts: &VerifyOptions) -> anyhow::Result<Vec<u8>> {
+    if !opts.ecc {
+        return Ok(raw_data.to_vec());
+    }
+    if raw_data.len() <= opts.ecc_parity {
+        anyhow::bail!(
+            "ECC payload is too short: {} bytes with {} parity symbols",
+            raw_data.len(),
+            opts.ecc_parity
+        );
+    }
+    let data_len = raw_data.len() - opts.ecc_parity;
+    let decoded = error_correction::decode(raw_data, data_len, opts.ecc_parity)?;
+    log::info!("RS decoded: {} -> {} bytes", raw_data.len(), decoded.len());
+    Ok(decoded)
 }
 
 /// Extract raw bytes from video LSB (length-prefixed).
@@ -487,7 +795,13 @@ fn extract_raw_ss_video(data: &[u8], key: &[u8; 32]) -> anyhow::Result<Option<Ve
     Ok(Some(result))
 }
 
-fn extract_ss_bit(data: &[u8], start: usize, bit_pos: usize, frame_index: u64, key: &[u8; 32]) -> u8 {
+fn extract_ss_bit(
+    data: &[u8],
+    start: usize,
+    bit_pos: usize,
+    frame_index: u64,
+    key: &[u8; 32],
+) -> u8 {
     let spread = 64;
     let mut seed = [0u8; 32];
     let fb = frame_index.to_le_bytes();
@@ -522,44 +836,68 @@ fn verify_multi_frame(
     public_key_hex: Option<&str>,
     stego_type: &str,
     format: &str,
-    embedding_key_hex: Option<&str>,
     opts: &VerifyOptions,
     hash_algo: &HashAlgorithm,
+    cfg: &steganographer_core::config::Config,
 ) -> anyhow::Result<()> {
     let n = opts.spread as usize;
     log::info!("Multi-frame verify: reading {} shards", n);
 
-    let mut shards: Vec<Vec<u8>> = Vec::new();
-    for i in 0..n {
-        let shard_path = format!("{}_{:03}", input, i + 1);
-        let shard_data = std::fs::read(&shard_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read shard {}: {}", i + 1, e))?;
-        let extracted = extract_raw_lsb_video(&shard_data, 1)?;
-        if let Some(s) = extracted {
-            shards.push(s);
+    for &bits in opts.bits.candidates() {
+        let mut shards: Vec<Vec<u8>> = Vec::new();
+        for i in 0..n {
+            let shard_path = format!("{}_{:03}", input, i + 1);
+            let shard_data = std::fs::read(&shard_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read shard {}: {}", i + 1, e))?;
+            match extract_raw_lsb_video(&shard_data, bits)? {
+                Some(shard) => shards.push(shard),
+                None => {
+                    shards.clear();
+                    break;
+                }
+            }
+        }
+        if shards.len() != n {
+            continue;
+        }
+
+        let mut payload_bytes = vec![0u8; shards[0].len()];
+        for shard in &shards {
+            for j in 0..payload_bytes.len().min(shard.len()) {
+                payload_bytes[j] ^= shard[j];
+            }
+        }
+
+        let payload_data = apply_ecc_transform(&payload_bytes, opts)?;
+        let (payload_data, was_encrypted) = if opts.decrypt {
+            let key = resolve_decryption_key(opts)?;
+            (encryption::decrypt(&key, 0, &payload_data, None)?, true)
         } else {
-            anyhow::bail!("Failed to extract shard {}", i + 1);
-        }
-    }
+            (payload_data, false)
+        };
 
-    // XOR all shards to reconstruct
-    let mut payload_bytes = vec![0u8; shards[0].len()];
-    for shard in &shards {
-        for j in 0..payload_bytes.len().min(shard.len()) {
-            payload_bytes[j] ^= shard[j];
-        }
-    }
-
-    // Try to parse as SignaturePayload
-    if payload_bytes.len() >= SignaturePayload::SERIALIZED_SIZE {
-        let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
-        let len = arr.len();
-        arr.copy_from_slice(&payload_bytes[..len]);
-        if SignaturePayload::has_valid_magic(&arr) {
-            let payload = SignaturePayload::from_bytes(&arr)?;
-            return finish_verification(
-                payload, data, public_key_hex, stego_type, format, opts.decrypt, opts.ecc, hash_algo,
-            );
+        if payload_data.len() >= SignaturePayload::SERIALIZED_SIZE {
+            let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
+            let len = arr.len();
+            arr.copy_from_slice(&payload_data[..len]);
+            if SignaturePayload::has_valid_magic(&arr) {
+                let payload = SignaturePayload::from_bytes(&arr)?;
+                return finish_verification(
+                    payload,
+                    data,
+                    width,
+                    height,
+                    public_key_hex,
+                    stego_type,
+                    format,
+                    was_encrypted,
+                    opts.ecc,
+                    Some(bits),
+                    payload_bytes.len(),
+                    hash_algo,
+                    cfg,
+                );
+            }
         }
     }
 
@@ -571,6 +909,7 @@ fn verify_multi_frame(
         signature_preview: None,
         status: "no_signature".to_string(),
         message: "Reconstructed payload is not a valid signature".to_string(),
+        lsb_bits: None,
         encrypted: None,
         ecc_corrected: None,
         hash_algorithm: Some(hash_algo.name().to_string()),
@@ -581,6 +920,45 @@ fn verify_multi_frame(
 
 // ─── Key resolution ─────────────────────────────────────────────────
 
+fn resolve_embedding_key(
+    inline_key: Option<&str>,
+    opts: &VerifyOptions,
+    cfg: &steganographer_core::config::Config,
+    stego_type: &str,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    if let Some(path) = opts.embedding_key_file.as_deref() {
+        let value = std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!("Cannot read embedding key file '{}': {}", path, error)
+        })?;
+        return parse_key_32(value.trim(), "Embedding key").map(Some);
+    }
+    if let Some(value) = inline_key {
+        return parse_key_32(value, "Embedding key").map(Some);
+    }
+
+    let carrier_config = match stego_type {
+        "lsb_audio" => cfg
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.stego.lsb_signature.as_ref()),
+        "spread_spectrum_video" => cfg
+            .video
+            .as_ref()
+            .and_then(|video| video.stego.lsb_signature.as_ref()),
+        _ => None,
+    };
+    if let Some(path) = carrier_config.and_then(|config| config.key_file.as_deref()) {
+        return steganographer_core::config::resolve_key(None, Some(path)).map(Some);
+    }
+    if let Some(path) = cfg.global.key_file.as_deref() {
+        return steganographer_core::config::resolve_key(None, Some(path)).map(Some);
+    }
+    if let Some(value) = carrier_config.and_then(|config| config.key.as_deref()) {
+        return parse_key_32(value, "Embedding key").map(Some);
+    }
+    Ok(None)
+}
+
 fn resolve_decryption_key(opts: &VerifyOptions) -> anyhow::Result<encryption::EncryptionKey> {
     if let Some(ref path) = opts.decryption_key_file {
         let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -588,7 +966,9 @@ fn resolve_decryption_key(opts: &VerifyOptions) -> anyhow::Result<encryption::En
     } else if let Some(ref hex_str) = opts.decryption_key {
         encryption::EncryptionKey::from_hex(hex_str)
     } else {
-        anyhow::bail!("Decryption enabled but no key provided (--decryption-key or --decryption-key-file)")
+        anyhow::bail!(
+            "Decryption enabled but no key provided (--decryption-key or --decryption-key-file)"
+        )
     }
 }
 
@@ -634,6 +1014,9 @@ fn print_plain(result: &VerifyResult) {
         if let Some(ref algo) = result.hash_algorithm {
             println!("  Hash algo:   {}", algo);
         }
+        if let Some(bits) = result.lsb_bits {
+            println!("  LSB bits:    {}", bits);
+        }
         if result.encrypted == Some(true) {
             println!("  Encrypted:   yes (ChaCha20-Poly1305)");
         }
@@ -658,55 +1041,6 @@ fn print_plain(result: &VerifyResult) {
         }
     } else {
         println!("{yellow}{}{reset}", result.message);
-    }
-}
-
-// ─── Format I/O ─────────────────────────────────────────────────────
-
-fn detect_format(path: &str, stego_type: &str) -> String {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image".to_string()
-    } else if lower.ends_with(".wav") {
-        "wav".to_string()
-    } else if stego_type.contains("audio") {
-        "raw_s16le".to_string()
-    } else {
-        "raw_rgb".to_string()
-    }
-}
-
-fn read_input(path: &str, format: &str, stego_type: &str) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    match &*format {
-        "image" | "png" | "jpg" | "jpeg" => {
-            let img =
-                image::open(path).map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?;
-            let rgb = img.to_rgb8();
-            let (w, h) = (rgb.width(), rgb.height());
-            Ok((rgb.into_raw(), w, h))
-        }
-        "wav" => {
-            let reader = hound::WavReader::open(path)?;
-            let spec = reader.spec();
-            let samples: Vec<i16> = if spec.sample_format == hound::SampleFormat::Int {
-                reader.into_samples::<i16>().filter_map(|s| s.ok()).collect()
-            } else {
-                anyhow::bail!("Only integer PCM WAV files are supported");
-            };
-            let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-            Ok((data, samples.len() as u32, 1))
-        }
-        _ => {
-            let data = std::fs::read(path)?;
-            let data_len = data.len();
-            if stego_type.contains("audio") {
-                Ok((data, data_len as u32 / 2, 1))
-            } else {
-                let pixel_count = data_len / 3;
-                let side = (pixel_count as f64).sqrt() as u32;
-                Ok((data, side, side))
-            }
-        }
     }
 }
 
@@ -741,8 +1075,7 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     (0..s.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))
         })
         .collect()
 }

@@ -1,147 +1,147 @@
 # Roadmap
 
+Steganographer is currently on the v0.6 line. Historical release contents are
+recorded in [`CHANGELOG.md`](../CHANGELOG.md); active maintenance items remain in
+[`TODO.md`](../TODO.md).
+
+The detailed implementation source of truth is the
+[Steganography Platform Expansion Plan](plans/steganography-platform/README.md).
+Its specifications define contracts, dependencies, work-package IDs, security
+limits, fixtures, and acceptance criteria.
+
+## Release sequence
+
 ```mermaid
-gantt
-    title Steganographer Release Timeline
-    dateFormat YYYY-MM-DD
-    axisFormat %b %Y
-    section Core
-        v0.1.0 LSB + Ed25519 + Dashboard :done, v01, 2026-03-06, 2026-06-30
-        v0.2.0 Advanced Stego + Crypto + Security Hardening :active, v02, 2026-07-01, 2026-12-31
-    section Advanced
-        v0.3.0 Key Lifecycle + Revocation :v03, 2027-01-01, 2027-06-30
-        v1.0.0 Production Ready :v10, 2027-07-01, 2027-12-31
+flowchart LR
+    V061["v0.6.1<br/>Correctness baseline"]
+    V070["v0.7.0<br/>Packet + placement alpha"]
+    V080["v0.8.0<br/>Safe formats + scan"]
+    V090["v0.9.0<br/>Documents + WASM beta"]
+    V100["v1.0.0<br/>Stable platform contracts"]
+    POST["Post-v1<br/>Advanced research"]
+
+    V061 --> V070 --> V080 --> V090 --> V100 --> POST
 ```
 
-## Current State (v0.1.0 — released 2026-03-06)
+Release numbers define dependency order, not calendar commitments.
 
-### ✅ Implemented
+## v0.6.1 — Correctness baseline
 
-- **LSB Video Steganography** — Sequential embedding with 1–4 bits, length prefix, round-trip extraction
-- **LSB Audio Steganography** — Keyed PRNG permutation, 1–4 bits, length prefix extraction
-- **Text Overlay** — Built-in 8×8 bitmap font, configurable position/color/scale
-- **Info Bar** — Exoteric QR code, Code-128 barcode, and metadata overlay
-- **BLAKE3 + Ed25519** — Per-frame hashing and signing with 109-byte payload
-- **GStreamer Integration** — AppSink/AppSrc video/audio pipelines
-- **CLI** — 11 subcommands (video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard)
-- **Configuration** — Full TOML config with modular pipeline chains
-- **Config-Driven Pipelines** — `[video.pipeline]` section for resolution, framerate, opacity, payload
-- **Web Dashboard** — Live round-trip steganography verification GUI (Axum + WebSocket)
-- **QR Data Matrix Overlay** — Client-side 13×13 binary grid encoding metadata per frame
-- **Live Config API** — Real-time opacity, LSB bits, overlay text, sign rate controls via `POST /api/config`
-- **MetaMask / Ethereum** — Browser-based `personal_sign` via EIP-1193
-- **Pluggable Signing Backends** — Ed25519 and Ethereum/secp256k1
-- **Documentation** — Architecture, crypto, algorithms, API, security, platform guides
-- **Timestamp Watermarks** — Dynamic `{timestamp}`, `{frame_index}`, `{date}`, `{time}` substitution in overlay text
-- **JSON Verify Output** — `--format json` for verify command for machine-readable output
-- **Audio Dashboard Tab** — Real-time audio steganography with microphone capture, waveform/spectrum visualization, LSB embed/extract, WAV recording
-- **Documentation Tab** — In-dashboard markdown viewer for all project docs with search and syntax highlighting
-- **Dynamic LSB Configuration** — Encode and decode handlers read `lsb_bits` from `LiveConfig` each frame, staying in sync when slider changes
-- **Signature Preview** — Decoded payload shows first 16 bytes of Ed25519/secp256k1 signature in both video and audio panels (NEW)
-- **Three-Tab Dashboard** — Video | Audio | Documentation tabs with unified styling and smooth transitions (NEW)
-- **Keyboard Shortcuts** — Space=camera, R=record, 1/2/3=tabs, +/-=LSB, E=export session (NEW)
-- **Session Export** — Download session report as JSON (frames, config, latencies, timestamps) (NEW)
-- **Copy-to-Clipboard** — 📋 buttons on hash and signature fields for easy copying (NEW)
-- **Help Tooltips** — Custom `?` icon tooltips with JavaScript positioning (escape overflow containers) (NEW)
-- **Full Signature in Decode** — Backend returns `signature_full` (complete hex) + `timestamp` + `lsb_bits` (NEW)
-- **Session Stats API** — `GET /api/session` endpoint returns cumulative session metrics (NEW)
-- **Auto-Start Camera** — `?autostart=1` URL param for zero-click camera start (NEW)
-- **Footer Verified Counter** — Live `✅ X / ❌ Y` ratio in dashboard footer (NEW)
-- **Toast Notifications** — Success/error toasts for config saves, copy-to-clipboard, session export (NEW)
-- **Dashboard Favicon** — Shield+eye icon favicon for browser tab identification (NEW)
-- **`--quiet` CLI Flag** — Suppress all log output for scripting (`--quiet`) (NEW)
-- **Colorized Verify Output** — ANSI green/red/yellow terminal colors with TTY auto-detection (NEW)
-- **`CHANGELOG.md`** — Structured changelog following Keep a Changelog format (NEW)
-- **Release Acceptance Criteria** — Documented in `TODO.md`: tests, docs, security, build gates (NEW)
-- **Version API** — `GET /api/version` endpoint returns crate name and version as JSON (NEW)
-- **Metrics Reset API** — `POST /api/metrics/reset` endpoint resets all dashboard counters (NEW)
-- **`info` Command** — `steganographer info` reports steganographic capacity of media files (NEW)
-- **`config check` Command** — Validates TOML configuration without running pipelines (NEW)
-- **Configurable Hash Algorithm** — BLAKE3 (default), SHA-256, or SHA-3 via `[global] hash_algorithm` (NEW)
-- **Key File References** — `key_file` field in TOML config to reference `.key`/`.pub` files instead of inline hex (NEW)
-- **DCT-Domain Embedding** — `dct_video` stego type for compression-resistant steganography (NEW)
-- **Spread-Spectrum Embedding** — `spread_spectrum_video` and `spread_spectrum_audio` for noise-resistant embedding via PN-sequence modulation (NEW)
-- **Payload Encryption** — ChaCha20-Poly1305 AEAD encryption of embedded payload via `PayloadConfig.encrypt` (NEW)
-- **Error Correction Codes** — Reed-Solomon codes over GF(2⁸) for partial corruption recovery (NEW)
-- **Multi-Frame Signatures** — Spread one signature across N frames via `PayloadConfig.multi_frame_spread` (NEW)
-- **`--format json` for Encode** — Machine-readable JSON output for the encode command (NEW)
-- **`--embedding-key` for Verify** — Extraction key for audio/spread-spectrum verification (NEW)
-- **272 Tests** — 171 core unit + 76 core integration + 23 dashboard + 1 GStreamer + 1 doc-test (1 ignored)
+Status: implemented on 2026-07-28; release packaging remains. No legacy wire
+protocol change.
 
----
+- [x] Make encode/extract bits and configuration symmetric.
+- [x] Complete DCT offline encode/verify.
+- [x] Preserve image/audio carrier properties.
+- [x] Block destructive spatial-LSB output.
+- [x] Calculate capacity from decoded carrier slots.
+- [x] Route CLI analysis through the canonical core analyzers.
+- [x] Resolve toolchain/lockfile and license-artifact hygiene.
 
-## Short-Term (v0.2.0)
+Exit gate: existing signed-frame behavior remains compatible and each corrected
+path has an end-to-end fixture.
 
-### 📋 Planned
+## v0.7.0 — Packet and placement alpha
 
-| Feature | Priority | Complexity | Description |
-| --- | --- | --- | --- |
-| **Container format support** | High | Medium | Read/write MP4, MKV, WAV files (not just raw) via GStreamer decodebin/encodebin |
-| **Batch processing** | High | Low | Encode/verify entire directories of files |
-| **YUV420 overlay** | Medium | Medium | Support text overlay in YUV color space |
+Status: in progress. The public locator, canonical bounded envelope, generic
+packet codec, legacy adapter, shared spatial-LSB carrier contract, and opt-in
+PNG/raw encode/decode vertical slice are implemented.
 
----
+- [x] Add bounded generic packet and canonical envelope.
+- [x] Preserve v2 `SignaturePayload` through a legacy codec/adapter.
+- [x] Add the public locator and sequential spatial-LSB discovery.
+- [x] Add shared carrier descriptors and checked capacity for the first kernel.
+- [x] Prove the opt-in generic PNG/raw vertical slice at one through four bits.
+- [ ] Freeze immutable packet and placement vectors after alpha review.
+- Add keyed locator/discovery without changing public discovery semantics.
+- Add interleaved, keyed, and adaptive placement schedules.
+- Expand carrier descriptors with component/channel policies.
+- Prove the generic WAV vertical slice.
+- Implement the transform, payload-signature, key-hierarchy, and nesting work.
 
-## Medium-Term (v0.3.0)
+Exit gate: generic payload support is opt-in, legacy remains the default, and
+the protocol/key review is complete for alpha use.
 
-### 🔬 Research & Development
+## v0.8.0 — Safe formats and scanning
 
-| Feature | Priority | Complexity | Description |
-| --- | --- | --- | --- |
-| **Container format I/O** | High | Medium | MP4/MKV/WAV support via GStreamer decodebin/encodebin |
-| **Native GStreamer plugin** | Medium | High | Full `BaseTransform` implementation for zero-copy processing |
-| **Certificate chain support** | Medium | Medium | X.509 or WebPKI for identity binding |
+- Stabilize safe PNG/WAV I/O and post-write extraction.
+- Introduce `steganographer-formats` and `steganographer-forensics` with their
+  first complete vertical slices.
+- Separate decode, verify, scan, and extract semantics.
+- Publish JSON/JSONL schema v1 and stable exit codes.
+- Register current chi-square, SPA, RS, and combined analysis.
+- Add media/container/text detectors, bounded recursion, and calibration corpus.
+- Migrate legacy configuration through explicit profiles.
 
----
+Exit gate: automation uses the stable machine contract; standard scan is bounded
+and evidence-oriented.
 
-## Long-Term (v1.0.0)
+## v0.9.0 — Documents and browser-local beta
 
-### 🚀 Production Features
+- Add OOXML package topology and WordprocessingML concealment analysis.
+- Recursively scan embedded media under aggregate limits.
+- Add the first bounded PDF structural scan if parser evaluation is complete.
+- Build packet, PNG/WAV, and supported scan capabilities to WASM.
+- Add browser-local dashboard workflows using Web Workers.
 
-| Feature | Priority | Complexity | Description |
-| --- | --- | --- | --- |
-| **WASM build** | Medium | High | Browser-based steganography via WebAssembly |
-| **Post-quantum signatures** | Medium | Medium | ML-DSA (FIPS 204) as Ed25519 alternative |
-| **Streaming authentication** | Medium | High | Merkle tree chains for authenticated video segments |
-| **Cloud API** | Low | High | REST/gRPC service for server-side watermarking |
-| **Hardware acceleration** | Low | High | GPU-accelerated hashing and embedding |
-| **Video Seal integration** | Low | High | Meta's neural-network robust watermarking |
+Exit gate: document and browser features share native schemas and fixtures, do
+not execute active content, and perform no implicit upload.
 
----
+## v1.0.0 — Stable platform contracts
 
-## Extension Points
+- Freeze packet major v1 and JSON v1.
+- Publish compatibility and deprecation policy.
+- Close protocol, parser/resource, supply-chain, and license reviews.
+- Enforce wire-vector, schema, and corpus immutability in CI.
+- Publish robustness, detectability, detector-calibration, and performance data.
+- Validate supported native, minimal-feature, and WASM build matrices.
+- Update all user/API/security/configuration/contributing documentation.
 
-### Adding New Stego Algorithms
+Exit gate: every stable claim is backed by fixtures and measurements, legacy v2
+remains supported, and hostile-input paths are bounded.
 
-Implement `VideoStegoModule` or `AudioStegoModule` trait. See [Contributing](contributing.md) for a step-by-step guide.
+## Post-v1 research
 
-### Adding New Media Formats
+These remain independent, experimental tracks:
 
-1. Add a new `VideoFormat` variant to the enum
-2. Update `overlay.rs` with the format's pixel layout
-3. Add GStreamer caps negotiation in `video_filter.rs`
+- JPEG F5/matrix encoding from permissively licensed sources or clean Rust.
+- PVD, chroma, palette, and document/text embedding under the lab profile.
+- Learned watermarking with reproducible model and dataset licensing.
+- Broader containers/codecs and hardware acceleration.
+- Optional MCP/agent adapter after a real consumer validates JSON v1.
+- Post-quantum and hybrid signatures once payload size and dependency maturity
+  meet the existing cryptographic roadmap constraints.
 
-### Adding New CLI Commands
+## Parallel maintenance backlog
 
-1. Create a new `cmd_*.rs` file
-2. Add a variant to the `Commands` enum in `main.rs`
-3. Wire the routing in `main()`
+The platform sequence does not replace maintenance and distribution work in
+[`TODO.md`](../TODO.md). Crates.io and `cargo install` support, Windows CI, a
+native GStreamer transform, WebRTC,
+Homebrew distribution, certificate chains, and related research can proceed
+when they do not destabilize an active protocol/format vertical slice.
 
-### Adding New Config Options
+Where work overlaps, shared platform contracts win—for example, container I/O
+should build on carrier descriptors rather than introduce another raw-byte path.
 
-1. Add fields to the appropriate config struct in `config.rs`
-2. Update the TOML deserialization
-3. Add `_or_default()` convenience method if appropriate
-4. Update `read_pipeline_config()` in `run.sh` if pipeline-related
-5. Add tests for the new config
-6. Document in `configuration.md`
+## Workstream specifications
 
----
+| Workstream | Plan |
+| --- | --- |
+| Program charter and dependency graph | [Overview](plans/steganography-platform/README.md) |
+| Packet, transforms, discovery, compatibility | [Protocol](plans/steganography-platform/01-protocol-and-compatibility.md) |
+| Carrier slots, placement, kernels, safe formats | [Carriers](plans/steganography-platform/02-carriers-placement-formats.md) |
+| Media/text/container/OOXML/PDF scanning | [Forensics](plans/steganography-platform/03-forensics-and-documents.md) |
+| CLI, JSON, dashboard, WASM, optional agents | [Product surfaces](plans/steganography-platform/04-product-surfaces.md) |
+| Corpus, tests, fuzzing, security, performance | [Validation](plans/steganography-platform/05-validation-security-corpus.md) |
+| Issue sizing, PR order, migration, release gates | [Delivery](plans/steganography-platform/06-delivery-and-migration.md) |
 
-## Further Reading
+## Extension rules
 
-- [Steganography Theory](steganography-theory.md) — Theoretical foundations for planned algorithms
-- [Algorithms](algorithms.md) — Current algorithm implementations
-- [Configuration](configuration.md) — TOML config including `[video.pipeline]`
-- [Contributing](contributing.md) — How to contribute new features
-- [Security](security.md) — Threat models, use cases, and deployment guidance
+- New algorithms implement shared packet/carrier/kernel contracts rather than
+  adding another CLI-specific byte path.
+- New formats provide decoded descriptors, preservation policy, compatibility
+  checks, and hostile-input tests.
+- New detectors register stable IDs, evidence locations, budgets, calibration,
+  and false-positive limitations.
+- New config fields require shared embed/extract/capacity semantics.
+- New dependencies pass advisory, licensing, platform, MSRV, and WASM review.

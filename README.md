@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-286_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-311_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 286 tests, 0 failures
+cargo test --workspace   # 311 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -77,7 +77,7 @@ A three-tab web GUI for real-time round-trip verification:
 | ----- | ------------- |
 | **Video** | Webcam → LSB encode → decode → verify (live). Controls for opacity, LSB bits, sign rate, QR scale, resolution |
 | **Audio** | Microphone → PCM capture → LSB embed → extract → verify. Waveform + spectrum visualization, WAV recording |
-| **Docs** | Browse all 17 project docs in-dashboard with search and navigation |
+| **Docs** | Browse all 18 project docs in-dashboard with search and navigation |
 
 <details>
 <summary>🔽 <strong>Dashboard screenshots</strong></summary>
@@ -119,7 +119,7 @@ Four Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│  steganographer-cli       (binary)           │  Clap CLI: 11 subcommands
+│  steganographer-cli       (binary)           │  Clap CLI: 12 subcommands
 ├──────────────────────────────────────────────┤
 │  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
@@ -130,10 +130,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 247 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 261 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 1 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 10 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 25 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -145,7 +145,7 @@ Four Rust crates with strict dependency layering:
 | ----------- | ----------- | --------- |
 | **Hashing** | BLAKE3 / SHA-256 / SHA-3 | Configurable; BLAKE3 default, 256-bit digest of `frame_index ∥ video_bytes ∥ audio_bytes` |
 | **Signing** | Ed25519 | 64-byte EUF-CMA secure signature over the hash |
-| **Payload** | 104 bytes | `frame_index (8) + hash (32) + signature (64)` |
+| **Legacy v2 payload** | 109 bytes | `magic (4) + version (1) + frame_index (8) + hash (32) + signature (64)` |
 | **Video embed** | Length-prefixed LSB | 1–4 bit replacement with 32-bit length header |
 | **Audio embed** | Keyed ChaCha8 PRNG | Pseudo-random sample permutation for scatter embedding |
 | **Encryption** | ChaCha20-Poly1305 | AEAD encryption for payload confidentiality before embedding |
@@ -173,6 +173,11 @@ steganographer info --input frame.rgb --stego-type lsb_video --bits 1
 
 # Verify
 steganographer verify --input signed.rgb --public-key <hex> --stego-type lsb_video --format json
+
+# Opt-in generic packet alpha: embed and decode arbitrary bytes
+steganographer encode --input cover.png --output packed.png \
+  --payload-file report.pdf --mime-type application/pdf --bits 2
+steganographer decode --input packed.png --output recovered.pdf --bits auto
 
 # Validate a TOML configuration file
 steganographer config check
@@ -218,20 +223,20 @@ bits = 2
 
 ## ✅ Tests
 
-286 tests across 4 crates — all passing:
+311 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 171 | `steganographer-core/src/*.rs` |
+| Core unit tests | 185 | `steganographer-core/src/*.rs` |
 | Core integration tests | 76 | `steganographer-core/tests/integration_tests.rs` |
-| CLI integration tests | 10 | `steganographer-cli/tests/cli_integration_tests.rs` |
+| CLI unit + integration tests | 25 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **282** | **0 failures** |
+| **Total** | **311** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 286 tests
-cargo test -p steganographer-core     # Core only (247 tests)
+cargo test --workspace                # All 311 tests
+cargo test -p steganographer-core     # Core only (261 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 
@@ -251,7 +256,8 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 
 ## 📚 Documentation
 
-18 comprehensive guides in [`docs/`](docs/):
+18 user-facing guides plus 7 composable platform-planning specifications in
+[`docs/`](docs/):
 
 | Guide | Description |
 | ------- | ------------- |
@@ -263,13 +269,14 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | [**Security**](docs/security.md) | Cachin's ε-security, deployment guidance |
 | [**Threat Model**](docs/threat-model.md) | Adversary model, attack catalog, mitigations |
 | [**Key Rotation**](docs/key-rotation.md) | Key rotation record, incident report, revocation procedure |
-| [**CLI Reference**](docs/cli-reference.md) | All 10 commands with examples |
+| [**CLI Reference**](docs/cli-reference.md) | All 12 commands with examples |
 | [**API Reference**](docs/api-reference.md) | HTTP + WebSocket endpoints, JSON schemas |
 | [**Configuration**](docs/configuration.md) | Full TOML schema, template variables |
 | [**GStreamer**](docs/gstreamer.md) | Pipeline integration, AppSink/AppSrc |
 | [**Platforms**](docs/platforms.md) | macOS, Linux, Docker setup |
 | [**Contributing**](docs/contributing.md) | Dev workflow, testing, PR checklist |
-| [**Roadmap**](docs/roadmap.md) | DCT-domain, ML-DSA, post-quantum plans |
+| [**Roadmap**](docs/roadmap.md) | Current release sequence and program gates |
+| [**Platform Expansion Plan**](docs/plans/steganography-platform/README.md) | Generic packet, formats, forensics, OOXML/PDF, WASM, quality, and migration workstreams |
 | [**FAQ**](docs/faq.md) | 30+ questions and answers |
 
 ---

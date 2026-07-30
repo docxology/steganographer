@@ -4,6 +4,8 @@
 //!
 //! This crate provides:
 //! - **Config** — TOML-based configuration model for pipelines
+//! - **Packet** — Bounded generic packet framing plus the legacy signature codec
+//! - **Carrier** — Shared capacity/embed/extract contracts and spatial LSB
 //! - **Crypto** — BLAKE3/SHA-256/SHA-3 hashing + Ed25519 signing/verification of frame payloads
 //! - **Encryption** — ChaCha20-Poly1305 AEAD encryption for payload confidentiality
 //! - **SignerBackend** — Pluggable signing backends (Ed25519, Ethereum/secp256k1)
@@ -23,6 +25,7 @@
 
 pub mod adaptive;
 pub mod audio;
+pub mod carrier;
 pub mod config;
 pub mod crypto;
 pub mod dct_video;
@@ -36,13 +39,21 @@ pub mod lsb_video;
 pub mod mdct_audio;
 pub mod metrics;
 pub mod multi_frame;
+pub mod ots_client;
+pub mod ots_config;
+pub mod ots_handler;
 pub mod overlay;
+pub mod packet;
 pub mod signer_backend;
 pub mod spread_spectrum;
 pub mod steganalysis;
 pub mod video;
 
 pub use audio::{AudioBuffer, AudioStegoModule};
+pub use carrier::{
+    CapacityReport, CarrierDescriptor, CarrierEmbedder, CarrierError, CarrierExtractor,
+    CarrierKind, EmbedReport, EmbeddingConfig, ExtractReport, SpatialLsb,
+};
 pub use config::{AudioStegoConfig, Config, VideoStegoConfig};
 pub use crypto::{HashAlgorithm, SignaturePayload, Signer, Verifier};
 pub use encryption::EncryptionKey;
@@ -50,6 +61,12 @@ pub use kdf::{
     derive_all, derive_embedding_key, derive_encryption_key, derive_signing_key, DerivedKeys,
 };
 pub use metrics::StegoMetrics;
+pub use ots_client::{OTSClient, OTSError, OTSMethod, OTSVResult};
+pub use ots_config::{OtsConfig, OtsSettings};
+pub use packet::{
+    AlgorithmDescriptor, DecodeLimits, ExtensionField, GenericPacket, GenericPacketCodec, Locator,
+    OtsMetadata, PacketCodec, PacketEnvelope, PacketError, PayloadKind, SignaturePayloadCodec,
+};
 pub use signer_backend::{Ed25519Backend, Ed25519Verifier, SignerBackend};
 pub use spread_spectrum::{SpreadSpectrumAudio, SpreadSpectrumVideo};
 pub use steganalysis::{

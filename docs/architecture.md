@@ -11,7 +11,7 @@ block-beta
     GST["steganographer-gst\nGStreamer · AppSink"]:1
     DASH["steganographer-dashboard\nAxum GUI · WebSocket"]:1
     space:1
-    CORE["steganographer-core\nConfig · Crypto · LSB · Overlay · Metrics"]:3
+    CORE["steganographer-core\nPackets · Carriers · Crypto · Stego Algorithms"]:3
     style CLI fill:#5c1a1a,stroke:#a33c3c,color:#fff
     style GST fill:#1a3a5c,stroke:#2d6da3,color:#fff
     style DASH fill:#3d1a3d,stroke:#7a3c7a,color:#fff
@@ -29,7 +29,7 @@ block-beta
 
 ### 2. Trait-Based Extensibility
 
-All steganography algorithms implement one of two traits:
+Legacy signed-frame algorithms implement one of two media traits:
 
 ```rust
 pub trait VideoStegoModule: Send {
@@ -44,6 +44,22 @@ pub trait AudioStegoModule: Send {
 ```
 
 New algorithms (DCT, spread-spectrum, wavelet, etc.) simply implement the trait and plug into the pipeline.
+
+The opt-in generic path separates packet framing from carrier placement:
+
+```rust
+pub trait PacketCodec {
+    type Value;
+    fn encode(&self, value: &Self::Value, output: &mut Vec<u8>) -> Result<(), PacketError>;
+    fn decode(&self, input: &[u8], limits: &DecodeLimits) -> Result<Self::Value, PacketError>;
+}
+
+pub trait CarrierEmbedder { /* checked capacity + byte packet embedding */ }
+pub trait CarrierExtractor { /* locator-first bounded packet extraction */ }
+```
+
+This keeps protocol serialization independent of media I/O and lets legacy
+`SignaturePayload` coexist with the `GenericPacket` alpha.
 
 ### 3. Configurable Pipeline Chains
 
@@ -92,6 +108,8 @@ graph TD
 | `signer_backend.rs` | Pluggable signing backends (Ed25519, Ethereum/secp256k1) | ~440 | 14 |
 | `video.rs` | `VideoFrame`, `VideoFormat`, `VideoStegoModule` trait | ~55 | — |
 | `audio.rs` | `AudioBuffer`, `AudioStegoModule` trait | ~42 | — |
+| `packet.rs` | Bounded generic locator, canonical envelope, packet and legacy codecs | ~1180 | 9 |
+| `carrier.rs` | Shared carrier contracts and sequential spatial-LSB kernel | ~360 | 4 |
 | `lsb_video.rs` | Sequential LSB video embedding/extraction | ~290 | 5 |
 | `lsb_audio.rs` | Keyed PRNG LSB audio embedding/extraction | ~340 | 7 |
 | `overlay.rs` | Text overlay with built-in bitmap font | ~340 | 9 |
@@ -124,11 +142,14 @@ graph TD
 
 | Module | Purpose | Lines |
 | --- | --- | --- |
-| `main.rs` | Clap CLI entry point, 11 subcommands (incl. dashboard, analyze, derive, info, config) | ~440 |
+| `main.rs` | Clap CLI entry point, 12 subcommands including generic packet `decode` | — |
 | `cmd_video.rs` | Live video pipeline command | ~130 |
 | `cmd_audio.rs` | Live audio pipeline command | ~90 |
-| `cmd_encode.rs` | Offline encoding + key generation | ~135 |
-| `cmd_verify.rs` | Signature verification | ~130 |
+| `cmd_encode.rs` | Correctness-preserving legacy offline encode, capacity, info, and analysis | ~1330 |
+| `cmd_packet.rs` | Opt-in generic packet encode/decode vertical slice | ~300 |
+| `cmd_verify.rs` | Legacy signature extraction and verification | ~1010 |
+| `media_io.rs` | Decoded image/WAV/raw carrier I/O and output compatibility policy | ~330 |
+| `carrier_binding.rs` | Kernel-canonical carrier bytes used by signing and verification | ~130 |
 
 ---
 

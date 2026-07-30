@@ -5,7 +5,8 @@
 ### main.rs
 
 - `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, and `--quiet` global flags
-- `Commands` — `Video`, `Audio`, `Encode`, `Verify`, `Keygen`, `Info`, `Analyze`, `Derive`, `Config`, `Dashboard` variants
+- `Commands` — `Video`, `Audio`, `Encode`, `Decode`, `Verify`, `Keygen`,
+  `Info`, `Analyze`, `Derive`, `Dashboard`, `Revoke`, and `Config`
 - `main()` — initializes `env_logger`, dispatches to `cmd_*::run()`
 
 ### cmd_video.rs
@@ -21,14 +22,34 @@
 
 ### cmd_encode.rs
 
-- `run(config_path, input, output, stego_type, bits)` — reads raw file, generates `Signer`, embeds signature
+- `run(...)` — descriptor-preserving legacy offline signing and embedding
 - `keygen(output)` — generates Ed25519 keypair, writes `.key` and `.pub` files
-- Supports: `lsb_video` (raw RGB), `lsb_audio` (raw S16LE PCM)
+- Supports spatial LSB, keyed audio LSB, spread-spectrum, and DCT paths with
+  symmetric config, key, encryption, ECC, capacity, and format validation
+
+### cmd_packet.rs
+
+- Opt-in generic text/file payload encoding and payload decoding
+- Current alpha carrier slice: PNG or raw RGB, sequential spatial LSB, 1–4 bits
+- Validates packet digest, capacity, output aliasing, and overwrite policy
 
 ### cmd_verify.rs
 
-- `run(config_path, input, public_key, stego_type, format)` — reads raw file, extracts signature payload
+- `run(...)` — mirrors legacy encode configuration, extracts, and verifies
 - `VerifyResult` struct with `#[derive(Serialize)]` for structured JSON output
 - `--format plain|json` — plain text (default) or JSON for machine-readable output / CI pipelines
 - Prints: frame index, hash (hex), signature preview, verification status
-- `verify_video()` / `verify_audio()` — type-specific extraction helpers
+- Supports auto-detecting 1–4 LSB strengths and key resolution from direct,
+  file, or TOML sources
+
+### media_io.rs
+
+- Decodes PNG/images and WAV before capacity or embedding
+- Preserves image dimensions and WAV sample specification
+- Rejects lossy/destructive output combinations; accepts explicit raw RGB
+  dimensions
+
+### carrier_binding.rs
+
+- Produces the kernel-canonical carrier representation for signing and
+  verification so mutable embedding slots cannot invalidate their own signature

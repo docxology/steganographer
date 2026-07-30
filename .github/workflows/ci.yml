@@ -5,11 +5,30 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Check locked workspace
+        run: cargo check --workspace --locked
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -47,19 +66,19 @@ jobs:
         run: brew install gstreamer
 
       - name: Build workspace
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build core without GStreamer
-        run: cargo build -p steganographer-core
+        run: cargo build -p steganographer-core --locked
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test-count:
     name: Update Test Count Badge
@@ -159,6 +178,7 @@ jobs:
       - name: Run fuzz targets (60s each)
         run: |
           cd steganographer-core
-          cargo +nightly fuzz run fuzz_lsb_video_extract -- -max_total_time=60 -max_len=4096 || true
-          cargo +nightly fuzz run fuzz_payload_from_bytes -- -max_total_time=60 || true
-          cargo +nightly fuzz run fuzz_rs_decode -- -max_total_time=60 || true
+          cargo +nightly fuzz run fuzz_lsb_video_extract -- -max_total_time=60 -max_len=4096
+          cargo +nightly fuzz run fuzz_payload_from_bytes -- -max_total_time=60 -max_len=4096
+          cargo +nightly fuzz run fuzz_rs_decode -- -max_total_time=60 -max_len=4096
+          cargo +nightly fuzz run fuzz_packet_decode -- -max_total_time=60 -max_len=8192

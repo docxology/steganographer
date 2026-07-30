@@ -10,22 +10,31 @@ use serde::Serialize;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Signer};
 use steganographer_core::encryption::{self, EncryptionKey};
 use steganographer_core::error_correction;
-use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
 use steganographer_core::lsb_video::LsbVideo;
+use steganographer_core::steganalysis;
+use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+
+use crate::carrier_binding;
+use crate::media_io;
 
 // ─── Options & Results ──────────────────────────────────────────────
 
 /// Options controlling the encode process.
+#[derive(Clone)]
 pub struct EncodeOptions {
     pub encrypt: bool,
     pub encryption_key: Option<String>,
     pub encryption_key_file: Option<String>,
+    pub embedding_key: Option<String>,
+    pub embedding_key_file: Option<String>,
     pub ecc: bool,
     pub ecc_parity: usize,
     pub spread: u32,
     pub hash_algorithm: Option<String>,
     pub signing_key: Option<String>,
     pub input_format: Option<String>,
+    pub raw_width: Option<u32>,
+    pub raw_height: Option<u32>,
 }
 
 /// Machine-readable encode result (serializable to JSON).
@@ -46,7 +55,7 @@ pub struct EncodeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_correction: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_key_hex: Option<String>,
+    pub embedding_key_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spread: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,9 +79,32 @@ pub struct CapacityResult {
 pub struct AnalysisResult {
     pub file: String,
     pub analysis_type: String,
-    pub chi_squared: f64,
     pub detected: bool,
+    pub confidence: f64,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chi_squared: Option<DetectorResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_pairs: Option<DetectorResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rs_analysis: Option<DetectorResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetectorResult {
+    pub detected: bool,
+    pub confidence: f64,
+    pub message: String,
+}
+
+impl From<steganalysis::DetectionResult> for DetectorResult {
+    fn from(value: steganalysis::DetectionResult) -> Self {
+        Self {
+            detected: value.detected,
+            confidence: value.confidence,
+            message: value.message,
+        }
+    }
 }
 
 // ─── Keygen ─────────────────────────────────────────────────────────
@@ -161,7 +193,10 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
         println!("  {}: {} (0600) — {}", path, hex_str, desc);
     }
 
-    println!("\nKeys derived from master secret and written to {}", output_dir);
+    println!(
+        "\nKeys derived from master secret and written to {}",
+        output_dir
+    );
     Ok(())
 }
 
@@ -177,15 +212,9 @@ pub fn run(
     format: &str,
     opts: &EncodeOptions,
 ) -> anyhow::Result<()> {
-    log::info!("Encoding: {} -> {}", input, output);
-    log::info!("Stego type: {}, bits: {}", stego_type, bits);
-    log::info!(
-        "Encrypt: {}, ECC: {} (parity={}), Spread: {}",
-        opts.encrypt,
-        opts.ecc,
-        opts.ecc_parity,
-        opts.spread
-    );
+    if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
+        anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
+    }
 
     let cfg = steganographer_core::config::Config::from_file(config_path).unwrap_or_else(|e| {
         log::warn!("Could not load config ({}), using defaults", e);
@@ -197,8 +226,57 @@ pub fn run(
             },
             video: None,
             audio: None,
+            ots: None,
         }
     });
+
+    // CLI values take precedence, while values left at their neutral defaults
+    // inherit the offline payload configuration. This keeps file and live
+    // surfaces aligned without changing legacy defaults.
+    let configured_payload = cfg
+        .video
+        .as_ref()
+        .and_then(|video| video.pipeline.as_ref())
+        .and_then(|pipeline| pipeline.payload.as_ref());
+    let mut effective_opts = opts.clone();
+    if let Some(payload) = configured_payload {
+        effective_opts.encrypt |= payload.encrypt_enabled();
+        effective_opts.ecc |= payload
+            .error_correction
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("reed_solomon"));
+        if effective_opts.spread == 1 {
+            effective_opts.spread = payload.spread_count();
+        }
+        if effective_opts.encryption_key_file.is_none() && effective_opts.encryption_key.is_none() {
+            effective_opts.encryption_key_file = payload.encryption_key_file.clone();
+            effective_opts.encryption_key = payload.encryption_key.clone();
+        }
+    }
+    let opts = &effective_opts;
+
+    if stego_type == "dct_video" && (opts.encrypt || opts.ecc || opts.spread > 1) {
+        anyhow::bail!(
+            "dct_video currently supports the signed payload directly; \
+             --encrypt, --ecc, and --spread require the generic packet pipeline"
+        );
+    }
+    if opts.ecc && !(1..=16).contains(&opts.ecc_parity) {
+        anyhow::bail!(
+            "--ecc-parity must be in the range 1-16 when ECC is enabled, got {}",
+            opts.ecc_parity
+        );
+    }
+
+    log::info!("Encoding: {} -> {}", input, output);
+    log::info!("Stego type: {}, bits: {}", stego_type, bits);
+    log::info!(
+        "Encrypt: {}, ECC: {} (parity={}), Spread: {}",
+        opts.encrypt,
+        opts.ecc,
+        opts.ecc_parity,
+        opts.spread
+    );
 
     // Resolve hash algorithm
     let hash_algo = opts
@@ -259,14 +337,36 @@ pub fn run(
         .input_format
         .as_deref()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| detect_format(input, stego_type));
+        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
     log::info!("Input format: {}", input_format);
 
-    let (mut data, width, height) = read_input(input, &input_format, stego_type)?;
-    log::info!("Read {} bytes from {} ({}x{})", data.len(), input, width, height);
+    let mut media = media_io::read_input_with_dimensions(
+        input,
+        &input_format,
+        stego_type,
+        opts.raw_width,
+        opts.raw_height,
+    )?;
+    let (width, height) = (media.width, media.height);
+    log::info!(
+        "Read {} decoded bytes from {} ({}x{})",
+        media.data.len(),
+        input,
+        width,
+        height
+    );
 
-    // Prepare the data to sign (the original raw pixel/sample data)
-    let sign_data = data.clone();
+    let transformed_payload_len = SignaturePayload::SERIALIZED_SIZE
+        + if opts.encrypt { 4 + 16 } else { 0 }
+        + if opts.ecc { opts.ecc_parity } else { 0 };
+    let sign_data = carrier_binding::canonicalize(
+        &media.data,
+        stego_type,
+        bits,
+        width,
+        height,
+        transformed_payload_len,
+    )?;
 
     // Sign the frame
     let payload = signer.sign_frame(0, &sign_data, None);
@@ -300,26 +400,55 @@ pub fn run(
         embed_data
     };
 
+    let embedding_key = if matches!(stego_type, "lsb_audio" | "spread_spectrum_video") {
+        Some(
+            resolve_embedding_key(opts, &cfg, stego_type)?.unwrap_or_else(|| {
+                let key = generate_random_key();
+                log::info!("Generated random embedding key");
+                key
+            }),
+        )
+    } else {
+        None
+    };
+
     // Apply multi-frame spreading if enabled
     if opts.spread > 1 {
         return encode_multi_frame(
-            output, &data, width, height, &embed_data, stego_type, bits, format, opts, &pub_hex,
-            &payload, enc_key_hex,
+            output,
+            &media.data,
+            &embed_data,
+            stego_type,
+            bits,
+            format,
+            opts,
+            &pub_hex,
+            &payload,
+            enc_key_hex,
         );
     }
 
     // Embed the (possibly encrypted + ECC'd) data into the media
-    let stego_result = embed_payload(&mut data, width, height, &embed_data, stego_type, bits, opts)?;
+    let stego_result = embed_payload(
+        &mut media.data,
+        width,
+        height,
+        &embed_data,
+        stego_type,
+        bits,
+        embedding_key.as_ref(),
+    )?;
 
     // Write output (with format)
-    write_output(output, &data, &input_format, width, height)?;
-    log::info!("Wrote {} bytes to {}", data.len(), output);
+    media_io::write_output(output, &media, stego_type)?;
+    let bytes_written = std::fs::metadata(output)?.len() as usize;
+    log::info!("Wrote {} encoded bytes to {}", bytes_written, output);
 
     let result = EncodeResult {
         stego_type: stego_type.to_string(),
         input: input.to_string(),
         output: output.to_string(),
-        bytes_written: data.len(),
+        bytes_written,
         public_key: pub_hex.clone(),
         hash: hex_encode(&payload.hash),
         signature_preview: hex_encode(&payload.signature.to_bytes()[..16]),
@@ -327,8 +456,12 @@ pub fn run(
         encrypted: Some(opts.encrypt),
         encryption_key_hex: enc_key_hex,
         error_correction: Some(opts.ecc),
-        audio_key_hex: stego_result.audio_key_hex,
-        spread: if opts.spread > 1 { Some(opts.spread) } else { None },
+        embedding_key_hex: stego_result.embedding_key_hex,
+        spread: if opts.spread > 1 {
+            Some(opts.spread)
+        } else {
+            None
+        },
         hash_algorithm: Some(hash_algo.name().to_string()),
     };
 
@@ -339,7 +472,7 @@ pub fn run(
             if let Some(ref ek) = result.encryption_key_hex {
                 println!("Encryption key: {}", ek);
             }
-            if let Some(ref ak) = result.audio_key_hex {
+            if let Some(ref ak) = result.embedding_key_hex {
                 println!("Embedding key (for extraction): {}", ak);
             }
             if let Some(ha) = &result.hash_algorithm {
@@ -357,13 +490,91 @@ pub fn run(
             println!("Encoded file written to: {}", output);
         }
     }
+
+    // ─── Optional OpenTimestamps post-embed stamping ──────────────────
+    // If OTS is enabled in the config, stamp the BLAKE3 hash of the signed
+    // carrier data (the same data that was signed above). This is a
+    // best-effort, non-blocking operation: if the OTS server is unreachable,
+    // the encode still succeeds — the proof is simply absent.
+    if cfg.ots_enabled() {
+        let ots_cfg = cfg.ots_config();
+        log::info!(
+            "OTS stamping enabled (method={}, interval={}s)",
+            ots_cfg.method,
+            ots_cfg.interval_secs
+        );
+        let client = steganographer_core::OTSClient::from_config(&ots_cfg);
+        if client.can_stamp() {
+            let rt = tokio::runtime::Runtime::new()?;
+            match rt.block_on(client.stamp_data(&sign_data)) {
+                Ok(proof) => {
+                    let digest = steganographer_core::OTSClient::compute_sha256_digest(&sign_data);
+                    let digest_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                    match client.save_proof(&proof, &digest_hex) {
+                        Ok(path) => {
+                            log::info!("OTS proof saved to {}", path.display());
+                            if format != "json" {
+                                println!("OTS proof: {} ({} bytes)", path.display(), proof.len());
+                            }
+                        }
+                        Err(e) => log::warn!("OTS proof save failed: {}", e),
+                    }
+                }
+                Err(e) => {
+                    log::warn!("OTS stamping failed (continuing without proof): {}", e);
+                    if format != "json" {
+                        println!("OTS: stamping failed ({}). Encoded file is valid without timestamp proof.", e);
+                    }
+                }
+            }
+        } else {
+            log::debug!("OTS: rate-limited (interval not elapsed), skipping stamp");
+        }
+    }
+
     Ok(())
 }
 
 // ─── Embedding ──────────────────────────────────────────────────────
 
+fn resolve_embedding_key(
+    opts: &EncodeOptions,
+    cfg: &steganographer_core::config::Config,
+    stego_type: &str,
+) -> anyhow::Result<Option<[u8; 32]>> {
+    if let Some(path) = opts.embedding_key_file.as_deref() {
+        return steganographer_core::config::resolve_key(None, Some(path)).map(Some);
+    }
+    if let Some(key) = opts.embedding_key.as_deref() {
+        return steganographer_core::config::resolve_key(Some(key), None).map(Some);
+    }
+
+    let carrier_config = match stego_type {
+        "lsb_audio" => cfg
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.stego.lsb_signature.as_ref()),
+        "spread_spectrum_video" => cfg
+            .video
+            .as_ref()
+            .and_then(|video| video.stego.lsb_signature.as_ref()),
+        _ => None,
+    };
+
+    if let Some(path) = carrier_config.and_then(|config| config.key_file.as_deref()) {
+        return steganographer_core::config::resolve_key(None, Some(path)).map(Some);
+    }
+    if let Some(path) = cfg.global.key_file.as_deref() {
+        return steganographer_core::config::resolve_key(None, Some(path)).map(Some);
+    }
+    if let Some(key) = carrier_config.and_then(|config| config.key.as_deref()) {
+        return steganographer_core::config::resolve_key(Some(key), None).map(Some);
+    }
+    Ok(None)
+}
+
 struct StegoResult {
-    audio_key_hex: Option<String>,
+    embedding_key_hex: Option<String>,
 }
 
 /// Embed raw payload bytes into media data using the specified stego type.
@@ -374,16 +585,19 @@ fn embed_payload(
     payload_bytes: &[u8],
     stego_type: &str,
     bits: u8,
-    opts: &EncodeOptions,
+    embedding_key: Option<&[u8; 32]>,
 ) -> anyhow::Result<StegoResult> {
     match stego_type {
         "lsb_video" => {
             embed_raw_lsb_video(data, payload_bytes, bits)?;
-            Ok(StegoResult { audio_key_hex: None })
+            Ok(StegoResult {
+                embedding_key_hex: None,
+            })
         }
         "lsb_audio" => {
-            let audio_key = generate_random_key();
-            let key_hex = hex_encode(&audio_key);
+            let audio_key = embedding_key
+                .ok_or_else(|| anyhow::anyhow!("Missing resolved audio embedding key"))?;
+            let key_hex = hex_encode(audio_key);
             let mut samples: Vec<i16> = data
                 .chunks_exact(2)
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
@@ -397,11 +611,12 @@ fn embed_payload(
                 }
             }
             Ok(StegoResult {
-                audio_key_hex: Some(key_hex),
+                embedding_key_hex: Some(key_hex),
             })
         }
         "spread_spectrum_video" => {
-            let ss_key = generate_random_key();
+            let ss_key = *embedding_key
+                .ok_or_else(|| anyhow::anyhow!("Missing resolved spread-spectrum embedding key"))?;
             let key_hex = hex_encode(&ss_key);
             let ss = steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key(ss_key);
             let mut frame = VideoFrame {
@@ -414,20 +629,34 @@ fn embed_payload(
             };
             embed_raw_spread_spectrum_video(&mut frame, payload_bytes, &ss)?;
             Ok(StegoResult {
-                audio_key_hex: Some(key_hex),
+                embedding_key_hex: Some(key_hex),
             })
         }
         "dct_video" => {
-            // DCT embedding for raw-byte payloads is not yet implemented.
-            // The core library's DctVideo works with SignaturePayload (structured),
-            // but the CLI raw-byte path uses a length-prefixed format that
-            // doesn't map cleanly to the block-based DCT embedding.
-            // Previously this silently fell back to LSB, which was misleading.
-            anyhow::bail!(
-                "dct_video CLI stego type is not yet implemented for raw-byte payloads. \
-                 Use 'lsb_video' or 'spread_spectrum_video' instead, or use the \
-                 GStreamer pipeline which supports DCT via the core library."
-            );
+            let payload_array: [u8; SignaturePayload::SERIALIZED_SIZE] =
+                payload_bytes.try_into().map_err(|_| {
+                    anyhow::anyhow!(
+                        "dct_video requires a direct {}-byte SignaturePayload, got {} bytes",
+                        SignaturePayload::SERIALIZED_SIZE,
+                        payload_bytes.len()
+                    )
+                })?;
+            let payload = SignaturePayload::from_bytes(&payload_array)?;
+            let mut dct = steganographer_core::dct_video::DctVideo::default();
+            let mut frame = VideoFrame {
+                width,
+                height,
+                stride: width
+                    .checked_mul(3)
+                    .ok_or_else(|| anyhow::anyhow!("Image stride overflow"))?,
+                format: VideoFormat::Rgb8,
+                data,
+                frame_index: 0,
+            };
+            dct.embed(&mut frame, Some(&payload))?;
+            Ok(StegoResult {
+                embedding_key_hex: None,
+            })
         }
         _ => anyhow::bail!("Unsupported stego type: {}", stego_type),
     }
@@ -441,7 +670,11 @@ fn embed_raw_lsb_video(data: &mut [u8], payload: &[u8], bits: u8) -> anyhow::Res
         .iter()
         .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
         .collect();
-    let all_bits: Vec<u8> = len_bits.iter().chain(payload_bits.iter()).copied().collect();
+    let all_bits: Vec<u8> = len_bits
+        .iter()
+        .chain(payload_bits.iter())
+        .copied()
+        .collect();
 
     let capacity = data.len() * bits as usize;
     if all_bits.len() > capacity {
@@ -485,7 +718,11 @@ fn embed_raw_lsb_audio(
         .iter()
         .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
         .collect();
-    let all_bits: Vec<u8> = len_bits.iter().chain(payload_bits.iter()).copied().collect();
+    let all_bits: Vec<u8> = len_bits
+        .iter()
+        .chain(payload_bits.iter())
+        .copied()
+        .collect();
 
     // Generate permutation
     let mut seed = [0u8; 32];
@@ -596,59 +833,12 @@ fn embed_ss_bit(
     }
 }
 
-/// Embed raw bytes into DCT video.
-fn embed_raw_dct_video(
-    frame: &mut VideoFrame,
-    payload: &[u8],
-    _dct: &mut steganographer_core::dct_video::DctVideo,
-) -> anyhow::Result<()> {
-    let total_bits = 32 + payload.len() * 8;
-    let (blocks_x, blocks_y) = (frame.width as usize / 8, frame.height as usize / 8);
-    let total_blocks = blocks_x * blocks_y;
-    if total_blocks < total_bits {
-        anyhow::bail!(
-            "Not enough DCT blocks: need {}, have {}",
-            total_bits,
-            total_blocks
-        );
-    }
-
-    // Use the same DCT embedding logic but with raw bits
-    // Length prefix
-    let len = payload.len() as u32;
-    for bit_pos in 0..32 {
-        let bit = ((len >> (31 - bit_pos)) & 1) as u8;
-        embed_dct_bit(frame, bit_pos, bit, blocks_x);
-    }
-    for (byte_idx, byte) in payload.iter().enumerate() {
-        for bit_in_byte in 0..8 {
-            let bit = (byte >> bit_in_byte) & 1;
-            let payload_bit = 32 + byte_idx * 8 + bit_in_byte;
-            embed_dct_bit(frame, payload_bit, bit, blocks_x);
-        }
-    }
-    Ok(())
-}
-
-fn embed_dct_bit(frame: &mut VideoFrame, payload_bit: usize, bit: u8, blocks_x: usize) {
-    // Simplified direct DCT embedding for raw bytes.
-    // Falls back to LSB for raw byte case.
-    let block_y = payload_bit / blocks_x;
-    let block_x = payload_bit % blocks_x;
-    let pixel_offset = block_y * 8 * frame.stride as usize + block_x * 8 * 3;
-    if pixel_offset < frame.data.len() {
-        frame.data[pixel_offset] = (frame.data[pixel_offset] & 0xFE) | bit;
-    }
-}
-
 // ─── Multi-frame spreading ──────────────────────────────────────────
 
 /// Encode with multi-frame spreading.
 fn encode_multi_frame(
     output: &str,
     data: &[u8],
-    width: u32,
-    height: u32,
     embed_data: &[u8],
     stego_type: &str,
     bits: u8,
@@ -672,7 +862,7 @@ fn encode_multi_frame(
 
         let mut frame_data = data.to_vec();
         embed_raw_lsb_video(&mut frame_data, shard, bits)?;
-        write_output(&out_path, &frame_data, "raw_rgb", width, height)?;
+        std::fs::write(&out_path, &frame_data)?;
         log::info!("Shard {} written to {}", i + 1, out_path);
     }
 
@@ -688,7 +878,7 @@ fn encode_multi_frame(
         encrypted: Some(opts.encrypt),
         encryption_key_hex: enc_key_hex,
         error_correction: Some(opts.ecc),
-        audio_key_hex: None,
+        embedding_key_hex: None,
         spread: Some(opts.spread),
         hash_algorithm: opts.hash_algorithm.clone(),
     };
@@ -739,14 +929,31 @@ fn split_raw_shards(data: &[u8], n: u8) -> anyhow::Result<Vec<Vec<u8>>> {
 // ─── Info / Capacity ────────────────────────────────────────────────
 
 /// Report steganographic capacity of a file.
-pub fn info(input: &str, stego_type: &str, bits: u8, format: &str) -> anyhow::Result<()> {
-    let data = std::fs::read(input)?;
+pub fn info(
+    input: &str,
+    stego_type: &str,
+    bits: u8,
+    format: &str,
+    raw_width: Option<u32>,
+    raw_height: Option<u32>,
+) -> anyhow::Result<()> {
+    if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
+        anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
+    }
+    let input_format = media_io::detect_format(input, stego_type);
+    let media = media_io::read_input_with_dimensions(
+        input,
+        &input_format,
+        stego_type,
+        raw_width,
+        raw_height,
+    )?;
     let payload_size = steganographer_core::crypto::SignaturePayload::SERIALIZED_SIZE;
     let (total_capacity_bytes, max_payloads) = match stego_type {
-        "lsb_video" => {
-            let capacity_bits = data.len() * bits as usize;
+        "lsb_video" | "lsb_audio" => {
+            let capacity_bits = media.lsb_units(stego_type) * bits as usize;
             let total_bits = 32 + payload_size * 8;
-            let capacity_bytes = capacity_bits / 8;
+            let capacity_bytes = capacity_bits.saturating_sub(32) / 8;
             let max = if total_bits > 0 {
                 capacity_bits / total_bits
             } else {
@@ -754,35 +961,24 @@ pub fn info(input: &str, stego_type: &str, bits: u8, format: &str) -> anyhow::Re
             };
             (capacity_bytes, max)
         }
-        "lsb_audio" => {
-            let sample_count = data.len() / 2;
-            let capacity_bits = sample_count * bits as usize;
-            let payload_bits = payload_size * 8 + 32;
-            let capacity_bytes = capacity_bits / 8;
-            let max = if payload_bits > 0 {
-                capacity_bits / payload_bits
-            } else {
-                0
-            };
-            (capacity_bytes, max)
-        }
         "spread_spectrum_video" => {
             let spread = 64;
-            let capacity_bytes = data.len() / spread;
-            let max = capacity_bytes / payload_size;
+            let capacity_bits = media.data.len() / spread;
+            let capacity_bytes = capacity_bits.saturating_sub(32) / 8;
+            let max = capacity_bits / (32 + payload_size * 8);
             (capacity_bytes, max)
         }
         "dct_video" => {
-            let blocks = (data.len() / 3) / 64;
+            let blocks = media.dct_blocks();
             let max = blocks / (payload_size * 8);
-            (blocks, max)
+            (blocks / 8, max)
         }
         _ => anyhow::bail!("Unsupported stego type: {}", stego_type),
     };
 
     let result = CapacityResult {
         file: input.to_string(),
-        file_size: data.len(),
+        file_size: media.encoded_len,
         stego_type: stego_type.to_string(),
         bits,
         payload_size,
@@ -807,7 +1003,6 @@ pub fn info(input: &str, stego_type: &str, bits: u8, format: &str) -> anyhow::Re
 
 // ─── Analyze / Steganalysis ─────────────────────────────────────────
 
-/// Analyze a file for steganographic artifacts using chi-squared test.
 /// Revoke a signing key by adding its public key to a revoked-keys list.
 ///
 /// The revoked-keys file is a JSON array of hex-encoded public keys.
@@ -849,7 +1044,11 @@ pub fn revoke_key(public_key_hex: &str, output_path: &str) -> anyhow::Result<()>
     std::fs::write(output_path, json)?;
 
     println!("Key revoked: {}", public_key_hex);
-    println!("Revoked-keys list: {} ({} keys total)", output_path, revoked.len());
+    println!(
+        "Revoked-keys list: {} ({} keys total)",
+        output_path,
+        revoked.len()
+    );
     Ok(())
 }
 
@@ -862,146 +1061,94 @@ pub fn analyze(input: &str, analysis_type: &str, format: &str) -> anyhow::Result
         analysis_type
     );
 
-    let (chi_sq, detected, message) = match analysis_type {
+    let result = match analysis_type {
         "chi_squared" => {
-            // Chi-squared test on LSB pairs
-            let mut pair_counts = [0u64; 128];
-            for &byte in &data {
-                let v = (byte >> 1) as usize;
-                if v < 128 {
-                    pair_counts[v] += 1;
-                }
+            let detector = steganalysis::chi_squared_detect(&data);
+            AnalysisResult {
+                file: input.to_string(),
+                analysis_type: analysis_type.to_string(),
+                detected: detector.detected,
+                confidence: detector.confidence,
+                message: detector.message.clone(),
+                chi_squared: Some(detector.into()),
+                sample_pairs: None,
+                rs_analysis: None,
             }
-
-            let mut chi_sq = 0.0f64;
-            let total = data.len() as f64;
-            for i in 0..128 {
-                let expected = total / 128.0;
-                if expected > 0.0 {
-                    let diff = pair_counts[i] as f64 - expected;
-                    chi_sq += diff * diff / expected;
-                }
+        }
+        "sample_pairs" | "spa" => {
+            let detector = steganalysis::sample_pair_detect(&data);
+            AnalysisResult {
+                file: input.to_string(),
+                analysis_type: "sample_pairs".to_string(),
+                detected: detector.detected,
+                confidence: detector.confidence,
+                message: detector.message.clone(),
+                chi_squared: None,
+                sample_pairs: Some(detector.into()),
+                rs_analysis: None,
             }
-
-            let detected = chi_sq > 200.0;
-            let msg = if detected {
-                "LSB distribution is non-uniform — possible steganographic embedding detected"
-            } else {
-                "LSB distribution appears natural — no steganographic embedding detected"
-            };
-            (chi_sq, detected, msg)
+        }
+        "rs" | "rs_analysis" => {
+            let detector = steganalysis::rs_analyze(&data);
+            AnalysisResult {
+                file: input.to_string(),
+                analysis_type: "rs_analysis".to_string(),
+                detected: detector.detected,
+                confidence: detector.confidence,
+                message: detector.message.clone(),
+                chi_squared: None,
+                sample_pairs: None,
+                rs_analysis: Some(detector.into()),
+            }
+        }
+        "combined" => {
+            let combined = steganalysis::analyze_combined(&data);
+            AnalysisResult {
+                file: input.to_string(),
+                analysis_type: analysis_type.to_string(),
+                detected: combined.detected,
+                confidence: combined.confidence,
+                message: combined.message,
+                chi_squared: Some(combined.chi_squared.into()),
+                sample_pairs: Some(combined.sample_pairs.into()),
+                rs_analysis: Some(combined.rs_analysis.into()),
+            }
         }
         _ => {
-            anyhow::bail!("Unknown analysis type: {}", analysis_type);
+            anyhow::bail!(
+                "Unknown analysis type '{}'; expected combined, chi_squared, sample_pairs, or rs",
+                analysis_type
+            );
         }
     };
 
-    let result = AnalysisResult {
-        file: input.to_string(),
-        analysis_type: analysis_type.to_string(),
-        chi_squared: chi_sq,
-        detected,
-        message: message.to_string(),
-    };
-
-    match &*format {
+    match format {
         "json" => println!("{}", serde_json::to_string_pretty(&result)?),
         _ => {
             println!("File: {}", result.file);
             println!("Analysis: {}", result.analysis_type);
-            println!("Chi-squared: {:.2}", result.chi_squared);
-            println!(
-                "Detected: {}",
-                if result.detected { "yes" } else { "no" }
-            );
+            println!("Detected: {}", if result.detected { "yes" } else { "no" });
+            println!("Confidence: {:.1}%", result.confidence * 100.0);
             println!("{}", result.message);
-        }
-    }
-    Ok(())
-}
-
-// ─── Format I/O ─────────────────────────────────────────────────────
-
-fn detect_format(path: &str, stego_type: &str) -> String {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image".to_string()
-    } else if lower.ends_with(".wav") {
-        "wav".to_string()
-    } else if stego_type.contains("audio") {
-        "raw_s16le".to_string()
-    } else {
-        "raw_rgb".to_string()
-    }
-}
-
-fn read_input(path: &str, format: &str, stego_type: &str) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    match &*format {
-        "image" | "png" | "jpg" | "jpeg" => {
-            let img =
-                image::open(path).map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?;
-            let rgb = img.to_rgb8();
-            let (w, h) = (rgb.width(), rgb.height());
-            Ok((rgb.into_raw(), w, h))
-        }
-        "wav" => {
-            let reader = hound::WavReader::open(path)?;
-            let spec = reader.spec();
-            let samples: Vec<i16> = if spec.sample_format == hound::SampleFormat::Int {
-                reader.into_samples::<i16>().filter_map(|s| s.ok()).collect()
-            } else {
-                anyhow::bail!("Only integer PCM WAV files are supported");
-            };
-            let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-            Ok((data, samples.len() as u32, 1))
-        }
-        _ => {
-            let data = std::fs::read(path)?;
-            let data_len = data.len();
-            if stego_type.contains("audio") {
-                Ok((data, data_len as u32 / 2, 1))
-            } else {
-                let pixel_count = data_len / 3;
-                let side = (pixel_count as f64).sqrt() as u32;
-                Ok((data, side, side))
+            for (name, detector) in [
+                ("Chi-squared", result.chi_squared.as_ref()),
+                ("Sample pairs", result.sample_pairs.as_ref()),
+                ("RS analysis", result.rs_analysis.as_ref()),
+            ] {
+                if let Some(detector) = detector {
+                    println!(
+                        "  {}: {} ({:.1}%) — {}",
+                        name,
+                        if detector.detected {
+                            "detected"
+                        } else {
+                            "clear"
+                        },
+                        detector.confidence * 100.0,
+                        detector.message
+                    );
+                }
             }
-        }
-    }
-}
-
-fn write_output(
-    path: &str,
-    data: &[u8],
-    format: &str,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<()> {
-    match format {
-        "image" | "png" => {
-            let img = image::RgbImage::from_raw(width, height, data.to_vec())
-                .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
-            img.save(path)
-                .map_err(|e| anyhow::anyhow!("Failed to write image: {}", e))?;
-        }
-        "wav" => {
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: 44100,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            let mut writer = hound::WavWriter::create(path, spec)?;
-            let samples: Vec<i16> = data
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            for s in &samples {
-                writer.write_sample(*s)?;
-            }
-            writer.finalize()?;
-        }
-        _ => {
-            std::fs::write(path, data)?;
         }
     }
     Ok(())
@@ -1060,10 +1207,22 @@ pub fn batch_process(
         }
 
         let input_path = path.to_string_lossy().to_string();
-        let output_path = format!("{}/{}", output_dir, path.file_name().unwrap_or_default().to_string_lossy());
+        let output_path = format!(
+            "{}/{}",
+            output_dir,
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
 
         log::info!("Processing: {}", input_path);
-        match run(config_path, &input_path, &output_path, stego_type, bits, format, opts) {
+        match run(
+            config_path,
+            &input_path,
+            &output_path,
+            stego_type,
+            bits,
+            format,
+            opts,
+        ) {
             Ok(_) => {
                 success_count += 1;
                 log::info!("✓ {}", input_path);
@@ -1075,7 +1234,10 @@ pub fn batch_process(
         }
     }
 
-    println!("Batch complete: {} succeeded, {} failed", success_count, error_count);
+    println!(
+        "Batch complete: {} succeeded, {} failed",
+        success_count, error_count
+    );
     if error_count > 0 {
         std::process::exit(1);
     }
@@ -1086,8 +1248,9 @@ pub fn batch_process(
 ///
 /// Reads a raw RGB file containing multiple frames (each frame = width × height × 3 bytes),
 /// signs each frame, embeds a signature in each, and writes the output.
+#[allow(dead_code)]
 pub fn encode_multi_frame_file(
-    config_path: &str,
+    _config_path: &str,
     input: &str,
     output: &str,
     width: u32,
@@ -1097,17 +1260,31 @@ pub fn encode_multi_frame_file(
     format: &str,
     opts: &EncodeOptions,
 ) -> anyhow::Result<()> {
-    log::info!("Multi-frame encode: {} ({}x{}x{} frames) -> {}", input, width, height, frame_count, output);
+    log::info!(
+        "Multi-frame encode: {} ({}x{}x{} frames) -> {}",
+        input,
+        width,
+        height,
+        frame_count,
+        output
+    );
 
     let frame_size = (width * height * 3) as usize;
     let data = std::fs::read(input)?;
     let expected_size = frame_size * frame_count as usize;
     if data.len() < expected_size {
-        anyhow::bail!("Input file too small: expected {} bytes ({} frames × {} bytes), got {}",
-            expected_size, frame_count, frame_size, data.len());
+        anyhow::bail!(
+            "Input file too small: expected {} bytes ({} frames × {} bytes), got {}",
+            expected_size,
+            frame_count,
+            frame_size,
+            data.len()
+        );
     }
 
-    let hash_algo = opts.hash_algorithm.as_deref()
+    let hash_algo = opts
+        .hash_algorithm
+        .as_deref()
         .map(HashAlgorithm::parse)
         .unwrap_or(HashAlgorithm::Blake3);
 
@@ -1140,7 +1317,9 @@ pub fn encode_multi_frame_file(
 
         let mut lsb = LsbVideo::try_new(bits)?;
         let mut frame = VideoFrame {
-            width, height, stride: width * 3,
+            width,
+            height,
+            stride: width * 3,
             format: VideoFormat::Rgb8,
             data: &mut frame_data,
             frame_index: frame_idx,
@@ -1155,7 +1334,12 @@ pub fn encode_multi_frame_file(
     }
 
     std::fs::write(output, &output_data)?;
-    log::info!("Wrote {} bytes ({} frames) to {}", output_data.len(), frame_count, output);
+    log::info!(
+        "Wrote {} bytes ({} frames) to {}",
+        output_data.len(),
+        frame_count,
+        output
+    );
 
     match format {
         "json" => {
@@ -1171,7 +1355,7 @@ pub fn encode_multi_frame_file(
                 encrypted: None,
                 encryption_key_hex: None,
                 error_correction: None,
-                audio_key_hex: None,
+                embedding_key_hex: None,
                 spread: None,
                 hash_algorithm: Some(hash_algo.name().to_string()),
             };

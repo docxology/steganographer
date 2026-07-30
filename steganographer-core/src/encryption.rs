@@ -167,7 +167,11 @@ pub fn decrypt(
     aad: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
     if ciphertext.len() < SALT_SIZE + TAG_SIZE {
-        anyhow::bail!("Ciphertext too short: need at least {} bytes, got {}", SALT_SIZE + TAG_SIZE, ciphertext.len());
+        anyhow::bail!(
+            "Ciphertext too short: need at least {} bytes, got {}",
+            SALT_SIZE + TAG_SIZE,
+            ciphertext.len()
+        );
     }
 
     let cipher = ChaCha20Poly1305::new(key.as_bytes().into());
@@ -304,7 +308,10 @@ mod tests {
         let key = EncryptionKey::generate();
         let enc0 = encrypt(&key, 0, b"same data", None).unwrap();
         let enc1 = encrypt(&key, 0, b"same data", None).unwrap();
-        assert_ne!(enc0, enc1, "Same frame_index must produce different ciphertexts due to random salt");
+        assert_ne!(
+            enc0, enc1,
+            "Same frame_index must produce different ciphertexts due to random salt"
+        );
         // Both must still decrypt correctly
         assert_eq!(decrypt(&key, 0, &enc0, None).unwrap(), b"same data");
         assert_eq!(decrypt(&key, 0, &enc1, None).unwrap(), b"same data");

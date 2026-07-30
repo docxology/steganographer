@@ -21,15 +21,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use steganographer_core::{
-    Signer, VideoFormat, VideoFrame, VideoStegoModule,
-};
-use steganographer_core::lsb_video::LsbVideo;
 use steganographer_core::audio::AudioBuffer;
 use steganographer_core::lsb_audio::LsbAudio;
+use steganographer_core::lsb_video::LsbVideo;
 use steganographer_core::AudioStegoModule;
+use steganographer_core::{Signer, VideoFormat, VideoFrame, VideoStegoModule};
 
 use super::DashboardState;
+
+/// Build an OTS metrics JSON object for inclusion in WebSocket replies.
+/// Provides the explicit fields `ots_proofs_count`, `ots_last_timestamp`,
+/// and `ots_verified` for the dashboard UI.
+fn ots_metrics_json(state: &DashboardState) -> serde_json::Value {
+    serde_json::json!({
+        "ots_proofs_count": state.metrics.ots_proofs_generated(),
+        "ots_last_timestamp": state.metrics.ots_last_timestamp(),
+        "ots_verified": state.metrics.ots_last_verified(),
+    })
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VIDEO WEBSOCKET UPGRADE HANDLERS
@@ -104,10 +113,9 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
                         "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
                         "backend": state.signing_backend,
                         "identity": state.identity,
+                        "ots": ots_metrics_json(&state),
                     });
-                    let _ = socket
-                        .send(Message::Text(reply.to_string().into()))
-                        .await;
+                    let _ = socket.send(Message::Text(reply.to_string().into())).await;
                 }
                 continue;
             }
@@ -122,11 +130,8 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
 
         let frame_idx = frame_counter.fetch_add(1, Ordering::Relaxed);
 
-        let decode_result = ImageReader::with_format(
-            Cursor::new(&jpeg_bytes),
-            ImageFormat::Jpeg,
-        )
-        .decode();
+        let decode_result =
+            ImageReader::with_format(Cursor::new(&jpeg_bytes), ImageFormat::Jpeg).decode();
 
         let rgb_image = match decode_result {
             Ok(img) => img.to_rgb8(),
@@ -174,8 +179,8 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         state.metrics.record_embed_duration(embed_duration);
         state.metrics.record_frame();
 
-        let encoded_image =
-            image::RgbImage::from_raw(width, height, rgb_data.clone()).expect("invalid raw RGB dimensions");
+        let encoded_image = image::RgbImage::from_raw(width, height, rgb_data.clone())
+            .expect("invalid raw RGB dimensions");
         let mut jpeg_out = Cursor::new(Vec::new());
         if encoded_image
             .write_to(&mut jpeg_out, ImageFormat::Jpeg)
@@ -189,7 +194,10 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         let b64_frame = base64_encode(&encoded_jpeg);
 
         {
-            let mut last = state.last_encoded_frame.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = state
+                .last_encoded_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *last = Some(EncodedFrame {
                 rgb_data,
                 width,
@@ -210,6 +218,7 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
             "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
             "backend": state.signing_backend,
             "identity": state.identity,
+            "ots": ots_metrics_json(&state),
         });
 
         if socket
@@ -251,7 +260,10 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         }
 
         let encoded = {
-            let last = state.last_encoded_frame.lock().unwrap_or_else(|e| e.into_inner());
+            let last = state
+                .last_encoded_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             last.clone()
         };
 
@@ -284,11 +296,8 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
             let (verified, payload_info) = match extracted {
                 Ok(Some(payload)) => {
                     state.metrics.record_verify_ok();
-                    let hash_hex: String = payload
-                        .hash
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
+                    let hash_hex: String =
+                        payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
                     let sig_preview: String = payload
                         .signature
                         .to_bytes()
@@ -302,12 +311,15 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
                         .iter()
                         .map(|b| format!("{:02x}", b))
                         .collect();
-                    (true, serde_json::json!({
-                        "frame_index": payload.frame_index,
-                        "hash": hash_hex,
-                        "signature_preview": sig_preview,
-                        "signature_full": sig_full,
-                    }))
+                    (
+                        true,
+                        serde_json::json!({
+                            "frame_index": payload.frame_index,
+                            "hash": hash_hex,
+                            "signature_preview": sig_preview,
+                            "signature_full": sig_full,
+                        }),
+                    )
                 }
                 Ok(None) => {
                     state.metrics.record_verify_fail();
@@ -319,8 +331,8 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
                 }
             };
 
-            let decoded_image =
-                image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data).expect("invalid raw RGB dimensions");
+            let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data)
+                .expect("invalid raw RGB dimensions");
             let mut jpeg_out = Cursor::new(Vec::new());
             let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
             let b64_frame = base64_encode(&jpeg_out.into_inner());
@@ -349,6 +361,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
                 "lsb_bits": current_lsb_bits,
                 "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
                 "backend": state.signing_backend,
+                "ots": ots_metrics_json(&state),
             })
         } else {
             let metrics_json = state.metrics.to_json();
@@ -357,6 +370,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
                 "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
                 "backend": state.signing_backend,
                 "waiting": true,
+                "ots": ots_metrics_json(&state),
             })
         };
 
@@ -420,7 +434,10 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
         }
 
         let chunk_idx = chunk_counter.fetch_add(1, Ordering::Relaxed);
-        let sample_rate = parsed.get("sample_rate").and_then(|v| v.as_u64()).unwrap_or(44100) as u32;
+        let sample_rate = parsed
+            .get("sample_rate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(44100) as u32;
         let channels = parsed.get("channels").and_then(|v| v.as_u64()).unwrap_or(1) as u16;
         let lsb_bits = parsed.get("lsb_bits").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
 
@@ -475,7 +492,10 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
 
         // Store for decode handler
         {
-            let mut last = state.last_encoded_audio.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = state
+                .last_encoded_audio
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *last = Some(EncodedAudioChunk {
                 samples: samples.clone(),
                 sample_rate,
@@ -533,7 +553,10 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
         }
 
         let encoded = {
-            let last = state.last_encoded_audio.lock().unwrap_or_else(|e| e.into_inner());
+            let last = state
+                .last_encoded_audio
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             last.clone()
         };
 
@@ -559,11 +582,8 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
 
             let (verified, payload_info) = match extracted {
                 Ok(Some(payload)) => {
-                    let hash_hex: String = payload
-                        .hash
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
+                    let hash_hex: String =
+                        payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
                     let sig_preview: String = payload
                         .signature
                         .to_bytes()
@@ -577,19 +597,21 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
                         .iter()
                         .map(|b| format!("{:02x}", b))
                         .collect();
-                    (true, serde_json::json!({
-                        "chunk_index": payload.frame_index,
-                        "hash": hash_hex,
-                        "signature_preview": sig_preview,
-                        "signature_full": sig_full,
-                    }))
+                    (
+                        true,
+                        serde_json::json!({
+                            "chunk_index": payload.frame_index,
+                            "hash": hash_hex,
+                            "signature_preview": sig_preview,
+                            "signature_full": sig_full,
+                        }),
+                    )
                 }
-                Ok(None) => {
-                    (false, serde_json::json!({"error": "no audio payload found"}))
-                }
-                Err(e) => {
-                    (false, serde_json::json!({"error": e.to_string()}))
-                }
+                Ok(None) => (
+                    false,
+                    serde_json::json!({"error": "no audio payload found"}),
+                ),
+                Err(e) => (false, serde_json::json!({"error": e.to_string()})),
             };
 
             let now_ts = {

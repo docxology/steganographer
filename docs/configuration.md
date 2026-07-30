@@ -62,12 +62,12 @@ Cryptographic payload configuration.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `type` | String | `"signature"` | Payload type: `"signature"` or `"custom"` |
-| `size` | u32 | 104 | Payload size in bytes (8 frame_index + 32 BLAKE3 + 64 Ed25519) |
+| `size` | u32 | 109 | Legacy v2 payload bytes (4 magic + 1 version + 8 frame index + 32 hash + 64 signature) |
 
 ```toml
 [video.pipeline.payload]
 type = "signature"
-size = 104
+size = 109
 ```
 
 #### `[video.input]` / `[video.output]`

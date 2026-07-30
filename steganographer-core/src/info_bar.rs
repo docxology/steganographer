@@ -42,6 +42,10 @@ pub struct InfoBar {
     show_qr: bool,
     /// Whether to show the timestamp
     show_timestamp: bool,
+    /// Whether to render the OTS (OpenTimestamps) status badge.
+    /// When `true`, a small "OTS" indicator is drawn in the info bar.
+    /// Default: `false` — OTS is opt-in.
+    include_ots_indicator: bool,
 }
 
 impl InfoBar {
@@ -52,6 +56,7 @@ impl InfoBar {
             show_barcode: true,
             show_qr: true,
             show_timestamp: true,
+            include_ots_indicator: false,
         }
     }
 
@@ -71,6 +76,17 @@ impl InfoBar {
     pub fn with_timestamp(mut self, enabled: bool) -> Self {
         self.show_timestamp = enabled;
         self
+    }
+
+    /// Toggle the OpenTimestamps status indicator badge in the info bar.
+    pub fn with_ots_indicator(mut self, enabled: bool) -> Self {
+        self.include_ots_indicator = enabled;
+        self
+    }
+
+    /// Whether the OTS indicator is enabled.
+    pub fn includes_ots_indicator(&self) -> bool {
+        self.include_ots_indicator
     }
 
     /// Render the info bar into a frame.
@@ -198,7 +214,15 @@ impl InfoBar {
         let text_y3 = text_y2 + 12;
         if text_y3 + 8 < frame.height && sig.is_some() {
             let detail = "BLAKE3+Ed25519 | 109B payload";
-            self.render_text_small(frame, 4, text_y3, detail, TEXT_SECONDARY);
+            let cursor_x3 = self.render_text_small(frame, 4, text_y3, detail, TEXT_SECONDARY);
+
+            // OTS status badge (right side of the third row)
+            if self.include_ots_indicator {
+                let ots_label = "OTS";
+                let badge_color = BARCODE_COLOR; // green — indicates stamping active
+                let _cx =
+                    self.render_text_small(frame, cursor_x3 + 8, text_y3, ots_label, badge_color);
+            }
         }
 
         Ok(())
@@ -502,6 +526,43 @@ mod tests {
         assert!(
             region.iter().any(|&b| b != 0),
             "QR region should have rendered pixels"
+        );
+    }
+
+    #[test]
+    fn test_info_bar_ots_indicator_default_off() {
+        let bar = InfoBar::new("TEST".to_string());
+        assert!(!bar.includes_ots_indicator());
+    }
+
+    #[test]
+    fn test_info_bar_ots_indicator_enabled() {
+        use crate::crypto::Signer;
+
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(0, b"ots test", None);
+
+        let mut data = vec![0u8; 640 * 480 * 3];
+        let mut frame = VideoFrame {
+            width: 640,
+            height: 480,
+            stride: 640 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+
+        let mut bar = InfoBar::new("OTS TEST".to_string()).with_ots_indicator(true);
+        assert!(bar.includes_ots_indicator());
+        bar.embed(&mut frame, Some(&payload)).unwrap();
+
+        // The info bar should render without panic. The OTS badge is in the
+        // third row of the bar; verify the bar region was modified.
+        let bar_top = 480 - 80;
+        let bar_region = &data[(bar_top * 640 * 3) as usize..];
+        assert!(
+            bar_region.iter().any(|&b| b != 0),
+            "Bar with OTS indicator should modify pixels"
         );
     }
 }

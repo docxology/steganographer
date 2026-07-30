@@ -50,6 +50,17 @@ Steganographer's LSB embedding at 1-bit with only 904 out of 921,600 bytes modif
 | **Covertness** | Statistical steganalysis may detect the presence of LSB embedding |
 | **Availability** | An attacker can strip LSB data by re-encoding the media |
 
+### Generic Packet Alpha Semantics
+
+The generic packet alpha validates framing, canonical metadata, envelope CRC32C,
+declared resource limits, original length, and an unkeyed content digest. That
+detects accidental or malicious payload corruption, but it does **not** identify
+an author or prove carrier provenance. Payload signatures, AEAD transforms,
+keyed locator/placement, and transform downgrade protection remain disabled in
+generic CLI mode until their protocol work and security review are complete.
+Use legacy `encode` plus `verify --public-key` when signer authenticity and
+carrier binding are required.
+
 ---
 
 ## Threat Analysis

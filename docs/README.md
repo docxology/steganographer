@@ -48,6 +48,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | [API Reference](api-reference.md) | Complete Rust API: types, traits, structs, methods, dashboard endpoints, and `LiveConfig` |
 | [Contributing](contributing.md) | Development workflow, coding standards, testing, adding new algorithms |
 | [Roadmap](roadmap.md) | Planned features, extension points, and future work |
+| [Steganography Platform Plan](plans/steganography-platform/README.md) | Composable v0.6.x–v1.0 program for generic packets, carriers, formats, forensics, documents, CLI/WASM, validation, and migration |
 | [FAQ](faq.md) | 30+ Q&As on concepts, build, usage, crypto, dashboard, and configuration |
 
 ## Quick Links
@@ -55,7 +56,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 - **Run**: `./run.sh` (interactive menu, reads `steganographer.toml`)
 - **Dashboard**: `./run.sh` → option `d` or `a` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace` (286 tests across 4 crates)
+- **Test**: `cargo test --workspace` (311 tests across 4 crates)
 - **CLI**: `cargo run -p steganographer-cli -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
@@ -97,11 +98,12 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   171 tests (crypto, LSB, overlay, config, audio, metrics, signer_backend, encryption, ECC, KDF, multi_frame, spread_spectrum, DCT, MDCT, adaptive, hash_chain, steganalysis)
+steganographer-core (unit):   185 tests (packet/carrier, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis)
 steganographer-core (integ):   76 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC)
-steganographer-cli (integ):    10 tests (keygen, encode→verify round-trip, encryption, ECC, spread_spectrum, dct_video error, config, info)
+steganographer-cli (unit):      6 tests (media descriptors/I/O and canonical carrier binding)
+steganographer-cli (integ):    19 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis)
 steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
-steganographer-gst:            1 test  (plugin skeleton)
+steganographer-gst:            2 tests (plugin skeleton and doctest)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        286 tests, 0 failures
+Total:                        311 tests, 0 failures
 ```
