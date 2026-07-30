@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-30
+
 ### Added
 
+- **OpenTimestamps attestation (opt-in).** New `steganographer-core` OTS module
+  (`OTSClient`, `OtsConfig`, `ots_handler`) anchors BLAKE3 Merkle roots to the
+  Bitcoin or Ethereum blockchain via the OpenTimestamps REST API, giving every
+  signed stego segment an independently verifiable "this existed at time T"
+  proof that is orthogonal to the Ed25519/secp256k1 authorship signature. OTS
+  is disabled by default and degrades gracefully — an unreachable calendar
+  server reports `unavailable` (HTTP 503) and never blocks the stego pipeline.
+- **`ots` CLI command group** — `steganographer ots stamp [--method bitcoin|ethereum]`
+  and `steganographer ots verify` submit a digest to a calendar server, persist
+  the returned `.ots` proof under the configured `proof_dir`, and verify proofs
+  later. Both support `--format plain|json` output.
+- **Dashboard OTS endpoints** — `GET /ots/status`, `POST /ots/stamp`, and
+  `POST /ots/verify` expose the OTS client to the web UI, backed by
+  `static/js/ots.js` and a live status panel. The dashboard defaults to
+  disabled until a config enables it.
+- **Packet envelope OTS extension fields** — `FIELD_OTS_DIGEST` (128),
+  `FIELD_OTS_METHOD` (129), and `FIELD_OTS_TIMESTAMP_HEX` (130) carry a small
+  attestation reference in the TLV envelope so verifiers can display the
+  on-chain timestamp without re-fetching the full `.ots` proof. The full proof
+  is never embedded in carrier media.
+- **OTS metrics and info-bar indicator** — `StegoMetrics` now tracks
+  `ots_proofs_generated`, `ots_verifications_passed/failed`, and the last
+  attestation Unix timestamp; the info bar can render an `OTS` badge when
+  stamping is active.
+- **OTS guide** — `docs/ots-integration.md` documents the trust model, REST
+  flow, graceful-degradation guarantees, and CLI/dashboard usage.
 - Opt-in generic packet v1 alpha with a fixed 32-byte public locator, bounded
   canonical TLV envelope, CRC32C corruption filter, content digest, typed
   limits/errors, and legacy `SignaturePayloadCodec`.
