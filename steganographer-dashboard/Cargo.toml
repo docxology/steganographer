@@ -3,6 +3,7 @@ name = "steganographer-dashboard"
 description = "Web-based live dashboard for round-trip steganography verification"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

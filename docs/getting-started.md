@@ -11,7 +11,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup toolchain install stable
 ```
 
-Required: **Rust 1.70+** (tested on 1.94.0)
+Required: **Rust 1.88+**. Development and CI also exercise the current stable
+toolchain selected by `rust-toolchain.toml`.
 
 ### GStreamer (Optional)
 
@@ -60,10 +61,10 @@ cargo build --workspace --release
 ## Run Tests
 
 ```bash
-# All workspace tests (286 tests)
+# All workspace tests (311 tests)
 cargo test --workspace
 
-# Core only (247 tests)
+# Core only (261 tests)
 cargo test -p steganographer-core
 
 # Dashboard only (23 tests)
@@ -130,7 +131,31 @@ Output:
   Status:      ✅ VALID
 ```
 
-### 4. Run a Live Video Pipeline (requires GStreamer)
+### 4. Try the Opt-In Generic Packet Alpha
+
+Generic packets carry bounded arbitrary bytes independently from legacy frame
+signatures. The first alpha slice supports lossless PNG/raw RGB spatial LSB:
+
+```bash
+cargo run -p steganographer-cli -- encode \
+    --input cover.png \
+    --output packed.png \
+    --payload-file report.pdf \
+    --mime-type application/pdf \
+    --bits 2
+
+cargo run -p steganographer-cli -- decode \
+    --input packed.png \
+    --output recovered.pdf \
+    --bits auto
+```
+
+Generic mode is explicit: without `--payload-file` or `--payload-text`,
+`encode` retains the legacy signed-carrier behavior. The alpha currently rejects
+generic encryption, ECC, payload signing, keyed placement, and multi-frame
+options until those packet transforms are implemented.
+
+### 5. Run a Live Video Pipeline (requires GStreamer)
 
 ```bash
 # Using test source (no camera needed)
@@ -200,7 +225,7 @@ opacity = 1.0      # Full overlay intensity
 
 [video.pipeline.payload]
 type = "signature"
-size = 104         # 8 + 32 + 64 bytes
+size = 109         # 4 magic + 1 version + 8 frame + 32 hash + 64 signature
 ```
 
 When you run `./run.sh` and start a live pipeline, it reads these values automatically — no code changes needed.

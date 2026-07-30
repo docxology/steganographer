@@ -12,7 +12,10 @@ Digital watermarking is a subset of steganography focused on marking ownership o
 
 ### Can I hide arbitrary messages in video/audio?
 
-The current implementation only embeds `SignaturePayload` structs (109 bytes: frame index + BLAKE3 hash + Ed25519 signature). Extending to embed arbitrary data would require modifying `lsb_video.rs` or `lsb_audio.rs` to accept custom payloads.
+Yes, through the opt-in generic packet alpha for lossless PNG/raw RGB spatial
+LSB. Use `encode --payload-file` or `--payload-text`, then `decode` the payload.
+Legacy encode/verify remains the default signed-carrier workflow. Generic audio,
+transforms, payload signatures, and keyed placement remain roadmap work.
 
 ### Is the hidden data visible/audible?
 
@@ -232,7 +235,7 @@ It configures the cryptographic payload embedded in each frame:
 ```toml
 [video.pipeline.payload]
 type = "signature"    # "signature" (BLAKE3+Ed25519) or "custom"
-size = 104            # 8 (frame index) + 32 (BLAKE3) + 64 (Ed25519)
+size = 109            # 4 magic + 1 version + 8 frame + 32 hash + 64 signature
 ```
 
 ### Can I increase the embedding capacity?

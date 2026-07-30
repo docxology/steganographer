@@ -124,8 +124,8 @@ fn run_video_filter_internal(
     );
     log::info!("  Full source: {}", full_source_str);
 
-    let source_pipeline = gstreamer::parse::launch(&full_source_str)
-        .context("Failed to create source pipeline")?;
+    let source_pipeline =
+        gstreamer::parse::launch(&full_source_str).context("Failed to create source pipeline")?;
     let source_bin = source_pipeline
         .downcast::<gstreamer::Bin>()
         .map_err(|_| anyhow::anyhow!("Source pipeline is not a Bin"))?;
@@ -142,8 +142,8 @@ fn run_video_filter_internal(
     );
     log::info!("  Full sink: {}", full_sink_str);
 
-    let sink_pipeline = gstreamer::parse::launch(&full_sink_str)
-        .context("Failed to create sink pipeline")?;
+    let sink_pipeline =
+        gstreamer::parse::launch(&full_sink_str).context("Failed to create sink pipeline")?;
     let sink_bin = sink_pipeline
         .downcast::<gstreamer::Bin>()
         .map_err(|_| anyhow::anyhow!("Sink pipeline is not a Bin"))?;
@@ -238,7 +238,10 @@ fn run_video_filter_internal(
                     break;
                 }
                 if frame_index == 0 {
-                    log::warn!("Waiting for first frame (attempt {})...", consecutive_misses);
+                    log::warn!(
+                        "Waiting for first frame (attempt {})...",
+                        consecutive_misses
+                    );
                 }
                 continue;
             }
@@ -263,8 +266,13 @@ fn run_video_filter_internal(
         drop(sample);
 
         if frame_index == 0 {
-            log::info!("First frame received! {} bytes, {:?} {}x{}", 
-                buffer_copy.size(), video_info.format(), video_info.width(), video_info.height());
+            log::info!(
+                "First frame received! {} bytes, {:?} {}x{}",
+                buffer_copy.size(),
+                video_info.format(),
+                video_info.width(),
+                video_info.height()
+            );
             appsrc.set_caps(Some(&caps_owned));
         }
 
@@ -323,7 +331,6 @@ fn run_video_filter_internal(
     Ok(())
 }
 
-
 /// Extract signatures from a video source pipeline.
 ///
 /// Pulls frames and extracts embedded signature payloads for verification.
@@ -360,14 +367,16 @@ pub fn extract_from_source(
             None => break,
         };
 
-        let buffer = sample.buffer().ok_or_else(|| anyhow::anyhow!("No buffer"))?;
+        let buffer = sample
+            .buffer()
+            .ok_or_else(|| anyhow::anyhow!("No buffer"))?;
         let map = buffer
             .map_readable()
             .map_err(|_| anyhow::anyhow!("Cannot map"))?;
 
         let caps = sample.caps().ok_or_else(|| anyhow::anyhow!("No caps"))?;
-        let video_info = gstreamer_video::VideoInfo::from_caps(caps)
-            .map_err(|_| anyhow::anyhow!("Bad caps"))?;
+        let video_info =
+            gstreamer_video::VideoInfo::from_caps(caps).map_err(|_| anyhow::anyhow!("Bad caps"))?;
 
         let format = match video_info.format() {
             gstreamer_video::VideoFormat::Rgb => VideoFormat::Rgb8,

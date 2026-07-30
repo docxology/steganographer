@@ -11,6 +11,7 @@ flowchart LR
     CLI["steganographer"] --> VIDEO["video\n🎥 Live video pipeline"]
     CLI --> AUDIO["audio\n🎵 Live audio pipeline"]
     CLI --> ENCODE["encode\n🔒 Offline encoding"]
+    CLI --> DECODE["decode\n📦 Generic packet decode"]
     CLI --> VERIFY["verify\n🔓 Signature verification"]
     CLI --> KEYGEN["keygen\n🔑 Key generation"]
     CLI --> INFO["info\n📊 Capacity reporting"]
@@ -102,7 +103,8 @@ steganographer audio \
 
 ### `encode` — Offline File Encoding
 
-Embed steganographic signatures into raw media files.
+Embed legacy signed-carrier attestations, or explicitly embed an opt-in generic
+packet payload.
 
 ```bash
 steganographer encode [OPTIONS]
@@ -115,11 +117,25 @@ steganographer encode [OPTIONS]
 | `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
+| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
+| `--width <N>` / `--height <N>` | — | None | Required pair for dimension-dependent headerless RGB kernels such as DCT |
+| `--signing-key <PATH>` | — | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file |
+| `--embedding-key <HEX>` | — | Config/random | Keyed audio/spread placement key |
+| `--embedding-key-file <PATH>` | — | Config/random | File containing the embedding key |
+| `--encrypt` | — | `false` | Encrypt the legacy signature payload |
+| `--encryption-key <HEX>` | — | Random | ChaCha20-Poly1305 key |
+| `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
+| `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction |
+| `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
+| `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
+| `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
+| `--mime-type <TYPE>` | — | None | Public generic-packet MIME metadata |
+| `--filename <NAME>` | — | Payload basename | Safe display filename; path components are rejected |
 
 **Currently supported formats**:
 
-- `lsb_video`: Raw RGB pixel data (3 bytes per pixel)
-- `lsb_audio`: Raw S16LE PCM audio (2 bytes per sample, mono)
+- `lsb_video`: Raw RGB or lossless decoded PNG/image data
+- `lsb_audio`: Raw S16LE PCM or 16-bit integer WAV, preserving WAV properties
 - `spread_spectrum_video`: PN-sequence modulation for noise resistance
 - `dct_video`: DCT-domain embedding for compression resistance
 
@@ -130,10 +146,47 @@ steganographer encode [OPTIONS]
 steganographer encode -i frame.rgb -o frame_signed.rgb --stego-type lsb_video --bits 1
 
 # Encode audio with 2-bit LSB
-steganographer encode -i audio.raw -o audio_signed.raw --stego-type lsb_audio --bits 2
+steganographer encode -i audio.wav -o audio_signed.wav --stego-type lsb_audio \
+  --bits 2 --embedding-key-file keys/audio.key
+
+# Opt-in generic packet alpha
+steganographer encode -i cover.png -o packed.png \
+  --payload-file report.pdf --mime-type application/pdf --bits 2
 ```
 
-**Output**: Prints the public key (hex) needed for verification.
+Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
+carrier behavior and prints the public key needed by `verify`. Generic packet
+alpha currently supports sequential `lsb_video` only and explicitly rejects
+generic transforms that are not implemented yet.
+
+---
+
+### `decode` — Generic Packet Decode
+
+Decode and digest-check an opt-in generic packet. This does not imply carrier
+provenance; use `verify` for legacy signed-carrier attestations.
+
+```bash
+steganographer decode --input packed.png --output recovered.pdf [OPTIONS]
+```
+
+| Option | Short | Default | Description |
+| --- | --- | --- | --- |
+| `--input <PATH>` | `-i` | Required | Encoded carrier |
+| `--output <PATH>` | `-o` | Required | Decoded payload destination |
+| `--stego-type <TYPE>` | — | `lsb_video` | Generic kernel; only `lsb_video` in the alpha |
+| `--bits <VALUE>` | — | `auto` | Probe 1–4, or require an exact strength |
+| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `png`, or `image` |
+| `--format <FORMAT>` | — | `plain` | `plain` or `json` report |
+| `--force` | — | `false` | Replace an existing payload output |
+
+```bash
+steganographer decode -i packed.png -o recovered.pdf --bits auto --format json
+```
+
+Decode validates locator limits, envelope CRC32C, canonical metadata, declared
+kernel parameters, payload length, and the content digest before writing. It
+refuses to overwrite an existing output unless `--force` is explicit.
 
 ---
 
@@ -151,6 +204,9 @@ steganographer verify [OPTIONS]
 | `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--public-key <HEX>` | — | None | Public key for signature verification |
 | `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for audio/spread-spectrum extraction |
+| `--embedding-key-file <PATH>` | — | Config | File containing the embedding key |
+| `--bits <VALUE>` | — | `auto` | Auto-probe 1–4 LSBs or require an exact value |
+| `--width <N>` / `--height <N>` | — | None | Explicit headerless raw RGB dimensions |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
 
 **Examples**:

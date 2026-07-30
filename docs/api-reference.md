@@ -198,12 +198,12 @@ pub struct SignaturePayload {
 
 | Constant | Value | Description |
 | -------- | ----------- | ------------- |
-| `SERIALIZED_SIZE` | 104 | Total bytes: 8 + 32 + 64 |
+| `SERIALIZED_SIZE` | 109 | Total bytes: 4 magic + 1 version + 8 frame index + 32 hash + 64 signature |
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
-| `to_bytes` | `fn to_bytes(&self) -> [u8; 104]` | Serialize to little-endian bytes |
-| `from_bytes` | `fn from_bytes(buf: &[u8; 104]) -> Result<Self>` | Deserialize from bytes |
+| `to_bytes` | `fn to_bytes(&self) -> [u8; 109]` | Serialize the legacy v2 representation |
+| `from_bytes` | `fn from_bytes(buf: &[u8; 109]) -> Result<Self>` | Validate and deserialize legacy v2 bytes |
 
 #### `Signer`
 
@@ -242,6 +242,44 @@ Verifies signed frame payloads.
 | `new` | `fn new(verifying_key: VerifyingKey) -> Self` | Create from public key |
 | `from_bytes` | `fn from_bytes(bytes: &[u8; 32]) -> Result<Self>` | Import from raw bytes |
 | `verify` | `fn verify(&self, payload: &SignaturePayload, video: &[u8], audio: Option<&[u8]>) -> bool` | Verify payload against data |
+
+---
+
+### Module: `packet` (v1.0 alpha)
+
+The generic packet API is opt-in and byte-oriented. Its wire contract is not yet
+stable; legacy `SignaturePayload` remains supported through
+`SignaturePayloadCodec`.
+
+| Type | Purpose |
+| --- | --- |
+| `Locator` | Fixed 32-byte `STG3` bootstrap with version, flags, bounded lengths, CRC32C, and nonce |
+| `PacketEnvelope` | Canonical, ordered TLV metadata with payload digest and numeric algorithm descriptors |
+| `GenericPacket` | Locator, envelope, and arbitrary byte body |
+| `DecodeLimits` | Allocation and complexity ceilings checked during decoding |
+| `PacketCodec` | Shared byte-oriented encode/decode contract |
+| `GenericPacketCodec` | Codec for protocol-v1 alpha packets |
+| `SignaturePayloadCodec` | Exact adapter for the immutable 109-byte legacy representation |
+
+`GenericPacket::new_untransformed()` constructs a digest-bound packet.
+`encode()` validates that locator lengths/checksum match the canonical envelope
+and body. `decode()` checks limits before allocation, CRC32C, TLV canonicality,
+untransformed length, and content digest.
+
+### Module: `carrier` (alpha)
+
+| Type or trait | Purpose |
+| --- | --- |
+| `CarrierDescriptor` | Describes decoded carrier kind and usable unit count |
+| `EmbeddingConfig` | Shared checked embedding strength (currently 1–4 bits per unit) |
+| `CapacityReport`, `EmbedReport`, `ExtractReport` | Exact capacity and operation evidence |
+| `CarrierEmbedder`, `CarrierExtractor` | Packet-to-carrier contracts |
+| `SpatialLsb` | Sequential spatial-LSB kernel for the first generic vertical slice |
+
+Extraction reads only the fixed locator first, validates declared packet size
+against carrier capacity and `DecodeLimits`, then extracts and validates the
+complete packet. It also rejects packet placement/kernel descriptors that do
+not match the requested configuration.
 
 ---
 

@@ -15,14 +15,35 @@ fn main() {
     let mut cmd = clap::Command::new("steganographer")
         .about("Real-time steganographic watermarking for video and audio streams")
         .version("0.2.0")
-        .arg(clap::Arg::new("config").long("config").short('c').help("Path to configuration file (TOML)"))
-        .arg(clap::Arg::new("log-level").long("log-level").short('l').help("Log verbosity level"))
-        .arg(clap::Arg::new("quiet").long("quiet").short('q').help("Suppress all output except final result"))
+        .arg(
+            clap::Arg::new("config")
+                .long("config")
+                .short('c')
+                .help("Path to configuration file (TOML)"),
+        )
+        .arg(
+            clap::Arg::new("log-level")
+                .long("log-level")
+                .short('l')
+                .help("Log verbosity level"),
+        )
+        .arg(
+            clap::Arg::new("quiet")
+                .long("quiet")
+                .short('q')
+                .help("Suppress all output except final result"),
+        )
         .subcommand(clap::Command::new("encode").about("Encode steganographic data into a file"))
-        .subcommand(clap::Command::new("verify").about("Verify steganographic signatures in a media file"))
+        .subcommand(
+            clap::Command::new("verify").about("Verify steganographic signatures in a media file"),
+        )
         .subcommand(clap::Command::new("keygen").about("Generate a new Ed25519 signing key pair"))
-        .subcommand(clap::Command::new("info").about("Report steganographic capacity of a media file"))
-        .subcommand(clap::Command::new("analyze").about("Analyze a file for steganographic artifacts"))
+        .subcommand(
+            clap::Command::new("info").about("Report steganographic capacity of a media file"),
+        )
+        .subcommand(
+            clap::Command::new("analyze").about("Analyze a file for steganographic artifacts"),
+        )
         .subcommand(clap::Command::new("derive").about("Derive keys from a master secret"))
         .subcommand(clap::Command::new("dashboard").about("Launch the web dashboard"))
         .subcommand(clap::Command::new("video").about("Run live video pipeline"))

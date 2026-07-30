@@ -3,6 +3,7 @@ name = "steganographer-gst"
 description = "GStreamer integration: AppSrc/AppSink helpers and plugin skeletons for steganographer"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

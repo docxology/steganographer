@@ -1,5 +1,5 @@
-use steganographer_dashboard::{DashboardState, LiveConfig};
 use std::sync::{Arc, Mutex};
+use steganographer_dashboard::{DashboardState, LiveConfig};
 
 // ─── LiveConfig Tests ─────────────────────────────────────────────────
 
@@ -84,6 +84,8 @@ fn test_dashboard_state_construction() {
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
         auth_token: None,
+        ots_config: steganographer_core::OtsConfig::default(),
+        ots_client: None,
     };
     assert_eq!(state.signing_backend, "ed25519");
     assert_eq!(state.width, 1280);
@@ -142,6 +144,8 @@ async fn test_router_creation() {
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
         auth_token: None,
+        ots_config: steganographer_core::OtsConfig::default(),
+        ots_client: None,
     });
     let _router = steganographer_dashboard::create_router(state);
 }
@@ -162,6 +166,8 @@ fn test_dashboard_state_session_start() {
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
         auth_token: None,
+        ots_config: steganographer_core::OtsConfig::default(),
+        ots_client: None,
     };
     let after = std::time::Instant::now();
     // session_start should be between before and after
@@ -222,6 +228,8 @@ fn test_app() -> (axum::Router, Arc<DashboardState>) {
         live_config: Mutex::new(LiveConfig::default()),
         session_start: std::time::Instant::now(),
         auth_token: None,
+        ots_config: steganographer_core::OtsConfig::default(),
+        ots_client: None,
     });
     let router = steganographer_dashboard::create_router(state.clone());
     (router, state)
@@ -319,9 +327,19 @@ async fn test_api_docs_list_returns_array() {
     assert_eq!(resp.status(), 200);
     let body = body_to_string(resp.into_body()).await;
     let arr: Vec<String> = serde_json::from_str(&body).expect("valid JSON array");
-    assert!(arr.contains(&"README.md".to_string()), "should include README.md");
-    assert!(arr.contains(&"threat-model.md".to_string()), "should include threat-model.md");
-    assert!(arr.len() >= 18, "should have at least 18 doc files, got {}", arr.len());
+    assert!(
+        arr.contains(&"README.md".to_string()),
+        "should include README.md"
+    );
+    assert!(
+        arr.contains(&"threat-model.md".to_string()),
+        "should include threat-model.md"
+    );
+    assert!(
+        arr.len() >= 18,
+        "should have at least 18 doc files, got {}",
+        arr.len()
+    );
 }
 
 #[tokio::test]
@@ -334,10 +352,22 @@ async fn test_api_docs_content_returns_markdown() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-    assert!(ct.contains("text/markdown"), "expected markdown content-type, got {}", ct);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.contains("text/markdown"),
+        "expected markdown content-type, got {}",
+        ct
+    );
     let body = body_to_string(resp.into_body()).await;
-    assert!(body.contains("Steganographer"), "README should mention Steganographer");
+    assert!(
+        body.contains("Steganographer"),
+        "README should mention Steganographer"
+    );
 }
 
 #[tokio::test]
@@ -363,7 +393,10 @@ async fn test_serve_index_returns_html() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
     let body = body_to_string(resp.into_body()).await;
-    assert!(body.contains("<!DOCTYPE html>") || body.contains("<html"), "should be HTML");
+    assert!(
+        body.contains("<!DOCTYPE html>") || body.contains("<html"),
+        "should be HTML"
+    );
 }
 
 #[tokio::test]
@@ -376,7 +409,12 @@ async fn test_serve_css_returns_css() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/css"), "expected text/css, got {}", ct);
 }
 
@@ -390,8 +428,17 @@ async fn test_serve_js_returns_javascript() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-    assert!(ct.contains("javascript"), "expected javascript content-type, got {}", ct);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        ct.contains("javascript"),
+        "expected javascript content-type, got {}",
+        ct
+    );
 }
 
 #[tokio::test]
@@ -406,6 +453,9 @@ async fn test_api_metrics_returns_json() {
     assert_eq!(resp.status(), 200);
     let body = body_to_string(resp.into_body()).await;
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert!(json.get("frames_processed").is_some(),
-        "metrics JSON should have frames_processed field: {}", body);
+    assert!(
+        json.get("frames_processed").is_some(),
+        "metrics JSON should have frames_processed field: {}",
+        body
+    );
 }

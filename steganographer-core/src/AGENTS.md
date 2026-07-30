@@ -4,7 +4,28 @@
 
 ### lib.rs
 
-Entry point. Declares and re-exports: `video`, `audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`, `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`, `error_correction`, `multi_frame`, `kdf`, `adaptive`, `hash_chain`, `steganalysis`, `mdct_audio`.
+Entry point. Declares and re-exports: `packet`, `carrier`, `video`, `audio`,
+`crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
+`signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
+`error_correction`, `multi_frame`, `kdf`, `adaptive`, `hash_chain`,
+`steganalysis`, `mdct_audio`.
+
+### packet.rs
+
+- `Locator` — fixed 32-byte `STG3` protocol 1.0-alpha bootstrap
+- `PacketEnvelope` — canonical bounded TLV metadata and digest
+- `GenericPacket` — arbitrary byte body plus locator/envelope
+- `DecodeLimits`, `PacketError` — hostile-input ceilings and typed failures
+- `PacketCodec` — byte codec contract implemented by `GenericPacketCodec` and
+  legacy `SignaturePayloadCodec`
+
+### carrier.rs
+
+- `CarrierDescriptor`, `EmbeddingConfig` — shared decoded-unit descriptor and
+  checked 1–4 bit strength
+- `CarrierEmbedder`, `CarrierExtractor` — capacity/embed/extract contracts
+- `SpatialLsb` — sequential generic packet kernel with locator-first bounded
+  extraction and descriptor validation
 
 ### video.rs
 

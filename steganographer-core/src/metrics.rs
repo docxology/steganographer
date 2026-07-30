@@ -3,7 +3,7 @@
 //! Provides [`StegoMetrics`] for tracking frame processing statistics,
 //! signing latency, and verification success/failure rates.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Thread-safe metrics collector for steganography pipeline performance.
@@ -24,6 +24,16 @@ pub struct StegoMetrics {
     total_verify_us: AtomicU64,
     /// Cumulative embed time in microseconds.
     total_embed_us: AtomicU64,
+    /// OpenTimestamps proofs generated.
+    ots_proofs_generated: AtomicU64,
+    /// OpenTimestamps proofs that verified successfully.
+    ots_verifications_passed: AtomicU64,
+    /// OpenTimestamps proofs that failed verification.
+    ots_verifications_failed: AtomicU64,
+    /// Unix timestamp of the last OTS attestation (seconds), or 0 if none.
+    ots_last_timestamp: AtomicI64,
+    /// Whether the last OTS verification succeeded.
+    ots_last_verified: AtomicBool,
     /// Timestamp when metrics collection started.
     start_time: Instant,
 }
@@ -38,6 +48,11 @@ impl StegoMetrics {
             total_sign_us: AtomicU64::new(0),
             total_verify_us: AtomicU64::new(0),
             total_embed_us: AtomicU64::new(0),
+            ots_proofs_generated: AtomicU64::new(0),
+            ots_verifications_passed: AtomicU64::new(0),
+            ots_verifications_failed: AtomicU64::new(0),
+            ots_last_timestamp: AtomicI64::new(0),
+            ots_last_verified: AtomicBool::new(false),
             start_time: Instant::now(),
         }
     }
@@ -73,6 +88,51 @@ impl StegoMetrics {
     pub fn record_embed_duration(&self, duration: std::time::Duration) {
         self.total_embed_us
             .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    /// Record that an OTS proof was generated.
+    pub fn record_ots_proof(&self) {
+        self.ots_proofs_generated.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the result of an OTS proof verification.
+    pub fn record_ots_verification(&self, verified: bool, timestamp: Option<u64>) {
+        if verified {
+            self.ots_verifications_passed
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ots_verifications_failed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.ots_last_verified.store(verified, Ordering::Relaxed);
+        if let Some(ts) = timestamp {
+            self.ots_last_timestamp.store(ts as i64, Ordering::Relaxed);
+        }
+    }
+
+    /// Get total OTS proofs generated.
+    pub fn ots_proofs_generated(&self) -> u64 {
+        self.ots_proofs_generated.load(Ordering::Relaxed)
+    }
+
+    /// Get OTS verifications passed.
+    pub fn ots_verifications_passed(&self) -> u64 {
+        self.ots_verifications_passed.load(Ordering::Relaxed)
+    }
+
+    /// Get OTS verifications failed.
+    pub fn ots_verifications_failed(&self) -> u64 {
+        self.ots_verifications_failed.load(Ordering::Relaxed)
+    }
+
+    /// Get the last OTS attestation timestamp (Unix seconds), or 0 if none.
+    pub fn ots_last_timestamp(&self) -> i64 {
+        self.ots_last_timestamp.load(Ordering::Relaxed)
+    }
+
+    /// Whether the last OTS verification succeeded.
+    pub fn ots_last_verified(&self) -> bool {
+        self.ots_last_verified.load(Ordering::Relaxed)
     }
 
     /// Get total frames processed.
@@ -135,6 +195,11 @@ impl StegoMetrics {
             "avg_sign_latency_us": format!("{:.1}", self.avg_sign_latency_us()),
             "avg_verify_latency_us": format!("{:.1}", self.avg_verify_latency_us()),
             "uptime_secs": format!("{:.1}", self.elapsed().as_secs_f64()),
+            "ots_proofs_generated": self.ots_proofs_generated(),
+            "ots_verifications_passed": self.ots_verifications_passed(),
+            "ots_verifications_failed": self.ots_verifications_failed(),
+            "ots_last_timestamp": self.ots_last_timestamp(),
+            "ots_last_verified": self.ots_last_verified(),
         })
         .to_string()
     }
@@ -147,6 +212,11 @@ impl StegoMetrics {
         self.total_sign_us.store(0, Ordering::Relaxed);
         self.total_verify_us.store(0, Ordering::Relaxed);
         self.total_embed_us.store(0, Ordering::Relaxed);
+        self.ots_proofs_generated.store(0, Ordering::Relaxed);
+        self.ots_verifications_passed.store(0, Ordering::Relaxed);
+        self.ots_verifications_failed.store(0, Ordering::Relaxed);
+        self.ots_last_timestamp.store(0, Ordering::Relaxed);
+        self.ots_last_verified.store(false, Ordering::Relaxed);
     }
 }
 
@@ -211,5 +281,52 @@ mod tests {
     fn test_metrics_default() {
         let metrics = StegoMetrics::default();
         assert_eq!(metrics.frames_processed(), 0);
+    }
+
+    #[test]
+    fn test_ots_metrics() {
+        let metrics = StegoMetrics::new();
+        assert_eq!(metrics.ots_proofs_generated(), 0);
+        assert_eq!(metrics.ots_verifications_passed(), 0);
+        assert_eq!(metrics.ots_verifications_failed(), 0);
+        assert_eq!(metrics.ots_last_timestamp(), 0);
+        assert!(!metrics.ots_last_verified());
+
+        metrics.record_ots_proof();
+        metrics.record_ots_proof();
+        assert_eq!(metrics.ots_proofs_generated(), 2);
+
+        metrics.record_ots_verification(true, Some(1700000000));
+        assert_eq!(metrics.ots_verifications_passed(), 1);
+        assert_eq!(metrics.ots_last_timestamp(), 1700000000);
+        assert!(metrics.ots_last_verified());
+
+        metrics.record_ots_verification(false, None);
+        assert_eq!(metrics.ots_verifications_failed(), 1);
+        assert!(!metrics.ots_last_verified());
+    }
+
+    #[test]
+    fn test_ots_metrics_json() {
+        let metrics = StegoMetrics::new();
+        metrics.record_ots_proof();
+        metrics.record_ots_verification(true, Some(123));
+        let json = metrics.to_json();
+        assert!(json.contains("\"ots_proofs_generated\":1"));
+        assert!(json.contains("\"ots_verifications_passed\":1"));
+        assert!(json.contains("\"ots_last_timestamp\":123"));
+        assert!(json.contains("\"ots_last_verified\":true"));
+    }
+
+    #[test]
+    fn test_ots_metrics_reset() {
+        let metrics = StegoMetrics::new();
+        metrics.record_ots_proof();
+        metrics.record_ots_verification(true, Some(999));
+        metrics.reset();
+        assert_eq!(metrics.ots_proofs_generated(), 0);
+        assert_eq!(metrics.ots_verifications_passed(), 0);
+        assert_eq!(metrics.ots_last_timestamp(), 0);
+        assert!(!metrics.ots_last_verified());
     }
 }

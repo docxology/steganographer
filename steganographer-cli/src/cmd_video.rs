@@ -20,12 +20,8 @@ pub fn run(
         .video
         .ok_or_else(|| anyhow::anyhow!("No [video] section in config"))?;
 
-    let source_str = source.unwrap_or_else(|| {
-        build_source_pipeline(&video_cfg.input)
-    });
-    let sink_str = sink.unwrap_or_else(|| {
-        build_sink_pipeline(&video_cfg.output)
-    });
+    let source_str = source.unwrap_or_else(|| build_source_pipeline(&video_cfg.input));
+    let sink_str = sink.unwrap_or_else(|| build_sink_pipeline(&video_cfg.output));
 
     // Build the steganography module chain
     let stego_modules = build_video_stego_chain(&video_cfg.stego)?;
@@ -50,7 +46,10 @@ pub fn run(
             let key_hex = std::fs::read_to_string(key_path)?;
             let key_bytes = hex_decode(key_hex.trim())?;
             if key_bytes.len() != 32 {
-                anyhow::bail!("Signing key must be 32 bytes (64 hex chars), got {}", key_bytes.len());
+                anyhow::bail!(
+                    "Signing key must be 32 bytes (64 hex chars), got {}",
+                    key_bytes.len()
+                );
             }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&key_bytes);
@@ -85,7 +84,9 @@ pub fn run(
         sink_pipeline: sink_str,
     };
 
-    let composite = Box::new(CompositeVideoStego { modules: stego_modules });
+    let composite = Box::new(CompositeVideoStego {
+        modules: stego_modules,
+    });
 
     steganographer_gst::video_filter::run_video_filter(
         &filter_config,
@@ -137,9 +138,7 @@ fn build_source_pipeline(endpoint: &steganographer_core::config::EndpointConfig)
                 device
             )
         }
-        Some("avfoundation") => {
-            "avfvideosrc ! videoconvert ! video/x-raw,format=RGB".to_string()
-        }
+        Some("avfoundation") => "avfvideosrc ! videoconvert ! video/x-raw,format=RGB".to_string(),
         _ => {
             // Default: test source
             "videotestsrc ! videoconvert ! video/x-raw,format=RGB,width=640,height=480".to_string()
@@ -165,19 +164,21 @@ fn build_video_stego_chain(
     for step in &stego_cfg.pipeline {
         match step.as_str() {
             "lsb_signature" => {
-                let lsb_cfg = stego_cfg
-                    .lsb_signature
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'lsb_signature' but no [lsb_signature] config"))?;
+                let lsb_cfg = stego_cfg.lsb_signature.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Pipeline includes 'lsb_signature' but no [lsb_signature] config"
+                    )
+                })?;
                 let lsb = steganographer_core::lsb_video::LsbVideo::try_new(lsb_cfg.bits)?;
                 modules.push(Box::new(lsb));
                 log::info!("Added LSB video module ({} bits)", lsb_cfg.bits);
             }
             "spread_spectrum" => {
-                let lsb_cfg = stego_cfg
-                    .lsb_signature
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'spread_spectrum' but no [lsb_signature] config for key"))?;
+                let lsb_cfg = stego_cfg.lsb_signature.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Pipeline includes 'spread_spectrum' but no [lsb_signature] config for key"
+                    )
+                })?;
                 let key = lsb_cfg.key_bytes()?;
                 let ss = steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key(key);
                 modules.push(Box::new(ss));
@@ -189,11 +190,13 @@ fn build_video_stego_chain(
                 log::info!("Added DCT video module");
             }
             "overlay" => {
-                let ov_cfg = stego_cfg
-                    .overlay
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Pipeline includes 'overlay' but no [overlay] config"))?;
-                let text = ov_cfg.text.clone().unwrap_or_else(|| "STEGANOGRAPHER".to_string());
+                let ov_cfg = stego_cfg.overlay.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Pipeline includes 'overlay' but no [overlay] config")
+                })?;
+                let text = ov_cfg
+                    .text
+                    .clone()
+                    .unwrap_or_else(|| "STEGANOGRAPHER".to_string());
                 let pos = steganographer_core::overlay::OverlayPosition::parse(
                     ov_cfg.position.as_deref().unwrap_or("bottom-right"),
                 );

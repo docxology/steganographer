@@ -32,8 +32,8 @@ pub fn run_audio_filter(
     log::info!("  Sink:   {}", config.sink_pipeline);
 
     let source_str = format!("{} ! appsink name=sink", config.source_pipeline);
-    let source_pipeline = gstreamer::parse::launch(&source_str)
-        .context("Failed to create source pipeline")?;
+    let source_pipeline =
+        gstreamer::parse::launch(&source_str).context("Failed to create source pipeline")?;
     let source_bin = source_pipeline
         .downcast::<gstreamer::Bin>()
         .map_err(|_| anyhow::anyhow!("Source pipeline is not a Bin"))?;
@@ -44,8 +44,8 @@ pub fn run_audio_filter(
         .map_err(|_| anyhow::anyhow!("Not AppSink"))?;
 
     let sink_str = format!("appsrc name=src ! {}", config.sink_pipeline);
-    let sink_pipeline = gstreamer::parse::launch(&sink_str)
-        .context("Failed to create sink pipeline")?;
+    let sink_pipeline =
+        gstreamer::parse::launch(&sink_str).context("Failed to create sink pipeline")?;
     let sink_bin = sink_pipeline
         .downcast::<gstreamer::Bin>()
         .map_err(|_| anyhow::anyhow!("Sink pipeline is not a Bin"))?;
@@ -171,14 +171,16 @@ pub fn extract_from_source(
             Err(_) => break,
         };
 
-        let buffer = sample.buffer().ok_or_else(|| anyhow::anyhow!("No buffer"))?;
+        let buffer = sample
+            .buffer()
+            .ok_or_else(|| anyhow::anyhow!("No buffer"))?;
         let map = buffer
             .map_readable()
             .map_err(|_| anyhow::anyhow!("Cannot map"))?;
 
         let caps = sample.caps().ok_or_else(|| anyhow::anyhow!("No caps"))?;
-        let audio_info = gstreamer_audio::AudioInfo::from_caps(caps)
-            .map_err(|_| anyhow::anyhow!("Bad caps"))?;
+        let audio_info =
+            gstreamer_audio::AudioInfo::from_caps(caps).map_err(|_| anyhow::anyhow!("Bad caps"))?;
 
         let sample_bytes = map.as_ref();
         let mut samples_copy: Vec<i16> = sample_bytes

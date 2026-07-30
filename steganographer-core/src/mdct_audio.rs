@@ -386,10 +386,7 @@ mod tests {
             let extracted = extracted.unwrap();
             assert_eq!(extracted.frame_index, payload.frame_index);
             assert_eq!(extracted.hash, payload.hash);
-            assert_eq!(
-                extracted.signature.to_bytes(),
-                payload.signature.to_bytes()
-            );
+            assert_eq!(extracted.signature.to_bytes(), payload.signature.to_bytes());
         }
     }
 

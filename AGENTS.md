@@ -8,12 +8,12 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: LSB video/audio, crypto, overlay, info_bar, signer_backend, metrics, config, DCT video, encryption, error_correction, multi_frame, spread_spectrum, adaptive, hash_chain, kdf, mdct_audio, steganalysis (21 modules, 178 unit tests, 76 integration tests) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers, LSB video/audio, crypto, overlays, signing, metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, and steganalysis (23 modules, 185 unit tests, 76 integration tests) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines (4 modules) |
-| `steganographer-cli/` | Crate | CLI binary: 10 Clap subcommands — video, audio, encode, verify, keygen, info, analyze, derive, config, dashboard (5 modules) |
+| `steganographer-cli/` | Crate | CLI binary: 12 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, derive, config, revoke, dashboard (8 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
 | `config/` | Config | Example TOML configuration files |
-| `docs/` | Docs | 18 comprehensive documentation files |
+| `docs/` | Docs | 18 user-facing guides + 7 steganography-platform planning specifications |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
 | `run.sh` | Script | Interactive terminal menu (6 options: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info) |
 
@@ -21,17 +21,17 @@
 
 - **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
 - **Source files**: 27 Rust source files + 6 static web assets across 4 crates
-- **Test files**: 3 integration test files (76+10 tests) + inline unit tests (178 tests) + dashboard tests (23) = **286 total tests**
-- **Doc files**: 18 markdown documentation files + README.md / AGENTS.md per crate
+- **Tests**: 185 core unit + 76 core integration + 6 CLI unit + 19 CLI integration + 23 dashboard + 2 GStreamer/doc = **311 passing tests**
+- **Doc files**: 25 markdown files under `docs/` (18 existing docs + 7 program planning specifications) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
 ## Build & Test
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 247 tests (171 unit + 76 integration, Ed25519 default)
+cargo test -p steganographer-core              # 261 tests (185 unit + 76 integration, Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 286 total tests
+cargo test --workspace                         # 311 total tests
 ./run.sh                                       # Interactive menu
 ```
 

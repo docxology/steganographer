@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Opt-in generic packet v1 alpha with a fixed 32-byte public locator, bounded
+  canonical TLV envelope, CRC32C corruption filter, content digest, typed
+  limits/errors, and legacy `SignaturePayloadCodec`.
+- Shared carrier descriptors, `EmbeddingConfig`, checked capacity reports, and
+  a generic sequential spatial-LSB embed/extract contract.
+- `encode --payload-file` / `--payload-text` and the new `decode` command for
+  digest-validated generic PNG/raw RGB payload round-trips at one through four
+  LSBs. Legacy signed-carrier encoding remains the default.
+- Format-aware offline media I/O, deterministic embedding-key flags/files,
+  auto-probed verify bit strength, raw RGB dimensions, and combined-analysis
+  JSON details.
+- Declared Rust 1.88 MSRV CI job and the repository MIT `LICENSE` artifact.
+
+### Changed
+
+- Reed-Solomon decoding now uses 255 distinct GF(2^8) evaluation points and a
+  bounded Berlekamp-Welch solver. Active tests cover zero through four symbol
+  errors; uncorrectable codewords fail instead of returning best-effort bytes.
+- Offline encode/verify inherits payload transforms and keys from configuration
+  when the CLI does not override them.
+- WAV output preserves its source channel/rate/sample specification, capacity
+  uses decoded carrier units, and DCT uses its canonical core implementation.
+
+### Fixed
+
+- Carrier signatures are computed over kernel-canonical bytes so post-embedding
+  verification can reproduce the signed carrier digest.
+- Spatial LSB output to lossy JPEG and PCM LSB output to lossy audio extensions
+  are rejected.
+- Audio/spread encode and verify now use the same resolved embedding key.
+- Verify no longer hard-codes one LSB, DCT no longer stops at a CLI stub, and
+  JSON tests assert exact `valid` status instead of matching `"invalid"`.
+
 ## [0.4.0] — 2026-07-23
 
 ### Added

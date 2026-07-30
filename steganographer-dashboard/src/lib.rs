@@ -11,19 +11,14 @@
 
 pub mod ws_handler;
 
-use axum::{
-    extract::State,
-    response::Html,
-    routing::get,
-    Json,
-    Router,
-};
+use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use steganographer_core::StegoMetrics;
+use steganographer_core::ots_handler;
+use steganographer_core::{OtsConfig, OTSClient, StegoMetrics};
 use tower_http::cors::CorsLayer;
 
-use ws_handler::{EncodedFrame, EncodedAudioChunk};
+use ws_handler::{EncodedAudioChunk, EncodedFrame};
 
 /// Live-updatable configuration from the dashboard UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,15 +58,33 @@ pub struct LiveConfig {
     pub ecc: bool,
 }
 
-fn default_opacity() -> f64 { 1.0 }
-fn default_lsb_bits() -> u8 { 1 }
-fn default_backend() -> String { "ed25519".into() }
-fn default_overlay_text() -> String { "CONFIDENTIAL".into() }
-fn default_sign_rate() -> u32 { 1000 }
-fn default_qr_scale() -> u32 { 10 }
-fn default_resolution() -> String { "640x480".into() }
-fn default_stego_type() -> String { "lsb".into() }
-fn default_hash_algo() -> String { "blake3".into() }
+fn default_opacity() -> f64 {
+    1.0
+}
+fn default_lsb_bits() -> u8 {
+    1
+}
+fn default_backend() -> String {
+    "ed25519".into()
+}
+fn default_overlay_text() -> String {
+    "CONFIDENTIAL".into()
+}
+fn default_sign_rate() -> u32 {
+    1000
+}
+fn default_qr_scale() -> u32 {
+    10
+}
+fn default_resolution() -> String {
+    "640x480".into()
+}
+fn default_stego_type() -> String {
+    "lsb".into()
+}
+fn default_hash_algo() -> String {
+    "blake3".into()
+}
 
 impl Default for LiveConfig {
     fn default() -> Self {
@@ -113,6 +126,10 @@ pub struct DashboardState {
     /// Shared secret token for authenticating mutating API calls.
     /// If `None`, auth is disabled (local-only mode).
     pub auth_token: Option<String>,
+    /// OpenTimestamps configuration (opt-in; disabled by default).
+    pub ots_config: OtsConfig,
+    /// OTS client, present only when OTS is enabled in the config.
+    pub ots_client: Option<Arc<OTSClient>>,
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -120,21 +137,55 @@ static DOCS: &[(&str, &str)] = &[
     ("README.md", include_str!("../../docs/README.md")),
     ("AGENTS.md", include_str!("../../docs/AGENTS.md")),
     ("algorithms.md", include_str!("../../docs/algorithms.md")),
-    ("api-reference.md", include_str!("../../docs/api-reference.md")),
-    ("architecture.md", include_str!("../../docs/architecture.md")),
-    ("cli-reference.md", include_str!("../../docs/cli-reference.md")),
-    ("configuration.md", include_str!("../../docs/configuration.md")),
-    ("contributing.md", include_str!("../../docs/contributing.md")),
-    ("cryptography.md", include_str!("../../docs/cryptography.md")),
+    (
+        "api-reference.md",
+        include_str!("../../docs/api-reference.md"),
+    ),
+    (
+        "architecture.md",
+        include_str!("../../docs/architecture.md"),
+    ),
+    (
+        "cli-reference.md",
+        include_str!("../../docs/cli-reference.md"),
+    ),
+    (
+        "configuration.md",
+        include_str!("../../docs/configuration.md"),
+    ),
+    (
+        "contributing.md",
+        include_str!("../../docs/contributing.md"),
+    ),
+    (
+        "cryptography.md",
+        include_str!("../../docs/cryptography.md"),
+    ),
     ("faq.md", include_str!("../../docs/faq.md")),
-    ("getting-started.md", include_str!("../../docs/getting-started.md")),
+    (
+        "getting-started.md",
+        include_str!("../../docs/getting-started.md"),
+    ),
     ("gstreamer.md", include_str!("../../docs/gstreamer.md")),
     ("platforms.md", include_str!("../../docs/platforms.md")),
     ("roadmap.md", include_str!("../../docs/roadmap.md")),
     ("security.md", include_str!("../../docs/security.md")),
-    ("steganography-theory.md", include_str!("../../docs/steganography-theory.md")),
-    ("threat-model.md", include_str!("../../docs/threat-model.md")),
-    ("key-rotation.md", include_str!("../../docs/key-rotation.md")),
+    (
+        "steganography-theory.md",
+        include_str!("../../docs/steganography-theory.md"),
+    ),
+    (
+        "ots-integration.md",
+        include_str!("../../docs/ots-integration.md"),
+    ),
+    (
+        "threat-model.md",
+        include_str!("../../docs/threat-model.md"),
+    ),
+    (
+        "key-rotation.md",
+        include_str!("../../docs/key-rotation.md"),
+    ),
 ];
 
 /// Create the Axum router for the dashboard.
@@ -150,6 +201,7 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/app.js", get(serve_js))
         .route("/audio_tab.js", get(serve_audio_js))
         .route("/docs_tab.js", get(serve_docs_js))
+        .route("/ots.js", get(serve_ots_js))
         .route("/ws/encode", get(ws_handler::ws_encode_handler))
         .route("/ws/decode", get(ws_handler::ws_decode_handler))
         .route("/ws/audio/encode", get(ws_handler::ws_audio_encode_handler))
@@ -161,6 +213,9 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/api/version", get(api_version))
         .route("/api/docs", get(api_docs_list))
         .route("/api/docs/{name}", get(api_docs_content))
+        .route("/ots/status", get(ots_status))
+        .route("/ots/stamp", axum::routing::post(ots_stamp))
+        .route("/ots/verify", axum::routing::post(ots_verify))
         .layer(cors)
         .with_state(state)
 }
@@ -174,11 +229,7 @@ fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) 
     if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth.to_str() {
             if let Some(bearer) = auth_str.strip_prefix("Bearer ") {
-                return subtle::ConstantTimeEq::ct_eq(
-                    bearer.as_bytes(),
-                    token.as_bytes(),
-                )
-                .into();
+                return subtle::ConstantTimeEq::ct_eq(bearer.as_bytes(), token.as_bytes()).into();
             }
         }
     }
@@ -195,7 +246,11 @@ fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) 
 pub async fn start_server(state: Arc<DashboardState>, port: u16, host: &str) -> anyhow::Result<()> {
     let app = create_router(state);
     let addr = format!("{}:{}", host, port);
-    log::info!("Dashboard starting at http://localhost:{} (bound to {})", port, host);
+    log::info!(
+        "Dashboard starting at http://localhost:{} (bound to {})",
+        port,
+        host
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -208,7 +263,10 @@ async fn serve_index() -> Html<&'static str> {
 }
 
 /// Serve the CSS stylesheet.
-async fn serve_css() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+async fn serve_css() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     (
         [(axum::http::header::CONTENT_TYPE, "text/css")],
         include_str!("static/style.css"),
@@ -216,7 +274,10 @@ async fn serve_css() -> ([(axum::http::header::HeaderName, &'static str); 1], &'
 }
 
 /// Serve the JavaScript application.
-async fn serve_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+async fn serve_js() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/app.js"),
@@ -224,7 +285,10 @@ async fn serve_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'s
 }
 
 /// Serve the Audio Tab JavaScript module.
-async fn serve_audio_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+async fn serve_audio_js() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/audio_tab.js"),
@@ -232,10 +296,24 @@ async fn serve_audio_js() -> ([(axum::http::header::HeaderName, &'static str); 1
 }
 
 /// Serve the Docs Tab JavaScript module.
-async fn serve_docs_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+async fn serve_docs_js() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     (
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("static/docs_tab.js"),
+    )
+}
+
+/// Serve the OpenTimestamps dashboard UI JavaScript module.
+async fn serve_ots_js() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("static/js/ots.js"),
     )
 }
 
@@ -261,15 +339,20 @@ async fn api_docs_content(
     for (doc_name, content) in DOCS.iter() {
         if *doc_name == name {
             return (
-                [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
                 *content,
-            ).into_response();
+            )
+                .into_response();
         }
     }
     (
         axum::http::StatusCode::NOT_FOUND,
         format!("Document '{}' not found", name),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// GET /api/config — return current config state.
@@ -323,7 +406,11 @@ async fn api_config_post(
 /// GET /api/session — return session summary stats for export.
 async fn api_session(State(state): State<Arc<DashboardState>>) -> String {
     let uptime = state.session_start.elapsed();
-    let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let cfg = state
+        .live_config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let metrics = state.metrics.to_json();
     serde_json::json!({
         "uptime_secs": uptime.as_secs_f64(),
@@ -362,4 +449,111 @@ async fn api_metrics_reset(
         axum::http::StatusCode::OK,
         serde_json::json!({ "status": "ok", "message": "Metrics reset" }).to_string(),
     )
+}
+
+// ─── OpenTimestamps endpoints ──────────────────────────────────────────────
+
+/// GET /ots/status — return the current OTS configuration and readiness.
+async fn ots_status(State(state): State<Arc<DashboardState>>) -> String {
+    let body = ots_handler::status_handler(&state.ots_config, state.ots_client.as_deref());
+    // If OTS is disabled, respond with HTTP 200 so the UI shows "disabled"
+    // gracefully rather than an error. The JSON body carries the real status.
+    body
+}
+
+/// POST /ots/stamp — stamp the current Merkle root (or request body) with OTS.
+///
+/// Accepts an optional binary body. If the body is empty, a placeholder
+/// Merkle root derived from the session start time is stamped so the
+/// endpoint is always usable from the dashboard's "Stamp Now" button.
+async fn ots_stamp(
+    State(state): State<Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, String) {
+    if !check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
+        );
+    }
+    let Some(client) = &state.ots_client else {
+        // Graceful degradation: not an error, just disabled.
+        return (
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "status": "disabled",
+                "message": "OTS is disabled in configuration",
+            })
+            .to_string(),
+        );
+    };
+
+    // Use the request body if provided, otherwise derive a deterministic
+    // digest from the session start so the endpoint is always callable.
+    let data: Vec<u8> = if body.is_empty() {
+        let elapsed = state.session_start.elapsed().as_secs().to_be_bytes().to_vec();
+        elapsed
+    } else {
+        body.to_vec()
+    };
+
+    match ots_handler::stamp_handler(client, &data).await {
+        Ok(json) => {
+            state.metrics.record_ots_proof();
+            (axum::http::StatusCode::OK, json)
+        }
+        Err(err) => {
+            let (status, body) = ots_handler::error_to_http(&err);
+            log::warn!("OTS stamp failed: {err}");
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                body,
+            )
+        }
+    }
+}
+
+/// POST /ots/verify — verify a `.ots` proof file sent as the request body.
+async fn ots_verify(
+    State(state): State<Arc<DashboardState>>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, String) {
+    let Some(client) = &state.ots_client else {
+        return (
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "status": "disabled",
+                "message": "OTS is disabled in configuration",
+            })
+            .to_string(),
+        );
+    };
+
+    if body.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({ "status": "error", "message": "empty proof body" }).to_string(),
+        );
+    }
+
+    match ots_handler::verify_handler(client, &body).await {
+        Ok(json) => {
+            // Record the verification outcome in metrics for the WS stream.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                let verified = v.get("verified").and_then(|x| x.as_bool()).unwrap_or(false);
+                let ts = v.get("timestamp").and_then(|x| x.as_u64());
+                state.metrics.record_ots_verification(verified, ts);
+            }
+            (axum::http::StatusCode::OK, json)
+        }
+        Err(err) => {
+            let (status, body_str) = ots_handler::error_to_http(&err);
+            log::warn!("OTS verify failed: {err}");
+            (
+                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                body_str,
+            )
+        }
+    }
 }

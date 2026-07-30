@@ -32,7 +32,10 @@ pub fn init() -> anyhow::Result<()> {
     }
 
     gstreamer::init()?;
-    log::info!("GStreamer initialized: version {}", gstreamer::version_string());
+    log::info!(
+        "GStreamer initialized: version {}",
+        gstreamer::version_string()
+    );
     Ok(())
 }
 
@@ -47,7 +50,10 @@ fn init_macos() {
     extern "C" {
         fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
         fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
-        fn objc_msgSend(obj: *mut std::ffi::c_void, sel: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn objc_msgSend(
+            obj: *mut std::ffi::c_void,
+            sel: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
     }
 
     unsafe {
@@ -68,7 +74,10 @@ pub fn run_macos_main_loop() {
     extern "C" {
         fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
         fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
-        fn objc_msgSend(obj: *mut std::ffi::c_void, sel: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn objc_msgSend(
+            obj: *mut std::ffi::c_void,
+            sel: *mut std::ffi::c_void,
+        ) -> *mut std::ffi::c_void;
     }
 
     unsafe {

@@ -2,10 +2,14 @@
 
 use clap::{Parser, Subcommand};
 
+mod carrier_binding;
 mod cmd_audio;
 mod cmd_encode;
+mod cmd_ots;
+mod cmd_packet;
 mod cmd_verify;
 mod cmd_video;
+mod media_io;
 
 #[derive(Parser)]
 #[command(
@@ -85,6 +89,12 @@ enum Commands {
         /// Input file format: "raw_rgb", "raw_s16le", "png", "wav" (auto-detected if omitted)
         #[arg(long)]
         input_format: Option<String>,
+        /// Width for headerless raw RGB input (requires --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Height for headerless raw RGB input (requires --width)
+        #[arg(long)]
+        height: Option<u32>,
         /// Enable payload encryption (ChaCha20-Poly1305)
         #[arg(long)]
         encrypt: bool,
@@ -94,6 +104,12 @@ enum Commands {
         /// Path to encryption key file
         #[arg(long)]
         encryption_key_file: Option<String>,
+        /// Embedding key (hex-encoded, 32 bytes) for keyed audio/spread-spectrum placement
+        #[arg(long)]
+        embedding_key: Option<String>,
+        /// Path to a hex-encoded 32-byte embedding key file
+        #[arg(long)]
+        embedding_key_file: Option<String>,
         /// Enable Reed-Solomon error correction
         #[arg(long)]
         ecc: bool,
@@ -112,6 +128,41 @@ enum Commands {
         /// Batch mode: process all files in the input directory
         #[arg(long)]
         dir: bool,
+        /// Embed an arbitrary file in the opt-in generic packet v1 alpha
+        #[arg(long, conflicts_with = "payload_text")]
+        payload_file: Option<String>,
+        /// Embed UTF-8 text in the opt-in generic packet v1 alpha
+        #[arg(long, conflicts_with = "payload_file")]
+        payload_text: Option<String>,
+        /// Public MIME type for a generic packet payload
+        #[arg(long)]
+        mime_type: Option<String>,
+        /// Safe display filename for a generic packet payload
+        #[arg(long)]
+        filename: Option<String>,
+    },
+
+    /// Decode an opt-in generic packet payload from a carrier
+    Decode {
+        #[arg(long, short)]
+        input: String,
+        #[arg(long, short)]
+        output: String,
+        /// Generic carrier kernel (currently lsb_video)
+        #[arg(long, default_value = "lsb_video")]
+        stego_type: String,
+        /// LSB bits per unit: "auto" or 1-4
+        #[arg(long, default_value = "auto")]
+        bits: String,
+        /// Output format: "plain" or "json"
+        #[arg(long, default_value = "plain")]
+        format: String,
+        /// Input format: raw_rgb or png/image (auto-detected if omitted)
+        #[arg(long)]
+        input_format: Option<String>,
+        /// Replace an existing decoded payload output
+        #[arg(long)]
+        force: bool,
     },
 
     /// Verify steganographic signatures in a media file
@@ -127,12 +178,24 @@ enum Commands {
         /// Embedding key (hex-encoded, 32 bytes) for audio/spread-spectrum extraction
         #[arg(long)]
         embedding_key: Option<String>,
+        /// Path to a hex-encoded 32-byte embedding key file
+        #[arg(long)]
+        embedding_key_file: Option<String>,
+        /// LSB bits per sample/pixel: "auto" or 1-4
+        #[arg(long, default_value = "auto")]
+        bits: String,
         /// Output format: "plain" (human-readable) or "json" (machine-readable)
         #[arg(long, default_value = "plain")]
         format: String,
         /// Input file format: "raw_rgb", "raw_s16le", "png", "wav" (auto-detected if omitted)
         #[arg(long)]
         input_format: Option<String>,
+        /// Width for headerless raw RGB input (requires --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Height for headerless raw RGB input (requires --width)
+        #[arg(long)]
+        height: Option<u32>,
         /// Enable payload decryption (ChaCha20-Poly1305)
         #[arg(long)]
         decrypt: bool,
@@ -175,14 +238,20 @@ enum Commands {
         /// Output format: "plain" (human-readable) or "json" (machine-readable)
         #[arg(long, default_value = "plain")]
         format: String,
+        /// Width for headerless raw RGB input (requires --height)
+        #[arg(long)]
+        width: Option<u32>,
+        /// Height for headerless raw RGB input (requires --width)
+        #[arg(long)]
+        height: Option<u32>,
     },
 
-    /// Analyze a file for steganographic artifacts (chi-squared test)
+    /// Analyze a file for steganographic artifacts
     Analyze {
         #[arg(long, short)]
         input: String,
-        /// Analysis type: "chi_squared" (default)
-        #[arg(long, default_value = "chi_squared")]
+        /// Analysis type: "combined" (default), "chi_squared", "sample_pairs", or "rs"
+        #[arg(long, default_value = "combined")]
         analysis_type: String,
         /// Output format: "plain" or "json"
         #[arg(long, default_value = "plain")]
@@ -238,6 +307,46 @@ enum Commands {
         #[arg(default_value = "check")]
         action: String,
     },
+
+    /// OpenTimestamps attestation: stamp or verify a file's Merkle root
+    Ots {
+        #[command(subcommand)]
+        action: OtsAction,
+    },
+}
+
+/// Subcommands for `steganographer ots`.
+#[derive(Subcommand)]
+enum OtsAction {
+    /// Stamp a file's BLAKE3 Merkle root with the OpenTimestamps service
+    Stamp {
+        #[arg(long, short)]
+        input: String,
+        /// Directory for .ots proof files (default: from config or ./ots_proofs/)
+        #[arg(long)]
+        output_dir: Option<String>,
+        /// Attestation method: "bitcoin" (default) or "ethereum"
+        #[arg(long)]
+        method: Option<String>,
+        /// Re-stamp even if a proof already exists for this digest
+        #[arg(long)]
+        force: bool,
+        /// Output format: "plain" or "json"
+        #[arg(long, default_value = "plain")]
+        format: String,
+    },
+
+    /// Verify an OpenTimestamps proof for a file
+    Verify {
+        #[arg(long, short)]
+        input: String,
+        /// Path to the .ots proof file
+        #[arg(long)]
+        proof: String,
+        /// Output format: "plain" or "json"
+        #[arg(long, default_value = "plain")]
+        format: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -265,71 +374,198 @@ fn main() -> anyhow::Result<()> {
     log::info!("Config: {}", cli.config);
 
     match cli.command {
-        Commands::Video { source, sink, max_frames, signing_key } => {
-            cmd_video::run(&cli.config, source, sink, max_frames, signing_key)
-        }
+        Commands::Video {
+            source,
+            sink,
+            max_frames,
+            signing_key,
+        } => cmd_video::run(&cli.config, source, sink, max_frames, signing_key),
 
-        Commands::Audio { source, sink, max_buffers, signing_key } => {
-            cmd_audio::run(&cli.config, source, sink, max_buffers, signing_key)
-        }
+        Commands::Audio {
+            source,
+            sink,
+            max_buffers,
+            signing_key,
+        } => cmd_audio::run(&cli.config, source, sink, max_buffers, signing_key),
 
         Commands::Encode {
-            input, output, stego_type, bits, format,
-            input_format, encrypt, encryption_key, encryption_key_file,
-            ecc, ecc_parity, spread, hash_algorithm, signing_key, dir,
+            input,
+            output,
+            stego_type,
+            bits,
+            format,
+            input_format,
+            width,
+            height,
+            encrypt,
+            encryption_key,
+            encryption_key_file,
+            embedding_key,
+            embedding_key_file,
+            ecc,
+            ecc_parity,
+            spread,
+            hash_algorithm,
+            signing_key,
+            dir,
+            payload_file,
+            payload_text,
+            mime_type,
+            filename,
         } => {
             let opts = cmd_encode::EncodeOptions {
                 encrypt,
                 encryption_key,
                 encryption_key_file,
+                embedding_key,
+                embedding_key_file,
                 ecc,
                 ecc_parity,
                 spread,
                 hash_algorithm,
                 signing_key,
                 input_format,
+                raw_width: width,
+                raw_height: height,
             };
-            if dir {
-                cmd_encode::batch_process(&cli.config, &input, &output, &stego_type, bits, &format, &opts)
+            if payload_file.is_some() || payload_text.is_some() {
+                if dir {
+                    anyhow::bail!("generic packet encoding does not support --dir");
+                }
+                if opts.encrypt
+                    || opts.ecc
+                    || opts.spread > 1
+                    || opts.signing_key.is_some()
+                    || opts.embedding_key.is_some()
+                    || opts.embedding_key_file.is_some()
+                {
+                    anyhow::bail!(
+                        "generic packet alpha does not yet support encryption, ECC, \
+                         signing, keyed placement, or multi-frame spreading"
+                    );
+                }
+                cmd_packet::encode(
+                    &input,
+                    &output,
+                    &stego_type,
+                    bits,
+                    &format,
+                    &cmd_packet::GenericEncodeOptions {
+                        payload_file,
+                        payload_text,
+                        mime_type,
+                        filename,
+                        input_format: opts.input_format.clone(),
+                    },
+                )
+            } else if dir {
+                cmd_encode::batch_process(
+                    &cli.config,
+                    &input,
+                    &output,
+                    &stego_type,
+                    bits,
+                    &format,
+                    &opts,
+                )
             } else {
-                cmd_encode::run(&cli.config, &input, &output, &stego_type, bits, &format, &opts)
+                cmd_encode::run(
+                    &cli.config,
+                    &input,
+                    &output,
+                    &stego_type,
+                    bits,
+                    &format,
+                    &opts,
+                )
             }
         }
 
+        Commands::Decode {
+            input,
+            output,
+            stego_type,
+            bits,
+            format,
+            input_format,
+            force,
+        } => cmd_packet::decode(
+            &input,
+            &output,
+            &stego_type,
+            &bits,
+            &format,
+            input_format.as_deref(),
+            force,
+        ),
+
         Commands::Verify {
-            input, public_key, stego_type, embedding_key, format,
-            input_format, decrypt, decryption_key, decryption_key_file,
-            ecc, ecc_parity, spread, hash_algorithm,
+            input,
+            public_key,
+            stego_type,
+            embedding_key,
+            embedding_key_file,
+            bits,
+            format,
+            input_format,
+            width,
+            height,
+            decrypt,
+            decryption_key,
+            decryption_key_file,
+            ecc,
+            ecc_parity,
+            spread,
+            hash_algorithm,
         } => {
             let opts = cmd_verify::VerifyOptions {
+                bits: cmd_verify::VerifyBits::parse(&bits)?,
                 decrypt,
                 decryption_key,
                 decryption_key_file,
+                embedding_key_file,
                 ecc,
                 ecc_parity,
                 spread,
                 hash_algorithm,
                 input_format,
+                raw_width: width,
+                raw_height: height,
             };
             cmd_verify::run_with_key(
-                &cli.config, &input, public_key.as_deref(),
-                &stego_type, &format, embedding_key.as_deref(), &opts,
+                &cli.config,
+                &input,
+                public_key.as_deref(),
+                &stego_type,
+                &format,
+                embedding_key.as_deref(),
+                &opts,
             )
         }
 
-        Commands::Keygen { output } => {
-            cmd_encode::keygen(&output)
-        }
+        Commands::Keygen { output } => cmd_encode::keygen(&output),
 
-        Commands::Info { input, stego_type, bits, format } => {
-            cmd_encode::info(&input, &stego_type, bits, &format)
-        }
+        Commands::Info {
+            input,
+            stego_type,
+            bits,
+            format,
+            width,
+            height,
+        } => cmd_encode::info(&input, &stego_type, bits, &format, width, height),
 
-        Commands::Analyze { input, analysis_type, format } => {
-            cmd_encode::analyze(&input, &analysis_type, &format)
-        }
+        Commands::Analyze {
+            input,
+            analysis_type,
+            format,
+        } => cmd_encode::analyze(&input, &analysis_type, &format),
 
-        Commands::Derive { master_secret, master_secret_file, master_secret_stdin, output } => {
+        Commands::Derive {
+            master_secret,
+            master_secret_file,
+            master_secret_stdin,
+            output,
+        } => {
             // Resolve the master secret from one of three sources
             let secret_hex = if master_secret_stdin {
                 use std::io::Read;
@@ -337,9 +573,7 @@ fn main() -> anyhow::Result<()> {
                 std::io::stdin().read_to_string(&mut buf)?;
                 buf.trim().to_string()
             } else if let Some(path) = master_secret_file {
-                std::fs::read_to_string(&path)?
-                    .trim()
-                    .to_string()
+                std::fs::read_to_string(&path)?.trim().to_string()
             } else if let Some(s) = master_secret {
                 log::warn!(
                     "Reading master secret from --master-secret (visible in shell history / ps). \
@@ -398,11 +632,36 @@ fn main() -> anyhow::Result<()> {
             _ => anyhow::bail!("Unknown config action: {}. Use 'check'.", action),
         },
 
-        Commands::Revoke { public_key, output } => {
-            cmd_encode::revoke_key(&public_key, &output)
-        }
+        Commands::Revoke { public_key, output } => cmd_encode::revoke_key(&public_key, &output),
 
-        Commands::Dashboard { port, backend, host, auth_token } => {
+        Commands::Ots { action } => match action {
+            OtsAction::Stamp {
+                input,
+                output_dir,
+                method,
+                force,
+                format,
+            } => cmd_ots::stamp(
+                &cli.config,
+                &input,
+                output_dir.as_deref(),
+                method.as_deref(),
+                force,
+                &format,
+            ),
+            OtsAction::Verify {
+                input,
+                proof,
+                format,
+            } => cmd_ots::verify(&cli.config, &input, &proof, &format),
+        },
+
+        Commands::Dashboard {
+            port,
+            backend,
+            host,
+            auth_token,
+        } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
 
@@ -414,10 +673,27 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
-            let identity_backend: Box<dyn steganographer_core::SignerBackend> = match backend.as_str() {
-                #[cfg(feature = "ethereum")]
-                "ethereum" => Box::new(steganographer_core::EthereumBackend::generate()),
-                _ => Box::new(steganographer_core::Ed25519Backend::generate()),
+            let identity_backend: Box<dyn steganographer_core::SignerBackend> =
+                match backend.as_str() {
+                    #[cfg(feature = "ethereum")]
+                    "ethereum" => Box::new(steganographer_core::EthereumBackend::generate()),
+                    _ => Box::new(steganographer_core::Ed25519Backend::generate()),
+                };
+
+            // Load OTS configuration from the config file (opt-in feature).
+            let ots_config = steganographer_core::config::Config::from_file(&cli.config)
+                .map(|c| c.ots_config())
+                .unwrap_or_default();
+            let ots_client = if ots_config.is_enabled() {
+                log::info!(
+                    "OTS enabled: method={}, server={}, interval={}s",
+                    ots_config.method_canonical(),
+                    ots_config.server_url,
+                    ots_config.interval_secs
+                );
+                Some(std::sync::Arc::new(steganographer_core::OTSClient::from_config(&ots_config)))
+            } else {
+                None
             };
 
             let state = Arc::new(steganographer_dashboard::DashboardState {
@@ -431,9 +707,16 @@ fn main() -> anyhow::Result<()> {
                 live_config: std::sync::Mutex::new(steganographer_dashboard::LiveConfig::default()),
                 session_start: std::time::Instant::now(),
                 auth_token,
+                ots_config,
+                ots_client,
             });
 
-            log::info!("Starting dashboard on {}:{} with {} backend", host, port, backend);
+            log::info!(
+                "Starting dashboard on {}:{} with {} backend",
+                host,
+                port,
+                backend
+            );
             log::info!("Identity: {}", identity_backend.display_identity());
 
             let rt = tokio::runtime::Runtime::new()?;

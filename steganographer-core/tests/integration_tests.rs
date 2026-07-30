@@ -1508,16 +1508,24 @@ fn test_dct_embed_extract_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 320, height: 320, stride: 320 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+            width: 320,
+            height: 320,
+            stride: 320 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
         };
         dct.embed(&mut frame, Some(&payload)).unwrap();
     }
 
     {
         let frame = VideoFrame {
-            width: 320, height: 320, stride: 320 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+            width: 320,
+            height: 320,
+            stride: 320 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
         };
         let extracted = dct.extract(&frame).unwrap();
         assert!(extracted.is_some(), "DCT should extract payload");
@@ -1540,13 +1548,18 @@ fn test_dct_visual_distortion_is_minimal() {
 
     {
         let mut frame = VideoFrame {
-            width: 320, height: 320, stride: 320 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+            width: 320,
+            height: 320,
+            stride: 320 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
         };
         dct.embed(&mut frame, Some(&payload)).unwrap();
     }
 
-    let total_diff: u64 = data.iter()
+    let total_diff: u64 = data
+        .iter()
         .zip(original.iter())
         .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64)
         .sum();
@@ -1570,16 +1583,24 @@ fn test_spread_spectrum_video_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 1024, height: 1024, stride: 1024 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 42,
+            width: 1024,
+            height: 1024,
+            stride: 1024 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 42,
         };
         ss.embed(&mut frame, Some(&payload)).unwrap();
     }
 
     {
         let frame = VideoFrame {
-            width: 1024, height: 1024, stride: 1024 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 42,
+            width: 1024,
+            height: 1024,
+            stride: 1024 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 42,
         };
         let extracted = ss.extract(&frame).unwrap();
         assert!(extracted.is_some());
@@ -1601,16 +1622,20 @@ fn test_spread_spectrum_audio_roundtrip() {
 
     {
         let mut buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         ss.embed(&mut buf, Some(&payload)).unwrap();
     }
 
     {
         let buf = AudioBuffer {
-            channels: 1, sample_rate: 44100,
-            samples: &mut samples, frame_index: 0,
+            channels: 1,
+            sample_rate: 44100,
+            samples: &mut samples,
+            frame_index: 0,
         };
         let extracted = ss.extract(&buf).unwrap();
         assert!(extracted.is_some());
@@ -1792,16 +1817,24 @@ fn test_adaptive_lsb_roundtrip() {
 
     {
         let mut frame = VideoFrame {
-            width: 320, height: 320, stride: 320 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+            width: 320,
+            height: 320,
+            stride: 320 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
         };
         adaptive.embed(&mut frame, Some(&payload)).unwrap();
     }
 
     {
         let frame = VideoFrame {
-            width: 320, height: 320, stride: 320 * 3,
-            format: VideoFormat::Rgb8, data: &mut data, frame_index: 0,
+            width: 320,
+            height: 320,
+            stride: 320 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
         };
         let extracted = adaptive.extract(&frame).unwrap();
         assert!(extracted.is_some(), "Adaptive LSB should extract payload");
