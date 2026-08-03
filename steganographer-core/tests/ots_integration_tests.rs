@@ -6,11 +6,13 @@
 //! (`127.0.0.1:1`) so they fail fast and deterministically, or use the
 //! synchronous save/load/parse paths that never touch the network.
 
-use steganographer_core::ots_config::{OtsConfig, OtsSettings, DEFAULT_INTERVAL_SECS, DEFAULT_PROOF_DIR, DEFAULT_SERVER_URL};
-use steganographer_core::ots_handler;
-use steganographer_core::{OTSClient, OTSError, OTSMethod, OTSVResult};
 use std::path::PathBuf;
 use std::time::Duration;
+use steganographer_core::ots_config::{
+    OtsConfig, OtsSettings, DEFAULT_INTERVAL_SECS, DEFAULT_PROOF_DIR, DEFAULT_SERVER_URL,
+};
+use steganographer_core::ots_handler;
+use steganographer_core::{OTSClient, OTSError, OTSMethod, OTSVResult};
 
 // ─── OTSConfig ───────────────────────────────────────────────────────────
 
@@ -49,7 +51,10 @@ timeout_secs = 15
 "#;
     let cfg: OtsConfig = toml::from_str(toml_str).unwrap();
     assert!(cfg.is_enabled());
-    assert_eq!(cfg.server_url, "https://alice.btc.calendar.opentimestamps.org");
+    assert_eq!(
+        cfg.server_url,
+        "https://alice.btc.calendar.opentimestamps.org"
+    );
     assert_eq!(cfg.method, "ethereum");
     assert_eq!(cfg.interval_secs, 600);
     assert_eq!(cfg.proof_dir, "/var/ots");
@@ -171,8 +176,7 @@ fn test_client_with_proof_dir_override() {
 
 #[test]
 fn test_client_with_server_url_override() {
-    let client = OTSClient::new(OTSMethod::Bitcoin)
-        .with_server_url("https://custom.ots.server/");
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_server_url("https://custom.ots.server/");
     // The trailing slash is stripped internally.
     let debug = format!("{client:?}");
     assert!(debug.contains("custom.ots.server"));
@@ -182,15 +186,13 @@ fn test_client_with_server_url_override() {
 
 #[test]
 fn test_can_stamp_fresh_client() {
-    let client = OTSClient::new(OTSMethod::Bitcoin)
-        .with_min_interval(Duration::from_secs(3600));
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_min_interval(Duration::from_secs(3600));
     assert!(client.can_stamp(), "fresh client should permit stamping");
 }
 
 #[test]
 fn test_cannot_stamp_within_interval() {
-    let client = OTSClient::new(OTSMethod::Bitcoin)
-        .with_min_interval(Duration::from_secs(3600));
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_min_interval(Duration::from_secs(3600));
     client.mark_stamped();
     assert!(
         !client.can_stamp(),
@@ -200,8 +202,7 @@ fn test_cannot_stamp_within_interval() {
 
 #[test]
 fn test_can_stamp_zero_interval() {
-    let client = OTSClient::new(OTSMethod::Bitcoin)
-        .with_min_interval(Duration::from_secs(0));
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_min_interval(Duration::from_secs(0));
     assert!(client.can_stamp());
     client.mark_stamped();
     assert!(client.can_stamp(), "zero interval always permits");
@@ -235,7 +236,10 @@ fn test_save_and_load_proof_roundtrip() {
     let digest_hex = "abcdef0123456789";
     let path = client.save_proof(&proof, digest_hex).unwrap();
     assert!(path.exists());
-    assert_eq!(path.file_name().unwrap().to_str().unwrap(), "abcdef0123456789.ots");
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        "abcdef0123456789.ots"
+    );
 
     let loaded = OTSClient::load_proof(&path).unwrap();
     assert_eq!(loaded, proof);
@@ -244,8 +248,7 @@ fn test_save_and_load_proof_roundtrip() {
 
 #[test]
 fn test_save_proof_creates_missing_dir() {
-    let tmp = std::env::temp_dir()
-        .join(format!("ots_it_{}_nested/deep/dir", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("ots_it_{}_nested/deep/dir", std::process::id()));
     let client = OTSClient::new(OTSMethod::Bitcoin).with_proof_dir(&tmp);
     let proof = b"PROOF".to_vec();
     let path = client.save_proof(&proof, "deadbeef").unwrap();
@@ -257,8 +260,10 @@ fn test_save_proof_creates_missing_dir() {
 
 #[test]
 fn test_save_proof_to_explicit_path() {
-    let tmp = std::env::temp_dir()
-        .join(format!("ots_it_{}_explicit/sub/proof.ots", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!(
+        "ots_it_{}_explicit/sub/proof.ots",
+        std::process::id()
+    ));
     let client = OTSClient::new(OTSMethod::Bitcoin);
     let proof = b"EXPLICIT_PROOF".to_vec();
     let written = client.save_proof_to(&proof, &tmp).unwrap();
@@ -272,8 +277,7 @@ fn test_save_proof_to_explicit_path() {
 
 #[test]
 fn test_proof_path_for_digest() {
-    let client =
-        OTSClient::new(OTSMethod::Bitcoin).with_proof_dir(PathBuf::from("/tmp/ots_it"));
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_proof_dir(PathBuf::from("/tmp/ots_it"));
     let path = client.proof_path_for("abc123");
     assert_eq!(path, PathBuf::from("/tmp/ots_it/abc123.ots"));
 }
@@ -319,7 +323,10 @@ fn test_stamp_digest_dead_endpoint_errors() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        matches!(err, OTSError::Http(_) | OTSError::Network(_) | OTSError::ServiceUnavailable(_)),
+        matches!(
+            err,
+            OTSError::Http(_) | OTSError::Network(_) | OTSError::ServiceUnavailable(_)
+        ),
         "expected network-class error, got {err:?}"
     );
 }
@@ -342,8 +349,7 @@ fn test_verify_short_proof_errors() {
 
 #[test]
 fn test_verify_dead_endpoint_errors() {
-    let client = OTSClient::new(OTSMethod::Bitcoin)
-        .with_server_url("http://127.0.0.1:1");
+    let client = OTSClient::new(OTSMethod::Bitcoin).with_server_url("http://127.0.0.1:1");
     let fake_proof = vec![0u8; 100]; // long enough to pass the size check
     let result = block_on(client.verify(&fake_proof));
     assert!(result.is_err());
@@ -407,10 +413,19 @@ fn test_handler_error_to_http_all_variants() {
     let cases = vec![
         (OTSError::ServiceUnavailable("x".into()), 503u16),
         (OTSError::Network("x".into()), 503),
-        (OTSError::ServerStatus { status: 500, body: "x".into() }, 502),
+        (
+            OTSError::ServerStatus {
+                status: 500,
+                body: "x".into(),
+            },
+            502,
+        ),
         (OTSError::InvalidProof("x".into()), 400),
         (OTSError::VerificationFailed("x".into()), 422),
-        (OTSError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")), 500),
+        (
+            OTSError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
+            500,
+        ),
     ];
     for (err, expected) in cases {
         let (status, body) = ots_handler::error_to_http(&err);

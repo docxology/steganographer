@@ -373,6 +373,61 @@ pub fn correction_capability(parity_count: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// `ALPHA` must be a *primitive* element of GF(2⁸) under the AES
+    /// polynomial `0x11B`, i.e. have multiplicative order exactly 255, so that
+    /// `alpha^0 .. alpha^(n-1)` are distinct for every supported codeword
+    /// length.
+    ///
+    /// This guards a real bug: `ALPHA` used to be `2`, whose order is only 51.
+    /// Codewords longer than 51 symbols reused evaluation points, which made
+    /// Lagrange interpolation degenerate and silently broke the 104-byte
+    /// signature payload. Changing `ALPHA` is also a wire-format change, so if
+    /// this test ever fails, bump `crypto::FORMAT_VERSION` too.
+    #[test]
+    fn alpha_is_primitive() {
+        // No smaller power may return to 1.
+        let mut x: u8 = 1;
+        for exponent in 1..255u32 {
+            x = gf_mul(x, ALPHA);
+            assert_ne!(
+                x, 1,
+                "ALPHA = {ALPHA} has order {exponent}, not 255 — it is not a \
+                 primitive element, so evaluation points repeat after \
+                 {exponent} symbols"
+            );
+        }
+        // ...and alpha^255 must be 1.
+        assert_eq!(gf_mul(x, ALPHA), 1, "alpha^255 must equal 1");
+    }
+
+    /// All evaluation points used by a maximum-length codeword are distinct.
+    /// This is the property `alpha_is_primitive` exists to protect, asserted
+    /// directly.
+    #[test]
+    fn evaluation_points_are_distinct_at_max_length() {
+        let mut seen = vec![false; 256];
+        for i in 0..MAX_CODEWORD_LEN {
+            let point = gf_pow(ALPHA, i as u32);
+            assert!(
+                !seen[point as usize],
+                "evaluation point {point} repeats at index {i}"
+            );
+            seen[point as usize] = true;
+        }
+    }
+
+    /// The real steganographic payload is 104 bytes of RS-protected data
+    /// (`SignaturePayload::SERIALIZED_SIZE` less its 5-byte magic+version
+    /// header). This is the size that regressed when `ALPHA` was non-primitive,
+    /// so pin it explicitly rather than relying on short-payload tests.
+    #[test]
+    fn round_trip_at_real_payload_size() {
+        let data: Vec<u8> = (0..104u32).map(|i| (i * 37 + 11) as u8).collect();
+        let encoded = encode(&data, 4).unwrap();
+        assert_eq!(encoded.len(), 108);
+        assert_eq!(decode(&encoded, data.len(), 4).unwrap(), data);
+    }
+
     #[test]
     fn no_errors() {
         let data = b"Hello, steganography!";

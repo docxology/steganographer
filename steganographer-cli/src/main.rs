@@ -691,7 +691,9 @@ fn main() -> anyhow::Result<()> {
                     ots_config.server_url,
                     ots_config.interval_secs
                 );
-                Some(std::sync::Arc::new(steganographer_core::OTSClient::from_config(&ots_config)))
+                Some(std::sync::Arc::new(
+                    steganographer_core::OTSClient::from_config(&ots_config),
+                ))
             } else {
                 None
             };

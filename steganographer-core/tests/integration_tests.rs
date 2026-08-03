@@ -5,7 +5,7 @@
 
 use steganographer_core::audio::{AudioBuffer, AudioStegoModule};
 use steganographer_core::config::Config;
-use steganographer_core::crypto::{SignaturePayload, Signer, Verifier};
+use steganographer_core::crypto::{SignaturePayload, Signer, Verifier, FORMAT_VERSION};
 use steganographer_core::lsb_audio::LsbAudio;
 use steganographer_core::lsb_video::LsbVideo;
 use steganographer_core::overlay::{OverlayPosition, TextOverlay};
@@ -929,9 +929,9 @@ fn test_signature_payload_from_invalid_bytes() {
     // Construct valid-length buffer with correct magic+version but zeroed payload
     let mut buf = [0u8; 109];
     buf[0..4].copy_from_slice(b"STEG");
-    buf[4] = 2; // FORMAT_VERSION
-                // frame_index = 0, hash = zeros, signature = zeros
-                // from_bytes should parse without error (Signature::from_bytes accepts any 64 bytes)
+    buf[4] = FORMAT_VERSION;
+    // frame_index = 0, hash = zeros, signature = zeros
+    // from_bytes should parse without error (Signature::from_bytes accepts any 64 bytes)
     let result = SignaturePayload::from_bytes(&buf);
     assert!(result.is_ok());
 }
@@ -941,7 +941,7 @@ fn test_signature_payload_from_bad_magic_fails() {
     // Wrong magic header should fail
     let mut buf = [0u8; 109];
     buf[0..4].copy_from_slice(b"XXXX");
-    buf[4] = 2;
+    buf[4] = FORMAT_VERSION;
     let result = SignaturePayload::from_bytes(&buf);
     assert!(result.is_err());
 }
