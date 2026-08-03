@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **RS wire-format break now cleanly rejected instead of silently misdecoded.**
+  The `v0.7.0` change from `ALPHA = 2` to `ALPHA = 3` altered the Reed-Solomon
+  evaluation points, but `SignaturePayload::FORMAT_VERSION` was left at `2`. A
+  payload written by a pre-`v0.7.0` build is stamped `FORMAT_VERSION = 2`, so a
+  `v0.7.0` reader accepted it (`has_valid_magic` passed) and then decoded it with
+  the *wrong* evaluation points — producing corrupted output rather than an error.
+  Bumped `FORMAT_VERSION` to `3` so older payloads are now rejected loudly by both
+  `has_valid_magic` and `from_bytes`. There is no in-place migration path
+  (re-encode from source media).
+
+### Added
+
+- `error_correction` tests `alpha_is_primitive` and
+  `evaluation_points_are_distinct_at_max_length` — guard against `ALPHA` ever
+  regressing to a non-primitive element (its multiplicative order must be exactly
+  255). `round_trip_at_real_payload_size` pins the 104-byte signature payload
+  that broke when `ALPHA` was non-primitive.
+- `crypto` tests `stale_format_version_payload_is_rejected` and
+  `current_format_version_is_accepted` — tripwire ensuring a stale-version payload
+  is rejected and the current version accepted.
+
 ## [0.7.0] — 2026-07-30
 
 ### Added

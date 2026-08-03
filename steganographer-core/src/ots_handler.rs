@@ -91,9 +91,9 @@ pub fn error_to_http(err: &OTSError) -> (u16, String) {
         // treats all of these the same way (graceful degradation), so the
         // finer "unreachable" vs "unavailable" distinction is not useful to
         // callers. All map to HTTP 503.
-        OTSError::ServiceUnavailable(_)
-        | OTSError::Http(_)
-        | OTSError::Network(_) => (503, "unavailable"),
+        OTSError::ServiceUnavailable(_) | OTSError::Http(_) | OTSError::Network(_) => {
+            (503, "unavailable")
+        }
         OTSError::ServerStatus { .. } => (502, "server_error"),
         OTSError::InvalidProof(_) => (400, "invalid_proof"),
         OTSError::VerificationFailed(_) => (422, "verification_failed"),

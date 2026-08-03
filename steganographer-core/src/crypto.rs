@@ -26,7 +26,25 @@ use subtle::ConstantTimeEq;
 pub const MAGIC: [u8; 4] = *b"STEG";
 
 /// Current payload format version.
-pub const FORMAT_VERSION: u8 = 2;
+///
+/// # Version history
+///
+/// - `2` — Reed-Solomon codewords generated with `ALPHA = 2`.
+/// - `3` — Reed-Solomon codewords generated with `ALPHA = 3`.
+///
+/// `ALPHA` had to change because `2` is **not** a primitive element of GF(2⁸)
+/// under the AES polynomial `0x11B` (its multiplicative order is 51, not 255),
+/// which capped usable codewords at 51 symbols and silently broke the 104-byte
+/// signature payload. See `error_correction::ALPHA`.
+///
+/// That change alters the RS wire format: the evaluation points differ, so a
+/// codeword written by a `FORMAT_VERSION = 2` build decodes to garbage under
+/// `ALPHA = 3`. The version bump is what makes that failure *loud* — a v2
+/// payload is now rejected by [`SignaturePayload::has_valid_magic`] and
+/// [`SignaturePayload::from_bytes`] instead of being accepted and misdecoded.
+///
+/// There is no in-place migration path; re-encode from the source media.
+pub const FORMAT_VERSION: u8 = 3;
 
 /// Configurable hash algorithm for frame data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +373,42 @@ impl Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A payload written by an older build must be *rejected*, not silently
+    /// misdecoded.
+    ///
+    /// `FORMAT_VERSION` was bumped 2 → 3 alongside the Reed-Solomon `ALPHA`
+    /// 2 → 3 change. That change alters the RS evaluation points, so a v2
+    /// codeword decodes to garbage under the current code. If the version
+    /// constant is ever reverted or left behind while the wire format moves,
+    /// `has_valid_magic` would start accepting incompatible payloads again —
+    /// this test is the tripwire for that.
+    #[test]
+    fn stale_format_version_payload_is_rejected() {
+        let mut buf = [0u8; SignaturePayload::SERIALIZED_SIZE];
+        buf[0..4].copy_from_slice(&MAGIC);
+        buf[4] = 2; // previous format version
+
+        assert!(
+            !SignaturePayload::has_valid_magic(&buf),
+            "a FORMAT_VERSION=2 payload must not be accepted by a \
+             FORMAT_VERSION={FORMAT_VERSION} build — the RS wire format \
+             changed with ALPHA, so accepting it means silent corruption"
+        );
+        assert!(
+            SignaturePayload::from_bytes(&buf).is_err(),
+            "parsing a stale-version payload must fail loudly"
+        );
+    }
+
+    /// The current version stamp round-trips through `has_valid_magic`.
+    #[test]
+    fn current_format_version_is_accepted() {
+        let mut buf = [0u8; SignaturePayload::SERIALIZED_SIZE];
+        buf[0..4].copy_from_slice(&MAGIC);
+        buf[4] = FORMAT_VERSION;
+        assert!(SignaturePayload::has_valid_magic(&buf));
+    }
 
     #[test]
     fn test_sign_and_verify() {

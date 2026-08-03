@@ -15,7 +15,7 @@ use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use steganographer_core::ots_handler;
-use steganographer_core::{OtsConfig, OTSClient, StegoMetrics};
+use steganographer_core::{OTSClient, OtsConfig, StegoMetrics};
 use tower_http::cors::CorsLayer;
 
 use ws_handler::{EncodedAudioChunk, EncodedFrame};
@@ -492,7 +492,12 @@ async fn ots_stamp(
     // Use the request body if provided, otherwise derive a deterministic
     // digest from the session start so the endpoint is always callable.
     let data: Vec<u8> = if body.is_empty() {
-        let elapsed = state.session_start.elapsed().as_secs().to_be_bytes().to_vec();
+        let elapsed = state
+            .session_start
+            .elapsed()
+            .as_secs()
+            .to_be_bytes()
+            .to_vec();
         elapsed
     } else {
         body.to_vec()
@@ -507,7 +512,8 @@ async fn ots_stamp(
             let (status, body) = ots_handler::error_to_http(&err);
             log::warn!("OTS stamp failed: {err}");
             (
-                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                axum::http::StatusCode::from_u16(status)
+                    .unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
                 body,
             )
         }
@@ -551,7 +557,8 @@ async fn ots_verify(
             let (status, body_str) = ots_handler::error_to_http(&err);
             log::warn!("OTS verify failed: {err}");
             (
-                axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                axum::http::StatusCode::from_u16(status)
+                    .unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
                 body_str,
             )
         }
