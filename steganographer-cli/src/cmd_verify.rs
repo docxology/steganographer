@@ -239,6 +239,8 @@ pub fn run_with_key(
         stego_type,
         embedding_key.as_ref(),
         opts,
+        &hash_algo,
+        public_key_hex,
     )?;
     let (raw_data, detected_bits) = match extracted {
         Some(extracted) => (extracted.bytes, extracted.lsb_bits),
@@ -500,6 +502,12 @@ struct ExtractedPayload {
 }
 
 /// Extract raw payload bytes from media.
+///
+/// `public_key_hex` and `hash_algo` are threaded through only so auto-mode
+/// LSB extraction can *verify* each candidate strength against the real public
+/// key and pick the bits value that genuinely validates, instead of the first
+/// strength whose bytes merely parse. Without a key, candidates are matched by
+/// magic only (the historical behaviour).
 fn extract_payload(
     data: &[u8],
     width: u32,
@@ -507,23 +515,40 @@ fn extract_payload(
     stego_type: &str,
     embedding_key: Option<&[u8; 32]>,
     opts: &VerifyOptions,
+    hash_algo: &HashAlgorithm,
+    public_key_hex: Option<&str>,
 ) -> anyhow::Result<Option<ExtractedPayload>> {
     match stego_type {
         "lsb_video" => {
             let mut fallback = None;
+            let mut verified: Option<ExtractedPayload> = None;
             for &bits in opts.bits.candidates() {
                 if let Some(bytes) = extract_raw_lsb_video(data, bits)? {
                     let extracted = ExtractedPayload {
                         bytes,
                         lsb_bits: Some(bits),
                     };
-                    if candidate_has_valid_signature(&extracted.bytes, opts) {
-                        return Ok(Some(extracted));
+                    // Prefer the candidate whose signature actually validates
+                    // against the public key, since only the bits value used at
+                    // encode time canonicalizes to the signed carrier.
+                    if verify_extracted_bits(
+                        data,
+                        &extracted.bytes,
+                        bits,
+                        width,
+                        height,
+                        extracted.bytes.len(),
+                        opts,
+                        hash_algo,
+                        public_key_hex,
+                    ) {
+                        verified = Some(extracted);
+                        break;
                     }
                     fallback.get_or_insert(extracted);
                 }
             }
-            Ok(fallback)
+            Ok(verified.or(fallback))
         }
         "lsb_audio" => {
             let key = embedding_key.ok_or_else(|| {
@@ -537,19 +562,31 @@ fn extract_payload(
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let mut fallback = None;
+            let mut verified: Option<ExtractedPayload> = None;
             for &bits in opts.bits.candidates() {
                 if let Some(bytes) = extract_raw_lsb_audio(&samples, bits, key)? {
                     let extracted = ExtractedPayload {
                         bytes,
                         lsb_bits: Some(bits),
                     };
-                    if candidate_has_valid_signature(&extracted.bytes, opts) {
-                        return Ok(Some(extracted));
+                    if verify_extracted_bits(
+                        data,
+                        &extracted.bytes,
+                        bits,
+                        width,
+                        height,
+                        extracted.bytes.len(),
+                        opts,
+                        hash_algo,
+                        public_key_hex,
+                    ) {
+                        verified = Some(extracted);
+                        break;
                     }
                     fallback.get_or_insert(extracted);
                 }
             }
-            Ok(fallback)
+            Ok(verified.or(fallback))
         }
         "spread_spectrum_video" => {
             let key = embedding_key.ok_or_else(|| {
@@ -624,6 +661,68 @@ fn candidate_has_valid_signature(raw_data: &[u8], opts: &VerifyOptions) -> bool 
 fn has_signature_payload(data: &[u8]) -> bool {
     data.len() >= SignaturePayload::SERIALIZED_SIZE
         && SignaturePayload::has_valid_magic(&data[..SignaturePayload::SERIALIZED_SIZE])
+}
+
+/// Perform the *full* signature verification for a candidate extraction, using
+/// `bits` as the LSB strength for carrier canonicalization.
+///
+/// The public key, when present, lets us disambiguate which LSB strength was
+/// actually used at encode time: only the correct `bits` canonicalizes the
+/// carrier to the bytes that were signed, so `verifier.verify` succeeds for
+/// exactly one candidate. Auto-mode extraction relies on this to report the
+/// right `lsb_bits` instead of the first strength that merely yielded a
+/// magic-matching buffer.
+fn verify_extracted_bits(
+    data: &[u8],
+    raw_data: &[u8],
+    bits: u8,
+    width: u32,
+    height: u32,
+    embedded_len: usize,
+    opts: &VerifyOptions,
+    hash_algo: &HashAlgorithm,
+    public_key_hex: Option<&str>,
+) -> bool {
+    let payload_data = match apply_ecc_transform(raw_data, opts) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    if payload_data.len() < SignaturePayload::SERIALIZED_SIZE {
+        return false;
+    }
+    let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
+    arr.copy_from_slice(&payload_data[..SignaturePayload::SERIALIZED_SIZE]);
+    if !SignaturePayload::has_valid_magic(&arr) {
+        return false;
+    }
+    let payload = match SignaturePayload::from_bytes(&arr) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let canonical =
+        match carrier_binding::canonicalize(data, "lsb_video", bits, width, height, embedded_len) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+    match public_key_hex {
+        Some(pk_hex) => {
+            let pk_bytes = match hex_decode(pk_hex) {
+                Ok(b) => b,
+                Err(_) => return false,
+            };
+            if pk_bytes.len() != 32 {
+                return false;
+            }
+            let mut pk_arr = [0u8; 32];
+            pk_arr.copy_from_slice(&pk_bytes);
+            let verifier = match ed25519_dalek::VerifyingKey::from_bytes(&pk_arr) {
+                Ok(k) => Verifier::with_hash_algorithm(k, *hash_algo),
+                Err(_) => return false,
+            };
+            verifier.verify(&payload, &canonical, None)
+        }
+        None => true,
+    }
 }
 
 fn apply_ecc_transform(raw_data: &[u8], opts: &VerifyOptions) -> anyhow::Result<Vec<u8>> {
