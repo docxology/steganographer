@@ -163,6 +163,72 @@ fn test_keygen_creates_keypair() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
+fn test_lsb_video_encode_verify_roundtrip_with_ecc_auto_bits() {
+    // Regression: encode with a non-default LSB strength (2) and ECC, then
+    // verify with --bits auto. Auto detection must pick the correct strength
+    // (not just the first that parses) or the carrier canonicalization uses the
+    // wrong low-bit mask and verification reports "invalid".
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("input.rgb");
+    let key_prefix = tmp.path().join("test_key");
+    create_test_rgb(input.to_str().unwrap());
+
+    run_cli(&["keygen", "--output", key_prefix.to_str().unwrap()]);
+    let key_path = format!("{}.key", key_prefix.display());
+    let pub_path = format!("{}.pub", key_prefix.display());
+    let pub_key = std::fs::read_to_string(&pub_path)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let output = tmp.path().join("output.rgb");
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--stego-type",
+        "lsb_video",
+        "--bits",
+        "2",
+        "--ecc",
+        "--ecc-parity",
+        "4",
+        "--signing-key",
+        &key_path,
+    ]);
+    assert_eq!(code, 0, "encode failed: stdout={stdout}, stderr={stderr}");
+
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        output.to_str().unwrap(),
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "lsb_video",
+        "--bits",
+        "auto",
+        "--ecc",
+        "--ecc-parity",
+        "4",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "verify failed: stdout={stdout}, stderr={stderr}");
+    let result = assert_valid_verification(&stdout);
+    assert_eq!(
+        result["lsb_bits"], 2,
+        "auto-bits must detect the 2-bit encode"
+    );
+    assert_eq!(result["ecc_corrected"], true);
+}
+#[test]
 fn test_lsb_video_encode_verify_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let input = tmp.path().join("input.rgb");

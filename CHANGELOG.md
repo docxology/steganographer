@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **RS wire-format break now cleanly rejected instead of silently misdecoded.**
+- **`verify --bits auto` now detects the correct LSB strength and reports
+  `valid`.** When the encoder used a non-default LSB strength (e.g. `--bits 2`),
+  auto-detection tried each candidate `[1,2,3,4]` and returned the *first* that
+  merely parsed a magic-matching buffer. That buffer could come from the wrong
+  strength, so carrier canonicalization masked the wrong low bits and the
+  signature hash never matched — every `encode`/`verify` round-trip reported
+  `"status": "invalid"`. Auto-detection now *verifies* each candidate against
+  the public key and returns the strength that genuinely validates (falling back
+  to magic-only only when no key is supplied). Added
+  `test_lsb_video_encode_verify_roundtrip_with_ecc_auto_bits` pinning the
+  `--bits 2` + `--ecc` case.
+
   The `v0.7.0` change from `ALPHA = 2` to `ALPHA = 3` altered the Reed-Solomon
   evaluation points, but `SignaturePayload::FORMAT_VERSION` was left at `2`. A
   payload written by a pre-`v0.7.0` build is stamped `FORMAT_VERSION = 2`, so a
