@@ -541,6 +541,7 @@ fn extract_payload(
                         opts,
                         hash_algo,
                         public_key_hex,
+                        "lsb_video",
                     ) {
                         verified = Some(extracted);
                         break;
@@ -579,6 +580,7 @@ fn extract_payload(
                         opts,
                         hash_algo,
                         public_key_hex,
+                        "lsb_audio",
                     ) {
                         verified = Some(extracted);
                         break;
@@ -638,31 +640,6 @@ fn parse_key_32(value: &str, label: &str) -> anyhow::Result<[u8; 32]> {
     Ok(key)
 }
 
-fn candidate_has_valid_signature(raw_data: &[u8], opts: &VerifyOptions) -> bool {
-    let payload_data = match apply_ecc_transform(raw_data, opts) {
-        Ok(data) => data,
-        Err(_) => return false,
-    };
-    if has_signature_payload(&payload_data) {
-        return true;
-    }
-    if !opts.decrypt {
-        return false;
-    }
-    let key = match resolve_decryption_key(opts) {
-        Ok(key) => key,
-        Err(_) => return false,
-    };
-    encryption::decrypt(&key, 0, &payload_data, None)
-        .map(|plaintext| has_signature_payload(&plaintext))
-        .unwrap_or(false)
-}
-
-fn has_signature_payload(data: &[u8]) -> bool {
-    data.len() >= SignaturePayload::SERIALIZED_SIZE
-        && SignaturePayload::has_valid_magic(&data[..SignaturePayload::SERIALIZED_SIZE])
-}
-
 /// Perform the *full* signature verification for a candidate extraction, using
 /// `bits` as the LSB strength for carrier canonicalization.
 ///
@@ -682,6 +659,7 @@ fn verify_extracted_bits(
     opts: &VerifyOptions,
     hash_algo: &HashAlgorithm,
     public_key_hex: Option<&str>,
+    stego_type: &str,
 ) -> bool {
     let payload_data = match apply_ecc_transform(raw_data, opts) {
         Ok(d) => d,
@@ -700,7 +678,7 @@ fn verify_extracted_bits(
         Err(_) => return false,
     };
     let canonical =
-        match carrier_binding::canonicalize(data, "lsb_video", bits, width, height, embedded_len) {
+        match carrier_binding::canonicalize(data, stego_type, bits, width, height, embedded_len) {
             Ok(c) => c,
             Err(_) => return false,
         };

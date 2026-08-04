@@ -436,27 +436,37 @@ fn parse_verify_response(text: &str, default_method: OTSMethod) -> OTSVResult {
     let json: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_e) => {
-            // Some verification endpoints return plain text "OK" or similar.
-            // Treat a non-empty, non-JSON success body as verified=true.
+            // Some verification endpoints return plain text "OK". A non-JSON
+            // body cannot carry a blockchain attestation timestamp, so we
+            // cannot confirm verification from it. Fail closed: report it as
+            // unverified rather than trusting that any non-empty body equals
+            // a successful attestation.
             let trimmed = text.trim();
             if trimmed.is_empty() {
                 return parse_err("empty body");
             }
             return OTSVResult {
-                verified: true,
+                verified: false,
                 method: default_method.as_str().to_string(),
                 timestamp: None,
-                details: format!("verification succeeded (non-JSON body): {trimmed}"),
+                details: format!(
+                    "verification response was not confirmable (non-JSON body): {trimmed}"
+                ),
             };
         }
     };
 
+    // Fail closed: only report `verified: true` when the endpoint *affirmatively*
+    // signals success. A missing, null, or ambiguous field defaults to NOT
+    // verified. Defaulting to `true` here would let an error-shaped or
+    // uncooperative response (e.g. `{"error": "not found"}` returned with 200)
+    // masquerade as a valid on-chain attestation.
     let verified = json
         .get("verified")
         .and_then(|v| v.as_bool())
         .or_else(|| {
             // Some endpoints use "status": "verified" or "success": true.
-            let status = json.get("status").and_then(|v| v.as_str())?;
+            let status = json.get("status")?.as_str()?;
             Some(
                 status.eq_ignore_ascii_case("verified")
                     || status.eq_ignore_ascii_case("ok")
@@ -464,7 +474,7 @@ fn parse_verify_response(text: &str, default_method: OTSMethod) -> OTSVResult {
             )
         })
         .or_else(|| json.get("success").and_then(|v| v.as_bool()))
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let method = json
         .get("method")
@@ -636,8 +646,9 @@ mod tests {
 
     #[test]
     fn test_parse_verify_response_plain_text() {
+        // A plain-text body cannot carry a blockchain attestation — fail closed.
         let r = parse_verify_response("OK", OTSMethod::Bitcoin);
-        assert!(r.verified);
+        assert!(!r.verified);
         assert_eq!(r.method, "bitcoin");
         assert!(r.details.contains("non-JSON"));
     }
@@ -651,10 +662,41 @@ mod tests {
 
     #[test]
     fn test_parse_verify_response_attestations_nested() {
+        // A nested timestamp alone is not an affirmative success signal.
         let json = r#"{"attestations": [{"timestamp": 1234567890}]}"#;
         let r = parse_verify_response(json, OTSMethod::Bitcoin);
-        assert!(r.verified); // defaults to true when no explicit verified=false
+        assert!(
+            !r.verified,
+            "missing explicit verified=true must not be trusted"
+        );
         assert_eq!(r.timestamp, Some(1234567890));
+    }
+
+    #[test]
+    fn test_parse_verify_response_fails_closed_on_error_body() {
+        // An HTTP 200 with an error-shaped body must NOT report verified.
+        let json = r#"{"error": "not found"}"#;
+        let r = parse_verify_response(json, OTSMethod::Bitcoin);
+        assert!(!r.verified, "an error-shaped response must not attest");
+    }
+
+    #[test]
+    fn test_parse_verify_response_fails_closed_on_unknown_status() {
+        // A status value that is not an affirmative signal must NOT verify.
+        let json = r#"{"status": "pending"}"#;
+        let r = parse_verify_response(json, OTSMethod::Bitcoin);
+        assert!(!r.verified, "a non-success status must not attest");
+    }
+
+    #[test]
+    fn test_parse_verify_response_explicit_success_still_verifies() {
+        // Affirmative signals keep working after the fail-closed change.
+        let r = parse_verify_response(r#"{"verified": true}"#, OTSMethod::Bitcoin);
+        assert!(r.verified);
+        let r = parse_verify_response(r#"{"status": "VERIFIED"}"#, OTSMethod::Ethereum);
+        assert!(r.verified);
+        let r = parse_verify_response(r#"{"success": true}"#, OTSMethod::Bitcoin);
+        assert!(r.verified);
     }
 
     #[test]
