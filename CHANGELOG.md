@@ -30,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `has_valid_magic` and `from_bytes`. There is no in-place migration path
   (re-encode from source media).
 
+- **OpenTimestamps verification now fails closed.** `parse_verify_response`
+  previously defaulted `verified` to `true` whenever the endpoint returned an
+  HTTP 200 that carried no explicit `verified` / `status` / `success` field — an
+  error-shaped body (e.g. `{"error": "not found"}`) or any non-JSON plain-text
+  response would be reported as a confirmed on-chain attestation. The parser now
+  requires an *affirmative* success signal; ambiguous or non-JSON responses
+  report `verified: false`. Added `parse_verify_response` tests pinning the
+  fail-closed behavior.
+
+- **`verify --bits auto` canonicalizes audio with the audio mask.** Auto LSB
+  detection for `lsb_audio` routed through the video carrier-binding path, so
+  public-key–confirmed detection silently failed for audio and fell back to the
+  first magic-matching strength. `verify_extracted_bits` now takes the real
+  `stego_type` and canonicalizes with the matching low-bit mask.
+
+- Removed dead `candidate_has_valid_signature` / `has_signature_payload` helpers
+  (superseded by `verify_extracted_bits`) — clears unused-function build
+  warnings from `cargo build --all-targets`.
+
 ### Added
 
 - `error_correction` tests `alpha_is_primitive` and
