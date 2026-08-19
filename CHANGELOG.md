@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GStreamer is now feature-gated behind the CLI's `gst` feature (on by
+  default).** `steganographer-gst` and the `gstreamer` crate are optional
+  dependencies of `steganographer-cli`; the `video`/`audio` subcommands (and
+  their modules) compile only when `gst` is enabled. Building with
+  `cargo build -p steganographer-cli --no-default-features` produces a
+  GStreamer-free binary that keeps the offline `encode`/`decode`/`verify`/
+  `keygen`/`info`/`analyze`/`derive`/`revoke`/`config`/`dashboard`/`ots` and
+  generic-packet surfaces — unblocking `cargo install` on hosts without
+  GStreamer dev libraries. CI now builds the CLI `--no-default-features` to
+  keep the gate honest.
 - **Generic packet transform pipeline (`PKT-004` slice).** New
   `steganographer-core::transforms` applies opt-in Ed25519 payload signing,
   DEFLATE compression, ChaCha20-Poly1305 AEAD encryption, and chunked

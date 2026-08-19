@@ -71,8 +71,8 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
-      - name: Build core without GStreamer
-        run: cargo build -p steganographer-core --locked
+      - name: Build CLI without GStreamer (gst feature gate)
+        run: cargo build -p steganographer-cli --no-default-features --locked
 
       - name: Build release
         run: cargo build --workspace --release --locked

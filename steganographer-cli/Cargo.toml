@@ -11,12 +11,17 @@ name = "steganographer"
 path = "src/main.rs"
 
 [features]
-default = []
+# `gst` enables the live `video`/`audio` GStreamer pipelines. It is on by
+# default so the workspace build keeps full functionality; build with
+# `--no-default-features` for a GStreamer-free binary (offline
+# encode/decode/verify/keygen/dashboard and the packet/OTS surfaces).
+default = ["gst"]
 ethereum = ["steganographer-core/ethereum"]
+gst = ["dep:steganographer-gst", "dep:gstreamer"]
 
 [dependencies]
 steganographer-core = { path = "../steganographer-core" }
-steganographer-gst = { path = "../steganographer-gst" }
+steganographer-gst = { path = "../steganographer-gst", optional = true }
 steganographer-dashboard = { path = "../steganographer-dashboard" }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -30,7 +35,7 @@ image = { workspace = true }
 hound = "3.5"
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
-gstreamer = { version = "0.23", features = ["v1_22"] }
+gstreamer = { version = "0.23", features = ["v1_22"], optional = true }
 
 [build-dependencies]
 clap = { workspace = true }
