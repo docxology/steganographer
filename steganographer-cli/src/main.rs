@@ -8,6 +8,7 @@ mod cmd_audio;
 mod cmd_encode;
 mod cmd_ots;
 mod cmd_packet;
+mod cmd_scan;
 mod cmd_verify;
 #[cfg(feature = "gst")]
 mod cmd_video;
@@ -269,6 +270,9 @@ enum Commands {
         /// Height for headerless raw RGB input (requires --width)
         #[arg(long)]
         height: Option<u32>,
+        /// Embedding key (hex-encoded, 32 bytes) to report keyed-placement capacity
+        #[arg(long)]
+        embedding_key: Option<String>,
     },
 
     /// Analyze a file for steganographic artifacts
@@ -279,6 +283,24 @@ enum Commands {
         #[arg(long, default_value = "combined")]
         analysis_type: String,
         /// Output format: "plain" or "json"
+        #[arg(long, default_value = "plain")]
+        format: String,
+    },
+
+    /// Bounded forensic scan of a file or directory (structural + statistical detectors)
+    Scan {
+        #[arg(long, short)]
+        input: String,
+        /// Maximum directory depth (0 = the given directory's files only)
+        #[arg(long, default_value = "8")]
+        max_depth: u32,
+        /// Maximum number of files to scan
+        #[arg(long, default_value = "10000")]
+        max_files: usize,
+        /// Maximum bytes read per file (larger files are truncated)
+        #[arg(long, default_value = "67108864")]
+        max_bytes: usize,
+        /// Output format: "plain", "json", or "jsonl"
         #[arg(long, default_value = "plain")]
         format: String,
     },
@@ -620,13 +642,37 @@ fn main() -> anyhow::Result<()> {
             format,
             width,
             height,
-        } => cmd_encode::info(&input, &stego_type, bits, &format, width, height),
+            embedding_key,
+        } => cmd_encode::info(
+            &input,
+            &stego_type,
+            bits,
+            &format,
+            width,
+            height,
+            embedding_key.as_deref(),
+        ),
 
         Commands::Analyze {
             input,
             analysis_type,
             format,
         } => cmd_encode::analyze(&input, &analysis_type, &format),
+
+        Commands::Scan {
+            input,
+            max_depth,
+            max_files,
+            max_bytes,
+            format,
+        } => {
+            let code = cmd_scan::run(&input, max_depth, max_files, max_bytes, &format)
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error:#}");
+                    std::process::exit(2);
+                });
+            std::process::exit(code);
+        }
 
         Commands::Derive {
             master_secret,

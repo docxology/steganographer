@@ -361,7 +361,12 @@ steganographer info [OPTIONS]
 | `--input <PATH>` | `-i` | Required | Input file path |
 | `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
+| `--embedding-key <HEX>` | — | None | Report keyed-placement capacity (subtracts the recognition-tag units) |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` or `json` |
+
+For LSB kernels the JSON report also includes `generic_max_packet_bytes` and
+`generic_usable_units`, computed with the same descriptor/slot math the
+`encode`/`decode` kernels use.
 
 **Example**:
 
@@ -425,6 +430,39 @@ steganographer analyze --input signed.rgb
 
 # JSON output for CI integration
 steganographer analyze --input signed.rgb --format json
+```
+
+---
+
+### `scan` — Bounded Forensic Scan
+
+Run structural (entropy, magic-byte family, embedded signature/packet magic)
+and statistical (chi-squared, sample-pairs, RS) detectors over a file or
+recursively over a directory. Symlinks are never followed; recursion and per-file
+reads are bounded.
+
+```bash
+steganographer scan [OPTIONS] --input <PATH>
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--input <PATH>` | Required | File or directory to scan |
+| `--max-depth <N>` | `8` | Maximum directory depth (`0` = top-level files only) |
+| `--max-files <N>` | `10000` | Maximum number of files to scan |
+| `--max-bytes <N>` | `67108864` | Maximum bytes read per file (larger files truncated) |
+| `--format <FORMAT>` | `plain` | `plain`, `json`, or `jsonl` |
+
+`jsonl` writes one finding per line to stdout and the summary to stderr. The
+exit code is `0` when no findings are present, `1` when at least one file is
+flagged, and `2` on a usage error.
+
+```bash
+# Scan one file
+steganographer scan --input suspicious.png --format json
+
+# Recursively scan a directory, one finding per line
+steganographer scan --input ./exports --format jsonl
 ```
 
 ---
@@ -495,9 +533,9 @@ steganographer derive --password-file passphrase.txt \
 
 | Code | Meaning |
 | ---- | ------- |
-| 0    | Success |
-| 1    | Runtime error (I/O, config parse, pipeline failure) |
-| 2    | CLI argument error (missing required args, bad format) |
+| 0    | Success (for `scan`: no findings) |
+| 1    | Runtime error (I/O, config parse, pipeline failure); for `scan`: findings present |
+| 2    | CLI argument error (missing required args, bad format); for `scan`: usage error |
 
 ## Environment Variables
 

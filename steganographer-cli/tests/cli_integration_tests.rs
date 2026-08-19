@@ -1064,6 +1064,53 @@ fn test_png_info_uses_decoded_capacity_not_compressed_size() {
 }
 
 #[test]
+fn test_info_reports_exact_generic_packet_capacity() {
+    // `info` must report the same exact generic-packet capacity the encode
+    // kernel uses (FMT-001 / SUR-004), and keyed placement must subtract the
+    // recognition-tag units.
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("carrier.png");
+    create_test_png(&input, 96, 64);
+
+    let (code, stdout, stderr) = run_cli(&[
+        "info",
+        "--input",
+        input.to_str().unwrap(),
+        "--stego-type",
+        "lsb_video",
+        "--bits",
+        "2",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "info failed: stdout={stdout}, stderr={stderr}");
+    let result = parse_json(&stdout);
+    // 96*64*3 = 18432 bytes at 2 bits/byte = 36864 bits = 4608 bytes.
+    assert_eq!(result["generic_max_packet_bytes"], 4608);
+    assert_eq!(result["generic_usable_units"], 18432);
+    assert_eq!(result["generic_keyed"], false);
+
+    let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let (code, stdout, _) = run_cli(&[
+        "info",
+        "--input",
+        input.to_str().unwrap(),
+        "--stego-type",
+        "lsb_video",
+        "--bits",
+        "2",
+        "--embedding-key",
+        key,
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "keyed info failed: {stdout}");
+    let keyed = parse_json(&stdout);
+    assert_eq!(keyed["generic_keyed"], true);
+    assert_eq!(keyed["generic_max_packet_bytes"], 4600);
+}
+
+#[test]
 fn test_wav_roundtrip_preserves_source_specification() {
     let tmp = tempfile::tempdir().unwrap();
     let input = tmp.path().join("input.wav");
@@ -1862,4 +1909,61 @@ fn test_generic_packet_wav_audio_vertical_slice() {
         !no_key_out.exists(),
         "key-less audio decode must not write output"
     );
+}
+
+#[test]
+fn test_scan_detects_inline_packet_magic_and_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let embedded = tmp.path().join("embedded.bin");
+    std::fs::write(&embedded, b"prefix STG3 packet bytes").unwrap();
+
+    let (code, stdout, _) = run_cli(&[
+        "scan",
+        "--input",
+        embedded.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+    assert_eq!(code, 1, "a finding must exit 1: {stdout}");
+    let line: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(line["detected"], true);
+    assert_eq!(line["embedded_magic"], "generic_packet");
+}
+
+#[test]
+fn test_scan_directory_recurses_with_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let nested = tmp.path().join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+    for (i, dir) in [tmp.path(), &nested].iter().enumerate() {
+        let path = dir.join(format!("file{i}.bin"));
+        std::fs::write(&path, format!("secret STG3 payload {i}")).unwrap();
+    }
+
+    let (code, stdout, _) = run_cli(&[
+        "scan",
+        "--input",
+        tmp.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 1, "findings must exit 1: {stdout}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["summary"]["files_scanned"], 2);
+    assert_eq!(result["summary"]["findings"], 2);
+
+    // A depth bound of 0 scans only the top-level file.
+    let (code, stdout, _) = run_cli(&[
+        "scan",
+        "--input",
+        tmp.path().to_str().unwrap(),
+        "--max-depth",
+        "0",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 1, "top-level finding must exit 1: {stdout}");
+    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(result["summary"]["files_scanned"], 1);
+    assert_eq!(result["summary"]["findings"], 1);
 }

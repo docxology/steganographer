@@ -8,8 +8,8 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 `audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
-`hash_chain`, `steganalysis`, `mdct_audio`, `ots_client`, `ots_config`,
-`ots_handler`.
+`hash_chain`, `steganalysis`, `forensics`, `mdct_audio`, `ots_client`,
+`ots_config`, `ots_handler`.
 
 ### packet.rs
 

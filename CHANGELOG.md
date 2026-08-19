@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Forensic `scan` command and structural detectors (`FOR-001`/`FOR-002`/
+  `FOR-003`/`SUR-005`).** New `steganographer_core::forensics` adds Shannon
+  entropy, magic-byte file-family identification, and inline `STEG`/`STG3`
+  embedded-magic probes; `scan_bytes` combines them with the existing
+  statistical detectors. A new `scan` CLI subcommand runs the combined scan
+  over a file or a directory with bounded, non-following recursion, explicit
+  truncation, and `plain`/`json`/`jsonl` output. Exit codes are deterministic:
+  `0` clean, `1` findings, `2` usage error.
+- **Exact generic-packet capacity in `info` (`SUR-004`).** `info` now reports
+  `generic_max_packet_bytes` and `generic_usable_units` using the same
+  descriptor/slot math as the encode/decode kernels, and `--embedding-key`
+  reports keyed-placement capacity (subtracting the recognition-tag units).
 - **Post-write verification (`FMT-005`).** Generic packet `encode` now re-reads
   the written carrier and re-extracts it with the same kernel to confirm
   byte-identical packet recovery, so a writer that silently alters carrier LSBs

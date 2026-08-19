@@ -31,6 +31,7 @@ pub mod crypto;
 pub mod dct_video;
 pub mod encryption;
 pub mod error_correction;
+pub mod forensics;
 pub mod hash_chain;
 pub mod info_bar;
 pub mod kdf;
