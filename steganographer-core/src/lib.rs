@@ -44,6 +44,7 @@ pub mod ots_config;
 pub mod ots_handler;
 pub mod overlay;
 pub mod packet;
+pub mod password;
 pub mod signer_backend;
 pub mod spread_spectrum;
 pub mod steganalysis;
@@ -67,6 +68,7 @@ pub use packet::{
     AlgorithmDescriptor, DecodeLimits, ExtensionField, GenericPacket, GenericPacketCodec, Locator,
     OtsMetadata, PacketCodec, PacketEnvelope, PacketError, PayloadKind, SignaturePayloadCodec,
 };
+pub use password::{Argon2Params, PasswordKdfError};
 pub use signer_backend::{Ed25519Backend, Ed25519Verifier, SignerBackend};
 pub use spread_spectrum::{SpreadSpectrumAudio, SpreadSpectrumVideo};
 pub use steganalysis::{

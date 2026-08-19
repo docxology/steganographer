@@ -52,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Doc/CI accuracy sweep.** The test-count badge and every test summary
   (`README.md`, `AGENTS.md`, per-crate `README.md`/`AGENTS.md`, `docs/README.md`,
   `docs/getting-started.md`, `docs/contributing.md`) drifted from the real
-  count — 311 claimed versus 402 actually passing (core 351 = 238 unit + 113
-  integration, CLI 26, dashboard 23, gst 2). The CI badge job counted
+  count — 311 claimed versus 419 actually passing (core 366 = 253 unit + 113
+  integration, CLI 28, dashboard 23, gst 2). The CI badge job counted
   `#[test]` attributes with `grep`, which misses `#[tokio::test]` and
   macro-generated tests, so it could never converge on the real number. It now
   sums `cargo test --workspace` result lines. Also fixed the stale CLI
@@ -61,6 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Argon2id password-based key derivation (`PKT-007`).** New
+  `steganographer-core::password` module stretches human-chosen passwords with
+  Argon2id (RFC 9106) into a high-entropy master secret, then reuses the
+  existing domain-separated BLAKE3 `kdf::derive_all` for the signing/encryption/
+  embedding keys. Defaults are OWASP minimums (19 MiB, 2 iterations, 1 lane);
+  `Argon2Params::validate` enforces the algorithmic floor while
+  `meets_recommendation` exposes the stronger policy floor. The `derive` CLI
+  command gains `--password` / `--password-file` / `--password-stdin` plus
+  `--salt` / `--argon2-memory` / `--argon2-iterations` / `--argon2-parallelism`,
+  and warns when parameters fall below the recommendation.
+- `multi_frame::reconstruct` now validates that shards form a complete,
+  non-duplicated n-of-n cover (unique in-range `shard_index`, consistent
+  `total_shards`) and XORs in canonical shard order, so a duplicate/missing
+  shard is a clear error rather than a silent XOR-to-garbage. The module
+  docstring was corrected: it is XOR n-of-n sharing, **not** Shamir's Secret
+  Sharing (there is no `k < n` threshold recovery).
 - `error_correction` tests `alpha_is_primitive` and
   `evaluation_points_are_distinct_at_max_length` — guard against `ALPHA` ever
   regressing to a non-primitive element (its multiplicative order must be exactly

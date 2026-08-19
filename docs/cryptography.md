@@ -153,6 +153,31 @@ steganographer keygen --output mykey
 #          mykey.pub (64 hex chars = 32 bytes public key)
 ```
 
+### Key Derivation (KDF)
+
+A single master secret can derive all three working keys (signing,
+encryption, embedding) via BLAKE3's `derive_key` with fixed domain-separation
+context strings (`steganographer-signing-v1`, `steganographer-encryption-v1`,
+`steganographer-embedding-v1`). This is a **fast** KDF for already
+high-entropy material — it is *not* a password hashing function.
+
+For human-chosen passwords, Steganographer stretches the password with
+**Argon2id** (RFC 9106) before feeding the result through the same
+domain-separated derivation:
+
+| Property | Master secret (BLAKE3) | Password (Argon2id) |
+| --- | --- | --- |
+| Algorithm | BLAKE3 `derive_key` | Argon2id v0x13 |
+| Input | ≥ 32 bytes high-entropy | Any memorable password |
+| Salt | none (context-separated) | 128-bit random, must be persisted |
+| Default cost | — | 19 MiB / 2 iterations / 1 lane (OWASP minimums) |
+| Brute-force resistance | key-strength | memory-hard |
+| CLI | `derive --master-secret*` | `derive --password* --salt <hex>` |
+
+Argon2id parameters below the OWASP floor are accepted with a warning; the
+library rejects only *algorithmically invalid* parameters (memory < 8 KiB ×
+lanes, 0 iterations/lanes, output length outside 16–64 bytes).
+
 ---
 
 ## Pluggable Signing Backends

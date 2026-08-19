@@ -259,6 +259,7 @@ enum Commands {
     },
 
     /// Derive keys (signing, encryption, embedding) from a master secret
+    /// (high-entropy BLAKE3 KDF) or a human-chosen password (Argon2id)
     Derive {
         /// Master secret (hex-encoded, any length).
         /// WARNING: this is visible in shell history and `ps` output.
@@ -271,6 +272,29 @@ enum Commands {
         /// Read master secret from stdin (hex-encoded). Use `-` as the value.
         #[arg(long)]
         master_secret_stdin: bool,
+        /// Derive from a human-chosen password via Argon2id (memory-hard KDF).
+        /// WARNING: visible in shell history and `ps` output.
+        /// Prefer --password-file for interactive use.
+        #[arg(long)]
+        password: Option<String>,
+        /// Read the password from a file (raw bytes, trailing newline trimmed).
+        #[arg(long)]
+        password_file: Option<String>,
+        /// Read the password from stdin (raw bytes, trailing newline trimmed).
+        #[arg(long)]
+        password_stdin: bool,
+        /// Hex-encoded Argon2id salt (at least 16 bytes). Generated and printed if omitted.
+        #[arg(long)]
+        salt: Option<String>,
+        /// Argon2id memory cost in KiB (default 19456 = 19 MiB).
+        #[arg(long, default_value_t = steganographer_core::password::RECOMMENDED_MEMORY_KIB)]
+        argon2_memory: u32,
+        /// Argon2id iteration count (default 2).
+        #[arg(long, default_value_t = steganographer_core::password::RECOMMENDED_ITERATIONS)]
+        argon2_iterations: u32,
+        /// Argon2id parallelism / lane count (default 1).
+        #[arg(long, default_value_t = 1)]
+        argon2_parallelism: u32,
         /// Output directory for derived keys
         #[arg(long, short, default_value = "keys")]
         output: String,
@@ -564,44 +588,117 @@ fn main() -> anyhow::Result<()> {
             master_secret,
             master_secret_file,
             master_secret_stdin,
+            password,
+            password_file,
+            password_stdin,
+            salt,
+            argon2_memory,
+            argon2_iterations,
+            argon2_parallelism,
             output,
         } => {
-            // Resolve the master secret from one of three sources
-            let secret_hex = if master_secret_stdin {
-                use std::io::Read;
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf)?;
-                buf.trim().to_string()
-            } else if let Some(path) = master_secret_file {
-                std::fs::read_to_string(&path)?.trim().to_string()
-            } else if let Some(s) = master_secret {
-                log::warn!(
-                    "Reading master secret from --master-secret (visible in shell history / ps). \
-                     Consider --master-secret-file or --master-secret-stdin for better security."
-                );
-                s
-            } else {
-                anyhow::bail!(
-                    "No master secret provided. Use --master-secret <hex>, \
-                     --master-secret-file <path>, or --master-secret-stdin."
-                );
-            };
+            let master_mode =
+                master_secret.is_some() || master_secret_file.is_some() || master_secret_stdin;
+            let password_mode = password.is_some() || password_file.is_some() || password_stdin;
 
-            // Warn about low-entropy secrets (short hex strings are brute-forceable
-            // at BLAKE3 speed — this KDF is designed for already-high-entropy key
-            // material, not passphrases)
-            let raw_bytes = cmd_encode::hex_decode(&secret_hex)
-                .map_err(|e| anyhow::anyhow!("Master secret is not valid hex: {}", e))?;
-            if raw_bytes.len() < 32 {
-                log::warn!(
-                    "Master secret is only {} bytes — BLAKE3 derive_key is NOT a slow KDF. \
-                     Short or memorable passphrases can be brute-forced at hash speed. \
-                     Use at least 32 bytes (64 hex chars) of high-entropy random data.",
-                    raw_bytes.len()
+            if password_mode && master_mode {
+                anyhow::bail!(
+                    "Provide either a master secret (--master-secret*) or a password \
+                     (--password*), not both."
                 );
             }
 
-            cmd_encode::derive_keys(&secret_hex, &output)
+            if password_mode {
+                // Resolve the password from one of three sources (raw bytes).
+                let password_bytes = if password_stdin {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    std::io::stdin().read_to_end(&mut buf)?;
+                    buf
+                } else if let Some(path) = password_file {
+                    std::fs::read(&path)?
+                } else if let Some(pw) = password {
+                    log::warn!(
+                        "Reading password from --password (visible in shell history / ps). \
+                         Consider --password-file or --password-stdin for better security."
+                    );
+                    pw.into_bytes()
+                } else {
+                    anyhow::bail!(
+                        "No password provided. Use --password <text>, \
+                         --password-file <path>, or --password-stdin."
+                    );
+                };
+
+                // Trim a single trailing newline (e.g. heredoc / `printf`), which
+                // is common when piping or reading a file.
+                let password_bytes = password_bytes
+                    .strip_suffix(b"\n")
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or(password_bytes);
+
+                let params = steganographer_core::Argon2Params {
+                    memory_kib: argon2_memory,
+                    iterations: argon2_iterations,
+                    parallelism: argon2_parallelism,
+                    output_len: 32,
+                };
+                if !params.meets_recommendation() {
+                    log::warn!(
+                        "Argon2 parameters are below the OWASP recommendation \
+                         ({} MiB memory, {} iterations). Increase --argon2-memory / \
+                         --argon2-iterations for production secrets.",
+                        steganographer_core::password::RECOMMENDED_MEMORY_KIB / 1024,
+                        steganographer_core::password::RECOMMENDED_ITERATIONS
+                    );
+                }
+
+                cmd_encode::derive_keys_from_password(
+                    &password_bytes,
+                    salt.as_deref(),
+                    &params,
+                    &output,
+                )
+            } else {
+                // Resolve the master secret from one of three sources
+                let secret_hex = if master_secret_stdin {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf.trim().to_string()
+                } else if let Some(path) = master_secret_file {
+                    std::fs::read_to_string(&path)?.trim().to_string()
+                } else if let Some(s) = master_secret {
+                    log::warn!(
+                        "Reading master secret from --master-secret (visible in shell history / ps). \
+                         Consider --master-secret-file or --master-secret-stdin for better security."
+                    );
+                    s
+                } else {
+                    anyhow::bail!(
+                        "No master secret provided. Use --master-secret <hex>, \
+                         --master-secret-file <path>, --master-secret-stdin, or the \
+                         password options (--password/--password-file/--password-stdin)."
+                    );
+                };
+
+                // Warn about low-entropy secrets (short hex strings are brute-forceable
+                // at BLAKE3 speed — this KDF is designed for already-high-entropy key
+                // material, not passphrases)
+                let raw_bytes = cmd_encode::hex_decode(&secret_hex)
+                    .map_err(|e| anyhow::anyhow!("Master secret is not valid hex: {}", e))?;
+                if raw_bytes.len() < 32 {
+                    log::warn!(
+                        "Master secret is only {} bytes — BLAKE3 derive_key is NOT a slow KDF. \
+                         Short or memorable passphrases can be brute-forced at hash speed. \
+                         Use at least 32 bytes (64 hex chars) of high-entropy random data, \
+                         or use --password for Argon2id stretching.",
+                        raw_bytes.len()
+                    );
+                }
+
+                cmd_encode::derive_keys(&secret_hex, &output)
+            }
         }
 
         Commands::Config { action } => match action.as_str() {
