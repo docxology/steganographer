@@ -9,28 +9,34 @@
 //! Transform order is fixed and matches the platform plan
 //! ("sign logical content; compress; AEAD encrypt; ECC; embed"):
 //!
-//! 1. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
+//! 1. **Compression** — DEFLATE via `flate2`, recorded only when it actually
+//!    shrinks the payload.
+//! 2. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
 //!    [`crate::encryption`]. The ciphertext is bound to the packet identity
 //!    (packet id + payload kind + original length) as associated data, and the
 //!    packet nonce supplies 8 bytes of the encryption nonce so a fresh packet
 //!    never reuses a nonce.
-//! 2. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
+//! 3. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
 //!    [`crate::error_correction`], so payloads larger than the 255-symbol RS
 //!    codeword ceiling are covered by independent per-chunk codewords.
 //!
-//! Compression and payload signing are not yet implemented here; a decoder
-//! that meets an unknown *critical* transform fails closed with
+//! Payload signing is not yet implemented here; a decoder that meets an
+//! unknown *critical* transform fails closed with
 //! [`TransformError::UnsupportedTransform`].
+
+use std::io::{Read, Write};
 
 use crate::encryption::{self, EncryptionKey};
 use crate::error_correction;
-use crate::packet::{TransformDescriptor, FLAG_ENCRYPTED, FLAG_ERROR_CORRECTED};
+use crate::packet::{TransformDescriptor, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_ERROR_CORRECTED};
 use thiserror::Error;
 
 /// ChaCha20-Poly1305 AEAD transform.
 pub const TRANSFORM_AEAD_CHACHA20_POLY1305: u16 = 1;
 /// Chunked Reed-Solomon error-correction transform.
 pub const TRANSFORM_ECC_REED_SOLOMON: u16 = 2;
+/// DEFLATE compression transform.
+pub const TRANSFORM_COMPRESS_DEFLATE: u16 = 3;
 
 /// Default per-chunk Reed-Solomon data length (symbols). `239 + 16 parity`
 /// stays within the 255-symbol GF(2⁸) codeword ceiling.
@@ -89,6 +95,10 @@ pub enum TransformError {
     EncryptionFailed(String),
     #[error("decryption failed: {0}")]
     DecryptionFailed(String),
+    #[error("compression failed: {0}")]
+    CompressionFailed(String),
+    #[error("decompression failed: {0}")]
+    DecompressionFailed(String),
     #[error("error correction failed: {0}")]
     ErrorCorrectionFailed(String),
 }
@@ -101,19 +111,36 @@ pub fn is_encrypted(transforms: &[TransformDescriptor]) -> bool {
         .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305)
 }
 
-/// Apply encryption (optional) and error correction (optional) to a logical
-/// payload, returning the encoded body, the transform descriptors, and the
-/// locator flag bits to set.
+/// Apply compression (optional), encryption (optional), and error correction
+/// (optional) to a logical payload, returning the encoded body, the transform
+/// descriptors, and the locator flag bits to set.
 pub fn apply(
     payload: &[u8],
     context: &TransformContext<'_>,
+    compress: bool,
     encrypt_key: Option<&EncryptionKey>,
     ecc_parity: usize,
     ecc_chunk_len: usize,
 ) -> Result<(Vec<u8>, Vec<TransformDescriptor>, u16), TransformError> {
     let mut body = payload.to_vec();
-    let mut transforms = Vec::with_capacity(2);
+    let mut transforms = Vec::with_capacity(3);
     let mut flags = 0u16;
+
+    if compress {
+        let compressed = deflate_compress(&body)?;
+        // Record the transform only when it actually shrinks the payload;
+        // otherwise the descriptor would add overhead for no benefit.
+        if compressed.len() < body.len() {
+            body = compressed;
+            transforms.push(TransformDescriptor {
+                algorithm: TRANSFORM_COMPRESS_DEFLATE,
+                version: 1,
+                critical: true,
+                parameters: Vec::new(),
+            });
+            flags |= FLAG_COMPRESSED;
+        }
+    }
 
     if let Some(key) = encrypt_key {
         body = encryption::encrypt(key, context.frame_index(), &body, Some(&context.aad()))
@@ -169,6 +196,13 @@ pub fn reverse(
             TRANSFORM_ECC_REED_SOLOMON => {
                 let (parity, data_len, chunk_len) = parse_ecc_params(&transform.parameters)?;
                 body = ecc_decode(&body, data_len, parity, chunk_len)?;
+            }
+            TRANSFORM_COMPRESS_DEFLATE => {
+                // Compression is the first transform applied, so decompression
+                // is the last reversed; its output length must equal the
+                // logical payload length. `original_len + 1` bounds the read
+                // to reject a decompression bomb.
+                body = deflate_decompress(&body, original_len as usize)?;
             }
             other => {
                 return Err(if transform.critical {
@@ -261,6 +295,35 @@ fn ecc_decode(
     Ok(output)
 }
 
+/// DEFLATE-compress a byte slice.
+fn deflate_compress(data: &[u8]) -> Result<Vec<u8>, TransformError> {
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .map_err(|e| TransformError::CompressionFailed(e.to_string()))?;
+    encoder
+        .finish()
+        .map_err(|e| TransformError::CompressionFailed(e.to_string()))
+}
+
+/// DEFLATE-decompress a byte slice, bounded to `limit` bytes (inclusive) so a
+/// malicious or corrupt stream cannot expand into a decompression bomb.
+fn deflate_decompress(data: &[u8], limit: usize) -> Result<Vec<u8>, TransformError> {
+    let decoder = flate2::read::DeflateDecoder::new(data);
+    let mut output = Vec::new();
+    decoder
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut output)
+        .map_err(|e| TransformError::DecompressionFailed(e.to_string()))?;
+    if output.len() != limit {
+        return Err(TransformError::InvalidDescriptor(
+            "decompressed payload length does not match the envelope",
+        ));
+    }
+    Ok(output)
+}
+
 fn validate_ecc_params(parity: usize, chunk_len: usize) -> Result<(), TransformError> {
     if parity > MAX_ECC_PARITY {
         return Err(TransformError::InvalidDescriptor(
@@ -333,7 +396,7 @@ mod tests {
 
         let key = test_key();
         let (body, transforms, flags) =
-            apply(&payload, &ctx, Some(&key), 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+            apply(&payload, &ctx, false, Some(&key), 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert!(flags & FLAG_ENCRYPTED != 0);
         assert_eq!(transforms.len(), 1);
         assert_ne!(body, payload);
@@ -373,7 +436,7 @@ mod tests {
 
         let parity = 4;
         let (body, transforms, flags) =
-            apply(&payload, &ctx, None, parity, DEFAULT_ECC_CHUNK_LEN).unwrap();
+            apply(&payload, &ctx, false, None, parity, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert!(flags & FLAG_ERROR_CORRECTED != 0);
         assert_eq!(transforms.len(), 1);
 
@@ -403,11 +466,105 @@ mod tests {
 
         let key = test_key();
         let (body, transforms, flags) =
-            apply(&payload, &ctx, Some(&key), 8, DEFAULT_ECC_CHUNK_LEN).unwrap();
+            apply(&payload, &ctx, false, Some(&key), 8, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert_eq!(flags, FLAG_ENCRYPTED | FLAG_ERROR_CORRECTED);
         assert_eq!(transforms.len(), 2);
         assert_eq!(transforms[0].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
         assert_eq!(transforms[1].algorithm, TRANSFORM_ECC_REED_SOLOMON);
+
+        let recovered =
+            reverse(&body, &ctx, Some(&key), &transforms, payload.len() as u64).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn compression_roundtrip_shrinks_and_reverses() {
+        let payload = vec![b'a'; 1000]; // highly compressible
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+
+        let (body, transforms, flags) =
+            apply(&payload, &ctx, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        assert!(flags & FLAG_COMPRESSED != 0);
+        assert_eq!(transforms.len(), 1);
+        assert_eq!(transforms[0].algorithm, TRANSFORM_COMPRESS_DEFLATE);
+        assert!(body.len() < payload.len(), "DEFLATE must shrink 1000 'a's");
+
+        let recovered = reverse(&body, &ctx, None, &transforms, payload.len() as u64).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn compression_of_incompressible_data_is_skipped() {
+        // Deterministic pseudorandom bytes via a BLAKE3 hash chain; DEFLATE
+        // cannot shrink this, so the transform must not be recorded.
+        let mut data = Vec::new();
+        let mut seed = b"compress test seed".to_vec();
+        while data.len() < 256 {
+            let digest = blake3::hash(&seed);
+            data.extend_from_slice(digest.as_bytes());
+            seed = digest.as_bytes().to_vec();
+        }
+        data.truncate(256);
+
+        let packet = GenericPacket::new_untransformed(
+            data.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+
+        let (body, transforms, flags) =
+            apply(&data, &ctx, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        assert_eq!(
+            flags & FLAG_COMPRESSED,
+            0,
+            "incompressible data must not be flagged"
+        );
+        assert!(transforms.is_empty());
+        assert_eq!(body, data);
+    }
+
+    #[test]
+    fn compress_encrypt_ecc_compose_in_canonical_order() {
+        let payload = vec![b'b'; 600];
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let key = test_key();
+
+        let (body, transforms, flags) =
+            apply(&payload, &ctx, true, Some(&key), 4, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        assert_eq!(
+            flags,
+            FLAG_COMPRESSED | FLAG_ENCRYPTED | FLAG_ERROR_CORRECTED
+        );
+        assert_eq!(transforms.len(), 3);
+        assert_eq!(transforms[0].algorithm, TRANSFORM_COMPRESS_DEFLATE);
+        assert_eq!(transforms[1].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
+        assert_eq!(transforms[2].algorithm, TRANSFORM_ECC_REED_SOLOMON);
 
         let recovered =
             reverse(&body, &ctx, Some(&key), &transforms, payload.len() as u64).unwrap();
@@ -431,6 +588,7 @@ mod tests {
         let (body, transforms, _) = apply(
             &payload,
             &context(&packet_a),
+            false,
             Some(&key),
             0,
             DEFAULT_ECC_CHUNK_LEN,

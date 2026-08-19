@@ -127,6 +127,7 @@ steganographer encode [OPTIONS]
 | `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
 | `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction (legacy signature or generic packet) |
 | `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
+| `--compress` | — | `false` | DEFLATE-compress a generic packet payload (recorded only if it shrinks) |
 | `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
 | `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
 | `--mime-type <TYPE>` | — | None | Public generic-packet MIME metadata |
@@ -156,9 +157,10 @@ steganographer encode -i cover.png -o packed.png \
 
 Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
 carrier behavior and prints the public key needed by `verify`. The generic
-packet path currently supports sequential `lsb_video` and the AEAD encryption
-(`--encrypt`) and chunked Reed-Solomon (`--ecc`) transforms; signing, keyed
-placement, and multi-frame spreading remain unsupported for generic packets.
+packet path currently supports sequential `lsb_video` and the DEFLATE
+(`--compress`), AEAD encryption (`--encrypt`), and chunked Reed-Solomon
+(`--ecc`) transforms; signing, keyed placement, and multi-frame spreading
+remain unsupported for generic packets.
 
 ---
 

@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-427_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-431_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 427 tests, 0 failures
+cargo test --workspace   # 431 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -133,7 +133,7 @@ Four Rust crates with strict dependency layering:
 | **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms | 372 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 2 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 30 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 31 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -223,20 +223,20 @@ bits = 2
 
 ## ✅ Tests
 
-427 tests across 4 crates — all passing:
+431 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 259 | `steganographer-core/src/*.rs` |
+| Core unit tests | 262 | `steganographer-core/src/*.rs` |
 | Core integration tests | 113 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
-| CLI unit + integration tests | 30 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
+| CLI unit + integration tests | 31 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **427** | **0 failures** |
+| **Total** | **431** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 427 tests
-cargo test -p steganographer-core     # Core only (372 tests)
+cargo test --workspace                # All 431 tests
+cargo test -p steganographer-core     # Core only (375 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 

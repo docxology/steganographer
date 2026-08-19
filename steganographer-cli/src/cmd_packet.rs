@@ -26,6 +26,7 @@ pub struct GenericEncodeOptions {
     pub encryption_key_file: Option<String>,
     pub ecc: bool,
     pub ecc_parity: usize,
+    pub compress: bool,
 }
 
 pub struct GenericDecodeOptions {
@@ -46,6 +47,7 @@ struct GenericEncodeResult {
     output: String,
     encrypted: bool,
     error_corrected: bool,
+    compressed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +66,7 @@ struct GenericDecodeResult {
     output: String,
     encrypted: bool,
     error_corrected: bool,
+    compressed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +167,7 @@ pub fn encode(
     let (encoded_body, transforms, flags) = transforms::apply(
         &packet.body,
         &context,
+        options.compress,
         encrypt_key.as_ref(),
         ecc_parity,
         DEFAULT_ECC_CHUNK_LEN,
@@ -172,6 +176,7 @@ pub fn encode(
     packet.body = encoded_body;
     packet.envelope.transforms = transforms;
     packet.locator.flags = flags;
+    let compressed = flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
 
     packet.envelope.mime_type = options.mime_type.clone();
     packet.envelope.filename = display_filename.clone();
@@ -192,6 +197,7 @@ pub fn encode(
         output: output.to_owned(),
         encrypted,
         error_corrected,
+        compressed,
         mime_type: options.mime_type.clone(),
         filename: display_filename,
     };
@@ -276,6 +282,8 @@ pub fn decode(
     let encrypted = report.packet.locator.flags & steganographer_core::packet::FLAG_ENCRYPTED != 0;
     let error_corrected =
         report.packet.locator.flags & steganographer_core::packet::FLAG_ERROR_CORRECTED != 0;
+    let compressed =
+        report.packet.locator.flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
 
     std::fs::write(output, &payload)?;
     let ots_meta =
@@ -303,6 +311,7 @@ pub fn decode(
         output: output.to_owned(),
         encrypted,
         error_corrected,
+        compressed,
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
         ots: ots_info,
@@ -415,8 +424,8 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
             result.packet_bytes, result.bits
         );
         println!(
-            "Transforms: encrypted={}, error_corrected={}",
-            result.encrypted, result.error_corrected
+            "Transforms: compressed={}, encrypted={}, error_corrected={}",
+            result.compressed, result.encrypted, result.error_corrected
         );
         println!("Encoded carrier: {}", result.output);
     }
@@ -435,8 +444,8 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
         );
         println!("Detected LSB strength: {}", result.bits);
         println!(
-            "Transforms: encrypted={}, error_corrected={}",
-            result.encrypted, result.error_corrected
+            "Transforms: compressed={}, encrypted={}, error_corrected={}",
+            result.compressed, result.encrypted, result.error_corrected
         );
         println!("Decoded payload: {}", result.output);
     }

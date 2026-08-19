@@ -52,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Doc/CI accuracy sweep.** The test-count badge and every test summary
   (`README.md`, `AGENTS.md`, per-crate `README.md`/`AGENTS.md`, `docs/README.md`,
   `docs/getting-started.md`, `docs/contributing.md`) drifted from the real
-  count — 311 claimed versus 427 actually passing (core 372 = 259 unit + 113
-  integration, CLI 30, dashboard 23, gst 2). The CI badge job counted
+  count — 311 claimed versus 431 actually passing (core 375 = 262 unit + 113
+  integration, CLI 31, dashboard 23, gst 2). The CI badge job counted
   `#[test]` attributes with `grep`, which misses `#[tokio::test]` and
   macro-generated tests, so it could never converge on the real number. It now
   sums `cargo test --workspace` result lines. Also fixed the stale CLI
@@ -62,16 +62,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Generic packet transform pipeline (`PKT-004` slice).** New
-  `steganographer-core::transforms` applies opt-in ChaCha20-Poly1305 AEAD
-  encryption and chunked Reed-Solomon error correction to a generic packet
-  body, records the ordered `TransformDescriptor`s in the envelope, and sets
-  the `FLAG_ENCRYPTED` / `FLAG_ERROR_CORRECTED` locator flags. The AEAD
-  ciphertext is bound to the packet identity (id + kind + length) as
-  associated data and seeded with the packet nonce, so a fresh packet never
-  reuses a nonce. Chunked RS lifts the 255-symbol codeword ceiling so
-  arbitrary payloads are covered. `encode --encrypt/--ecc` and
-  `decode --decrypt` now round-trip encrypted/ECC'd generic packets; unknown
-  critical transforms and missing decryption keys fail closed.
+  `steganographer-core::transforms` applies opt-in DEFLATE compression,
+  ChaCha20-Poly1305 AEAD encryption, and chunked Reed-Solomon error correction
+  to a generic packet body, records the ordered `TransformDescriptor`s in the
+  envelope, and sets the `FLAG_COMPRESSED` / `FLAG_ENCRYPTED` /
+  `FLAG_ERROR_CORRECTED` locator flags. The AEAD ciphertext is bound to the
+  packet identity (id + kind + length) as associated data and seeded with the
+  packet nonce, so a fresh packet never reuses a nonce. Chunked RS lifts the
+  255-symbol codeword ceiling so arbitrary payloads are covered, and
+  compression is recorded only when it actually shrinks the payload.
+  `encode --compress/--encrypt/--ecc` and `decode --decrypt` now round-trip
+  transformed generic packets; unknown critical transforms and missing
+  decryption keys fail closed.
 - **Argon2id password-based key derivation (`PKT-007`).** New
   `steganographer-core::password` module stretches human-chosen passwords with
   Argon2id (RFC 9106) into a high-entropy master secret, then reuses the

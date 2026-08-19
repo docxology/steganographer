@@ -28,6 +28,7 @@ log = { workspace = true }
 qrcode = "0.14"
 chrono = "0.4"
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+flate2 = "1"
 # Async HTTP client for the OpenTimestamps attestation REST API.
 reqwest = { workspace = true }
 
