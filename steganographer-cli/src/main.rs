@@ -470,13 +470,12 @@ fn main() -> anyhow::Result<()> {
                     anyhow::bail!("generic packet encoding does not support --dir");
                 }
                 if opts.spread > 1
-                    || opts.signing_key.is_some()
                     || opts.embedding_key.is_some()
                     || opts.embedding_key_file.is_some()
                 {
                     anyhow::bail!(
-                        "generic packet alpha does not yet support signing, keyed \
-                         placement, or multi-frame spreading"
+                        "generic packet alpha does not yet support keyed placement \
+                         or multi-frame spreading"
                     );
                 }
                 cmd_packet::encode(
@@ -497,6 +496,7 @@ fn main() -> anyhow::Result<()> {
                         ecc: opts.ecc,
                         ecc_parity: opts.ecc_parity,
                         compress,
+                        signing_key: opts.signing_key.clone(),
                     },
                 )
             } else if dir {

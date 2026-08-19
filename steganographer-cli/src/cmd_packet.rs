@@ -27,6 +27,7 @@ pub struct GenericEncodeOptions {
     pub ecc: bool,
     pub ecc_parity: usize,
     pub compress: bool,
+    pub signing_key: Option<String>,
 }
 
 pub struct GenericDecodeOptions {
@@ -48,6 +49,7 @@ struct GenericEncodeResult {
     encrypted: bool,
     error_corrected: bool,
     compressed: bool,
+    signed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +69,7 @@ struct GenericDecodeResult {
     encrypted: bool,
     error_corrected: bool,
     compressed: bool,
+    signed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,7 +149,8 @@ pub fn encode(
         &limits,
     )?;
 
-    // Apply opt-in transforms (AEAD encryption, chunked Reed-Solomon ECC).
+    // Apply opt-in transforms (sign, compress, AEAD encrypt, chunked RS ECC).
+    let signer = resolve_signing_key(options)?;
     let encrypt_key = resolve_encryption_key(options)?;
     let ecc_parity = if options.ecc { options.ecc_parity } else { 0 };
     if options.ecc && !(1..=steganographer_core::MAX_ECC_PARITY).contains(&ecc_parity) {
@@ -167,6 +171,7 @@ pub fn encode(
     let (encoded_body, transforms, flags) = transforms::apply(
         &packet.body,
         &context,
+        signer.as_ref(),
         options.compress,
         encrypt_key.as_ref(),
         ecc_parity,
@@ -177,6 +182,7 @@ pub fn encode(
     packet.envelope.transforms = transforms;
     packet.locator.flags = flags;
     let compressed = flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
+    let signed = flags & steganographer_core::packet::FLAG_PAYLOAD_SIGNED != 0;
 
     packet.envelope.mime_type = options.mime_type.clone();
     packet.envelope.filename = display_filename.clone();
@@ -198,6 +204,7 @@ pub fn encode(
         encrypted,
         error_corrected,
         compressed,
+        signed,
         mime_type: options.mime_type.clone(),
         filename: display_filename,
     };
@@ -284,6 +291,8 @@ pub fn decode(
         report.packet.locator.flags & steganographer_core::packet::FLAG_ERROR_CORRECTED != 0;
     let compressed =
         report.packet.locator.flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
+    let signed =
+        report.packet.locator.flags & steganographer_core::packet::FLAG_PAYLOAD_SIGNED != 0;
 
     std::fs::write(output, &payload)?;
     let ots_meta =
@@ -312,6 +321,7 @@ pub fn decode(
         encrypted,
         error_corrected,
         compressed,
+        signed,
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
         ots: ots_info,
@@ -345,6 +355,33 @@ fn bits_candidates(value: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("--bits must be 'auto' or an integer from 1 to 4"))?;
     EmbeddingConfig::new(bits)?;
     Ok(vec![bits])
+}
+
+fn resolve_signing_key(
+    options: &GenericEncodeOptions,
+) -> anyhow::Result<Option<ed25519_dalek::SigningKey>> {
+    let Some(path) = &options.signing_key else {
+        return Ok(None);
+    };
+    let key_hex = std::fs::read_to_string(path)?.trim().to_string();
+    let key_bytes = decode_hex_32(&key_hex)?;
+    Ok(Some(ed25519_dalek::SigningKey::from_bytes(&key_bytes)))
+}
+
+fn decode_hex_32(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = hex.trim();
+    if trimmed.len() != 64 {
+        anyhow::bail!(
+            "signing key must be 32 bytes (64 hex chars), got {} bytes",
+            trimmed.len() / 2
+        );
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in signing key: {e}"))?;
+    }
+    Ok(out)
 }
 
 fn resolve_encryption_key(options: &GenericEncodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
@@ -424,8 +461,8 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
             result.packet_bytes, result.bits
         );
         println!(
-            "Transforms: compressed={}, encrypted={}, error_corrected={}",
-            result.compressed, result.encrypted, result.error_corrected
+            "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
+            result.signed, result.compressed, result.encrypted, result.error_corrected
         );
         println!("Encoded carrier: {}", result.output);
     }
@@ -444,8 +481,8 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
         );
         println!("Detected LSB strength: {}", result.bits);
         println!(
-            "Transforms: compressed={}, encrypted={}, error_corrected={}",
-            result.compressed, result.encrypted, result.error_corrected
+            "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
+            result.signed, result.compressed, result.encrypted, result.error_corrected
         );
         println!("Decoded payload: {}", result.output);
     }
