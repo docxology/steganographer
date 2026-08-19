@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WAV generic-packet vertical slice (`FMT-004` / audio `KER-001`).** The
+  generic packet carrier now supports PCM S16 WAV and raw S16LE audio. New
+  `AudioSpatialLsb` and `KeyedAudioSpatialLsb` carriers interpret the byte
+  buffer as interleaved little-endian 16-bit samples (one carrier unit per
+  sample; only the low byte's LSBs change, so high bytes are untouched), and
+  `CarrierDescriptor` gains a `PcmS16Le` kind with a 2-byte unit stride.
+  Generic `encode`/`decode` accept `--stego-type lsb_audio` (sequential or
+  keyed via `--embedding-key`), preserve the source WAV spec on write, and
+  reject odd-length sample buffers. Wrong/missing keys still report `NoPacket`
+  indistinguishably.
 - **Keyed placement and keyed locator (`PKT-008` / `PLC-002`).** New
   `steganographer-core::placement::KeyedPermutation` is an O(1)-memory keyed
   permutation (balanced Feistel over the next power-of-two domain with cycle

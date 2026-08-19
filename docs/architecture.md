@@ -109,7 +109,7 @@ graph TD
 | `video.rs` | `VideoFrame`, `VideoFormat`, `VideoStegoModule` trait | ~55 | — |
 | `audio.rs` | `AudioBuffer`, `AudioStegoModule` trait | ~42 | — |
 | `packet.rs` | Bounded generic locator, canonical envelope, packet and legacy codecs | ~1180 | 9 |
-| `carrier.rs` | Shared carrier contracts and sequential spatial-LSB kernel | ~360 | 4 |
+| `carrier.rs` | Shared carrier contracts; byte + PCM S16 LSB kernels (sequential + keyed placement) | ~1000 | 13 |
 | `lsb_video.rs` | Sequential LSB video embedding/extraction | ~290 | 5 |
 | `lsb_audio.rs` | Keyed PRNG LSB audio embedding/extraction | ~340 | 7 |
 | `overlay.rs` | Text overlay with built-in bitmap font | ~340 | 9 |

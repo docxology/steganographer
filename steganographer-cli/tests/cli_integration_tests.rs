@@ -1702,3 +1702,164 @@ fn test_generic_packet_keyed_placement_roundtrip_and_fail_closed() {
         "key-less decode must not write output"
     );
 }
+
+#[test]
+fn test_generic_packet_wav_audio_vertical_slice() {
+    // Generic packets must embed over PCM S16 WAV (audio KER-001 + FMT-004):
+    // sequential and keyed round-trips, source-spec preservation, and
+    // wrong-key/missing-key fail-closed behavior.
+    let tmp = tempfile::tempdir().unwrap();
+    let carrier = tmp.path().join("carrier.wav");
+    let packed = tmp.path().join("packed.wav");
+    let keyed_packed = tmp.path().join("keyed.wav");
+    let recovered = tmp.path().join("recovered.txt");
+    let keyed_recovered = tmp.path().join("keyed_recovered.txt");
+
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 22_050,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    create_test_wav(&carrier, spec, 22_050);
+
+    let payload = "audio generic packet payload";
+    let payload_path = tmp.path().join("payload.txt");
+    std::fs::write(&payload_path, payload).unwrap();
+
+    // Sequential audio encode/decode round-trip.
+    let (code, stdout, stderr) = run_cli(&[
+        "encode",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "2",
+        "--payload-file",
+        payload_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "audio sequential encode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(parse_json(&stdout)["keyed"], false);
+
+    let (code, stdout, stderr) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "auto",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "audio sequential decode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&recovered).unwrap(), payload);
+
+    // Source properties survive the write/reopen cycle.
+    let reread = hound::WavReader::open(&packed).unwrap();
+    let packed_spec = reread.spec();
+    assert_eq!(packed_spec.channels, spec.channels);
+    assert_eq!(packed_spec.sample_rate, spec.sample_rate);
+    assert_eq!(packed_spec.bits_per_sample, 16);
+
+    // Keyed audio round-trip.
+    let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let (code, stdout, stderr) = run_cli(&[
+        "encode",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--output",
+        keyed_packed.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "3",
+        "--payload-file",
+        payload_path.to_str().unwrap(),
+        "--embedding-key",
+        key,
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "audio keyed encode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(parse_json(&stdout)["keyed"], true);
+
+    let (code, stdout, stderr) = run_cli(&[
+        "decode",
+        "--input",
+        keyed_packed.to_str().unwrap(),
+        "--output",
+        keyed_recovered.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "auto",
+        "--embedding-key",
+        key,
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "audio keyed decode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(parse_json(&stdout)["keyed"], true);
+    assert_eq!(std::fs::read_to_string(&keyed_recovered).unwrap(), payload);
+
+    // A wrong key fails closed with no output.
+    let wrong_key = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let wrong_out = tmp.path().join("wrong.txt");
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        keyed_packed.to_str().unwrap(),
+        "--output",
+        wrong_out.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "auto",
+        "--embedding-key",
+        wrong_key,
+    ]);
+    assert_ne!(code, 0, "wrong audio key must fail closed: {stdout}");
+    assert!(!wrong_out.exists(), "wrong audio key must not write output");
+
+    // A key-less scanner sees no packet (privacy property).
+    let no_key_out = tmp.path().join("nokey.txt");
+    let (code, _, _) = run_cli(&[
+        "decode",
+        "--input",
+        keyed_packed.to_str().unwrap(),
+        "--output",
+        no_key_out.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--bits",
+        "auto",
+    ]);
+    assert_ne!(
+        code, 0,
+        "keyed audio packet must be invisible without a key"
+    );
+    assert!(
+        !no_key_out.exists(),
+        "key-less audio decode must not write output"
+    );
+}

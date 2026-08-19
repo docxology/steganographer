@@ -9,8 +9,8 @@ use steganographer_core::packet::{
 };
 use steganographer_core::transforms;
 use steganographer_core::{
-    CarrierEmbedder, CarrierExtractor, EmbeddingConfig, KeyedSpatialLsb, SpatialLsb,
-    TransformContext, DEFAULT_ECC_CHUNK_LEN,
+    AudioSpatialLsb, CarrierEmbedder, CarrierExtractor, EmbeddingConfig, KeyedAudioSpatialLsb,
+    KeyedSpatialLsb, SpatialLsb, TransformContext, DEFAULT_ECC_CHUNK_LEN,
 };
 
 use crate::media_io;
@@ -100,9 +100,8 @@ pub fn encode(
     format: &str,
     options: &GenericEncodeOptions,
 ) -> anyhow::Result<()> {
-    if stego_type != "lsb_video" {
-        anyhow::bail!("generic packet alpha currently supports --stego-type lsb_video only");
-    }
+    validate_kernel(stego_type)?;
+    let audio = is_audio_kernel(stego_type);
     let (payload, payload_kind, default_filename) = match (
         options.payload_file.as_deref(),
         options.payload_text.as_deref(),
@@ -207,11 +206,22 @@ pub fn encode(
     synchronize_locator(&mut packet, &limits)?;
     let packet_bytes = packet.encode(&limits)?;
 
-    let embed_report = match &embedding_key {
-        Some(key) => {
-            KeyedSpatialLsb::new(*key).embed_packet(&mut media.data, &packet_bytes, &config)?
+    let embed_report = if audio {
+        match &embedding_key {
+            Some(key) => KeyedAudioSpatialLsb::new(*key).embed_packet(
+                &mut media.data,
+                &packet_bytes,
+                &config,
+            )?,
+            None => AudioSpatialLsb.embed_packet(&mut media.data, &packet_bytes, &config)?,
         }
-        None => SpatialLsb.embed_packet(&mut media.data, &packet_bytes, &config)?,
+    } else {
+        match &embedding_key {
+            Some(key) => {
+                KeyedSpatialLsb::new(*key).embed_packet(&mut media.data, &packet_bytes, &config)?
+            }
+            None => SpatialLsb.embed_packet(&mut media.data, &packet_bytes, &config)?,
+        }
     };
     media_io::write_output(output, &media, stego_type)?;
 
@@ -246,9 +256,8 @@ pub fn decode(
     force: bool,
     options: &GenericDecodeOptions,
 ) -> anyhow::Result<()> {
-    if stego_type != "lsb_video" {
-        anyhow::bail!("generic packet alpha currently supports --stego-type lsb_video only");
-    }
+    validate_kernel(stego_type)?;
+    let audio = is_audio_kernel(stego_type);
     let input_path = std::path::Path::new(input);
     let output_path = std::path::Path::new(output);
     let aliases_input = input == output
@@ -276,7 +285,12 @@ pub fn decode(
     for candidate in candidates {
         let config = EmbeddingConfig::new(candidate)?;
         if let Some(key) = embedding_key {
-            match KeyedSpatialLsb::new(key).extract_packet(&media.data, &config, &limits) {
+            let keyed = if audio {
+                KeyedAudioSpatialLsb::new(key).extract_packet(&media.data, &config, &limits)
+            } else {
+                KeyedSpatialLsb::new(key).extract_packet(&media.data, &config, &limits)
+            };
+            match keyed {
                 Ok(report) => {
                     extracted = Some(report);
                     break;
@@ -284,7 +298,12 @@ pub fn decode(
                 Err(error) => errors.push(format!("{candidate} bits (keyed): {error}")),
             }
         }
-        match SpatialLsb.extract_packet(&media.data, &config, &limits) {
+        let sequential = if audio {
+            AudioSpatialLsb.extract_packet(&media.data, &config, &limits)
+        } else {
+            SpatialLsb.extract_packet(&media.data, &config, &limits)
+        };
+        match sequential {
             Ok(report) => {
                 extracted = Some(report);
                 break;
@@ -380,6 +399,19 @@ fn synchronize_locator(
         limits,
     )?;
     Ok(())
+}
+
+fn validate_kernel(stego_type: &str) -> anyhow::Result<()> {
+    match stego_type {
+        "lsb_video" | "lsb_audio" => Ok(()),
+        other => anyhow::bail!(
+            "generic packet alpha supports --stego-type lsb_video or lsb_audio, got '{other}'"
+        ),
+    }
+}
+
+fn is_audio_kernel(stego_type: &str) -> bool {
+    stego_type == "lsb_audio"
 }
 
 fn bits_candidates(value: &str) -> anyhow::Result<Vec<u8>> {

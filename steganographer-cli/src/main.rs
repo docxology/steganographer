@@ -155,7 +155,7 @@ enum Commands {
         input: String,
         #[arg(long, short)]
         output: String,
-        /// Generic carrier kernel (currently lsb_video)
+        /// Generic carrier kernel: "lsb_video" or "lsb_audio"
         #[arg(long, default_value = "lsb_video")]
         stego_type: String,
         /// LSB bits per unit: "auto" or 1-4
@@ -164,7 +164,7 @@ enum Commands {
         /// Output format: "plain" or "json"
         #[arg(long, default_value = "plain")]
         format: String,
-        /// Input format: raw_rgb or png/image (auto-detected if omitted)
+        /// Input format: raw_rgb, raw_s16le, png/image, or wav (auto-detected if omitted)
         #[arg(long)]
         input_format: Option<String>,
         /// Replace an existing decoded payload output

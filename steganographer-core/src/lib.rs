@@ -54,8 +54,9 @@ pub mod video;
 
 pub use audio::{AudioBuffer, AudioStegoModule};
 pub use carrier::{
-    CapacityReport, CarrierDescriptor, CarrierEmbedder, CarrierError, CarrierExtractor,
-    CarrierKind, EmbedReport, EmbeddingConfig, ExtractReport, KeyedSpatialLsb, SpatialLsb,
+    AudioSpatialLsb, CapacityReport, CarrierDescriptor, CarrierEmbedder, CarrierError,
+    CarrierExtractor, CarrierKind, EmbedReport, EmbeddingConfig, ExtractReport,
+    KeyedAudioSpatialLsb, KeyedSpatialLsb, SpatialLsb,
 };
 pub use config::{AudioStegoConfig, Config, VideoStegoConfig};
 pub use crypto::{HashAlgorithm, SignaturePayload, Signer, Verifier};
