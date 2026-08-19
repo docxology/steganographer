@@ -414,7 +414,9 @@ steganographer analyze --input signed.rgb --format json
 
 ### `derive` — Key Derivation
 
-Derive signing, encryption, and embedding keys from a single master secret using BLAKE3 `derive_key`.
+Derive signing, encryption, and embedding keys from **either** a high-entropy
+master secret (BLAKE3 `derive_key`) **or** a human-chosen password (Argon2id).
+The two modes are mutually exclusive — providing both fails.
 
 ```bash
 steganographer derive [OPTIONS] --output <DIR>
@@ -425,6 +427,13 @@ steganographer derive [OPTIONS] --output <DIR>
 | `--master-secret <HEX>` | — | Master secret (hex-encoded). **WARNING**: visible in shell history and `ps` output. |
 | `--master-secret-file <PATH>` | — | Read master secret from a file (hex-encoded). Safer than `--master-secret`. |
 | `--master-secret-stdin` | `false` | Read master secret from stdin (hex-encoded). |
+| `--password <TEXT>` | — | Password for Argon2id stretching. **WARNING**: visible in shell history and `ps` output. |
+| `--password-file <PATH>` | — | Read the password from a file (raw bytes, trailing newline trimmed). |
+| `--password-stdin` | `false` | Read the password from stdin (raw bytes, trailing newline trimmed). |
+| `--salt <HEX>` | random | Hex-encoded Argon2id salt (≥ 16 bytes). Generated and printed when omitted. |
+| `--argon2-memory <KIB>` | `19456` | Argon2id memory cost in KiB (default 19 MiB). |
+| `--argon2-iterations <N>` | `2` | Argon2id time cost. |
+| `--argon2-parallelism <N>` | `1` | Argon2id lane count. |
 | `--output <DIR>` | `keys` | Output directory for derived keys |
 
 **Outputs**:
@@ -435,8 +444,13 @@ steganographer derive [OPTIONS] --output <DIR>
 > **Security note:** BLAKE3 `derive_key` is a fast KDF, not a slow password
 > hashing function. The master secret must be high-entropy random data (at
 > least 32 bytes / 64 hex chars). A memorable passphrase will be
-> brute-forceable at hash speed. A warning is printed if the secret is
-> shorter than 32 bytes.
+> brute-forceable at hash speed. For passwords, use `--password*` to stretch
+> with Argon2id instead.
+>
+> **Argon2id note:** the salt (and parameters) must be saved to re-derive the
+> same keys later. When `--salt` is omitted, a random salt is generated and
+> printed. Parameters below the OWASP floor (19 MiB / 2 iterations) trigger a
+> warning but are accepted.
 
 **Examples**:
 
@@ -449,6 +463,13 @@ echo "a1b2c3..." | steganographer derive --master-secret-stdin --output keys
 
 # Direct argument (not recommended — visible in ps/history)
 steganographer derive --master-secret a1b2c3... --output keys
+
+# Password derivation (Argon2id) — save the printed salt for re-derivation
+steganographer derive --password-file passphrase.txt --output keys
+
+# Password derivation with an explicit, reproducible salt
+steganographer derive --password-file passphrase.txt \
+  --salt 000102030405060708090a0b0c0d0e0f --output keys
 ```
 
 ---

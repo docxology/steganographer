@@ -138,7 +138,8 @@ pub fn keygen(output_path: &str) -> anyhow::Result<()> {
 
 // ─── Derive Keys ────────────────────────────────────────────────────
 
-/// Derive signing, encryption, and embedding keys from a master secret using HKDF.
+/// Derive signing, encryption, and embedding keys from a master secret using
+/// the high-entropy BLAKE3 KDF.
 pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<()> {
     let master = hex_decode(master_secret_hex)?;
     if master.is_empty() {
@@ -149,7 +150,44 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
     // context strings — previously these were hand-copied here, which risked
     // silent desync if kdf.rs's contexts changed)
     let keys = steganographer_core::kdf::derive_all(&master);
+    write_derived_keys(&keys, output_dir)
+}
 
+/// Derive signing, encryption, and embedding keys from a human-chosen password
+/// using Argon2id, then write them to files.
+///
+/// `salt_hex` must be a hex-encoded salt of at least
+/// [`steganographer_core::password::MIN_SALT_LEN`] bytes. When `None`, a fresh
+/// random salt is generated and printed so the caller can persist it for
+/// reproducible derivation.
+pub fn derive_keys_from_password(
+    password: &[u8],
+    salt_hex: Option<&str>,
+    params: &steganographer_core::Argon2Params,
+    output_dir: &str,
+) -> anyhow::Result<()> {
+    let salt = match salt_hex {
+        Some(hex) => hex_decode(hex)?,
+        None => {
+            let salt = steganographer_core::password::generate_salt();
+            println!(
+                "Generated salt (hex, save it to re-derive these keys): {}",
+                hex_encode(&salt)
+            );
+            salt.to_vec()
+        }
+    };
+
+    let keys = steganographer_core::password::derive_all_from_password(password, &salt, params)
+        .map_err(|e| anyhow::anyhow!("Password key derivation failed: {e}"))?;
+    write_derived_keys(&keys, output_dir)
+}
+
+/// Write a derived key set to `output_dir` as hex files with 0600 permissions.
+fn write_derived_keys(
+    keys: &steganographer_core::DerivedKeys,
+    output_dir: &str,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(output_dir)?;
 
     let signing_pub = {
@@ -193,10 +231,7 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
         println!("  {}: {} (0600) — {}", path, hex_str, desc);
     }
 
-    println!(
-        "\nKeys derived from master secret and written to {}",
-        output_dir
-    );
+    println!("\nKeys derived and written to {}", output_dir);
     Ok(())
 }
 

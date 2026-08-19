@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-402_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-419_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 402 tests, 0 failures
+cargo test --workspace   # 419 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -130,10 +130,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 351 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 366 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 2 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 26 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 28 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -223,20 +223,20 @@ bits = 2
 
 ## ✅ Tests
 
-402 tests across 4 crates — all passing:
+419 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 238 | `steganographer-core/src/*.rs` |
+| Core unit tests | 253 | `steganographer-core/src/*.rs` |
 | Core integration tests | 113 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
-| CLI unit + integration tests | 26 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
+| CLI unit + integration tests | 28 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **402** | **0 failures** |
+| **Total** | **419** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 402 tests
-cargo test -p steganographer-core     # Core only (351 tests)
+cargo test --workspace                # All 419 tests
+cargo test -p steganographer-core     # Core only (366 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 

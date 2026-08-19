@@ -1252,3 +1252,129 @@ fn test_revoke_invalid_key_length() {
         combined
     );
 }
+
+#[test]
+fn test_derive_from_password_is_deterministic_and_conflict_free() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out_a = tmp.path().join("keys_a");
+    let out_b = tmp.path().join("keys_b");
+    let out_c = tmp.path().join("keys_c");
+    let salt = "000102030405060708090a0b0c0d0e0f";
+
+    // Argon2id password derivation (weak params so the test stays fast).
+    let (code, stdout, _) = run_cli(&[
+        "derive",
+        "--password",
+        "correct horse battery staple",
+        "--salt",
+        salt,
+        "--argon2-memory",
+        "8",
+        "--argon2-iterations",
+        "1",
+        "--output",
+        out_a.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "password derive failed: {}", stdout);
+    for name in [
+        "signing.key",
+        "signing.pub",
+        "encryption.key",
+        "embedding.key",
+    ] {
+        let path = out_a.join(name);
+        assert!(path.exists(), "{} should be created", name);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.trim().len(),
+            64,
+            "{} should be a 64-char hex key, got {}",
+            name,
+            content
+        );
+    }
+
+    // Same password + salt + params → identical keys.
+    let (code, _, _) = run_cli(&[
+        "derive",
+        "--password",
+        "correct horse battery staple",
+        "--salt",
+        salt,
+        "--argon2-memory",
+        "8",
+        "--argon2-iterations",
+        "1",
+        "--output",
+        out_b.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        std::fs::read_to_string(out_a.join("signing.key")).unwrap(),
+        std::fs::read_to_string(out_b.join("signing.key")).unwrap(),
+        "same password + salt must derive identical keys"
+    );
+
+    // A different salt must derive different keys.
+    let (code, _, _) = run_cli(&[
+        "derive",
+        "--password",
+        "correct horse battery staple",
+        "--salt",
+        "ffffffffffffffffffffffffffffffff",
+        "--argon2-memory",
+        "8",
+        "--argon2-iterations",
+        "1",
+        "--output",
+        out_c.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_ne!(
+        std::fs::read_to_string(out_a.join("signing.key")).unwrap(),
+        std::fs::read_to_string(out_c.join("signing.key")).unwrap(),
+        "different salt must derive different keys"
+    );
+
+    // Providing both a master secret and a password must fail loudly.
+    let (code, _, stderr) = run_cli(&[
+        "derive",
+        "--master-secret",
+        "00",
+        "--password",
+        "pw",
+        "--output",
+        tmp.path().join("conflict").to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0, "master-secret + password must be rejected");
+    assert!(
+        stderr.contains("not both") || stderr.contains("either"),
+        "should explain the conflict: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_derive_from_password_without_salt_generates_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("keys");
+
+    let (code, stdout, _) = run_cli(&[
+        "derive",
+        "--password",
+        "some passphrase",
+        "--argon2-memory",
+        "8",
+        "--argon2-iterations",
+        "1",
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "password derive failed: {}", stdout);
+    assert!(
+        stdout.contains("salt"),
+        "a generated salt must be reported so the user can persist it: {}",
+        stdout
+    );
+    assert!(out.join("signing.key").exists());
+}
