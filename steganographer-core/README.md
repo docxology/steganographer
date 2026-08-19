@@ -1,7 +1,7 @@
 # steganographer-core
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-247%20(171%20unit%20%2B%2076%20integration)-brightgreen)
+![Tests](https://img.shields.io/badge/tests-351%20(238%20unit%20%2B%20113%20integration)-brightgreen)
 Pure, media-agnostic algorithms for steganographic embedding, cryptographic signing, and configuration. This is the foundational crate with zero GStreamer or I/O dependencies.
 
 ## Modules
@@ -21,9 +21,9 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 
 ## Tests
 
-- **Unit tests**: 171 inline tests across all modules
-- **Integration tests**: 76 tests in `tests/integration_tests.rs`
-- **Total**: 247 tests (core only)
+- **Unit tests**: 238 inline tests across all modules
+- **Integration tests**: 113 tests (`76` in `tests/integration_tests.rs` + `37` in `tests/ots_integration_tests.rs`)
+- **Total**: 351 tests (core only)
 
 ```bash
 cargo test -p steganographer-core

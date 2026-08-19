@@ -14,7 +14,7 @@ Comprehensive documentation suite for the steganographer project, covering stega
 | `cryptography.md`         | BLAKE3 + Ed25519/Ethereum signing, SignerBackend trait, EIP-191, provable security, post-quantum     |
 | `algorithms.md`           | LSB video/audio protocols, QR data matrix overlay, template placeholders, capacity math              |
 | `getting-started.md`      | Prerequisites, build, test, dashboard quickstart, pipeline customization                             |
-| `cli-reference.md`        | All 12 commands, generic encode/decode alpha, JSON output, and exit behavior                         |
+| `cli-reference.md`        | All 13 commands, generic encode/decode alpha, JSON output, and exit behavior                         |
 | `configuration.md`        | Full TOML schema, dashboard live config, template placeholders (`{timestamp}`, `{frame_index}`)      |
 | `gstreamer.md`            | AppSink/AppSrc architecture, pipeline elements, config-driven construction                           |
 | `platforms.md`            | macOS, Linux, Windows, Docker setup guides with config recommendations                               |

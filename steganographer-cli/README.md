@@ -1,10 +1,10 @@
 # steganographer-cli
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-10-brightgreen)
+![Tests](https://img.shields.io/badge/tests-26-brightgreen)
 User-facing command-line binary for all steganographic functions.
 
-Built with [Clap](https://docs.rs/clap) for argument parsing with 11 subcommands.
+Built with [Clap](https://docs.rs/clap) for argument parsing with 13 subcommands.
 
 ## Commands
 
@@ -13,9 +13,16 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 11 subcommands
 | `video` | Run live video pipeline: capture → steganography → virtual device |
 | `audio` | Run live audio pipeline: capture → steganography → virtual device |
 | `encode` | Embed steganographic data into a raw file (offline) |
+| `decode` | Decode and validate an opt-in generic packet payload |
 | `verify` | Extract and verify steganographic signatures (`--format plain\|json`) |
 | `keygen` | Generate a new Ed25519 signing key pair |
-| `dashboard` | Launch web-based live verification dashboard |
+| `info` | Report steganographic capacity of a media file |
+| `analyze` | Analyze a file for steganographic artifacts |
+| `derive` | Derive keys (signing, encryption, embedding) from a master secret |
+| `config` | Validate a TOML configuration file |
+| `revoke` | Add a signing identity to a revoked-key list |
+| `dashboard` | Launch the live round-trip verification dashboard (web GUI) |
+| `ots` | OpenTimestamps attestation: `stamp` or `verify` a file's Merkle root |
 
 ## Modules
 
@@ -26,6 +33,10 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 11 subcommands
 | `cmd_audio` | `src/cmd_audio.rs` | Config-driven GStreamer audio pipeline launch |
 | `cmd_encode` | `src/cmd_encode.rs` | Offline LSB video/audio encoding + keygen |
 | `cmd_verify` | `src/cmd_verify.rs` | Signature extraction + `--format plain\|json` output |
+| `cmd_packet` | `src/cmd_packet.rs` | Opt-in generic packet encode/decode |
+| `cmd_ots` | `src/cmd_ots.rs` | OpenTimestamps `stamp` / `verify` attestation |
+| `media_io` | `src/media_io.rs` | Descriptor-preserving image/WAV/raw I/O and output policy |
+| `carrier_binding` | `src/carrier_binding.rs` | Kernel-canonical carrier bytes for signing |
 
 ## Usage
 

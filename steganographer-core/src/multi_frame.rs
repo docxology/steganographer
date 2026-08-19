@@ -7,23 +7,19 @@
 //!
 //! ## Algorithm
 //!
-//! Uses Shamir's Secret Sharing (SSS) at the byte level:
-//! - The payload is split into `n` shards using polynomial evaluation
-//!   over GF(257) (a prime field).
-//! - Each shard is embedded into a separate frame.
-//! - To reconstruct, at least `n` shards are needed.
-//! - If any frame is lost, the signature cannot be reconstructed,
-//!   but if redundancy is configured (k < n), any k frames suffice.
+//! Uses XOR secret sharing — an n-of-n threshold scheme (this is **not**
+//! Shamir's Secret Sharing, which would allow `k < n` reconstruction):
 //!
-//! For simplicity and size efficiency, this implementation uses XOR
-//! sharing for the case where all shards are needed (n-of-n scheme):
+//! - `n-1` random masks are drawn from the OS CSPRNG.
+//! - `shard_0 = payload XOR (mask_0 XOR ... XOR mask_{n-2})`.
+//! - `shard_i = mask_{i-1}` for `i = 1..n-1`.
+//! - XORing all N shards recovers the payload.
 //!
-//! - `shard_0 = payload XOR random_mask`
-//! - `shard_1 = random_mask`
-//! - `shard_i = payload XOR mask_i` (for n > 2, masks are derived)
-//!
-//! This is the simplest n-of-n scheme: any single shard is meaningless
-//! without the others, but combining all N shards recovers the payload.
+//! Every mask is independent uniform randomness, so each shard is uniformly
+//! random on its own and any proper subset reveals nothing about the payload.
+//! There is **no** `k < n` threshold recovery: all shards are required, and a
+//! lost frame means the signature cannot be reconstructed (the intended
+//! fail-closed property for partial frame loss).
 
 use crate::crypto::SignaturePayload;
 use rand::rngs::OsRng;
@@ -124,11 +120,18 @@ pub fn split(
 
 /// Reconstruct a signature payload from N shards.
 ///
-/// All shards must be present (n-of-n scheme). The shards are XORed
-/// together to recover the original payload.
+/// All shards must be present (n-of-n scheme). The shards are XORed together
+/// to recover the original payload.
+///
+/// Reconstruction validates that the input is a complete, non-duplicated
+/// n-of-n cover: every shard must agree on `total_shards` and carry a unique
+/// in-range `shard_index`. This turns a duplicate/missing-shard bug into a
+/// clear error instead of silently XORing to garbage (which would only fail
+/// later on the payload magic check).
 ///
 /// # Arguments
-/// * `shards` — All N shards (must be exactly the right number and order).
+/// * `shards` — All N shards, in any order (canonical order is derived from
+///   `shard_index`).
 ///
 /// # Returns
 /// The reconstructed [`SignaturePayload`].
@@ -141,17 +144,39 @@ pub fn reconstruct(shards: &[SignatureShard]) -> anyhow::Result<SignaturePayload
     if shards.len() != expected_total {
         anyhow::bail!("Expected {} shards, got {}", expected_total, shards.len());
     }
+    if !(2..=8).contains(&expected_total) {
+        anyhow::bail!("Invalid shard group size: {}", expected_total);
+    }
 
-    // Verify all shards have the same total_shards
+    // Every shard must agree on the group size and carry a unique, in-range
+    // index. Since `shards.len() == expected_total`, uniqueness of indices in
+    // `0..expected_total` also guarantees the set is a complete cover.
+    let mut seen = [false; 8];
     for shard in shards {
         if shard.total_shards as usize != expected_total {
             anyhow::bail!("Inconsistent total_shards across shards");
         }
+        let idx = shard.shard_index as usize;
+        if idx >= expected_total {
+            anyhow::bail!(
+                "Shard index {} out of range for group size {}",
+                shard.shard_index,
+                expected_total
+            );
+        }
+        if seen[idx] {
+            anyhow::bail!("Duplicate shard index {}", shard.shard_index);
+        }
+        seen[idx] = true;
     }
 
-    // XOR all shards together
+    // XOR is commutative, but XOR in canonical shard order so the result is
+    // deterministic regardless of the caller's ordering.
+    let mut sorted: Vec<&SignatureShard> = shards.iter().collect();
+    sorted.sort_by_key(|shard| shard.shard_index);
+
     let mut result = [0u8; SignaturePayload::SERIALIZED_SIZE];
-    for shard in shards {
+    for shard in sorted {
         for i in 0..result.len() {
             result[i] ^= shard.data[i];
         }
@@ -259,5 +284,40 @@ mod tests {
         // Neither shard should equal the payload bytes
         assert_ne!(shards[0].data, payload_bytes);
         assert_ne!(shards[1].data, payload_bytes);
+    }
+
+    #[test]
+    fn test_reconstruct_accepts_any_shard_order() {
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(0, b"order test", None);
+
+        let mut shards = split(&payload, 4, 0).unwrap();
+        shards.reverse();
+
+        let reconstructed = reconstruct(&shards).unwrap();
+        assert_eq!(reconstructed.frame_index, 0);
+        assert_eq!(reconstructed.signature, payload.signature);
+    }
+
+    #[test]
+    fn test_reconstruct_rejects_duplicate_shard_index() {
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(0, b"dup test", None);
+
+        let mut shards = split(&payload, 2, 0).unwrap();
+        // Replace shard 1 with a clone of shard 0: indices become [0, 0], a
+        // non-cover. This must error, not silently XOR to zero.
+        shards[1] = shards[0].clone();
+        assert!(reconstruct(&shards).is_err());
+    }
+
+    #[test]
+    fn test_reconstruct_rejects_out_of_range_shard_index() {
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(0, b"range test", None);
+
+        let mut shards = split(&payload, 3, 0).unwrap();
+        shards[1].shard_index = 9; // out of range for a 3-shard group
+        assert!(reconstruct(&shards).is_err());
     }
 }
