@@ -119,7 +119,7 @@ steganographer encode [OPTIONS]
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
 | `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
 | `--width <N>` / `--height <N>` | — | None | Required pair for dimension-dependent headerless RGB kernels such as DCT |
-| `--signing-key <PATH>` | — | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file |
+| `--signing-key <PATH>` | — | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file (legacy signature or generic packet payload) |
 | `--embedding-key <HEX>` | — | Config/random | Keyed audio/spread placement key |
 | `--embedding-key-file <PATH>` | — | Config/random | File containing the embedding key |
 | `--encrypt` | — | `false` | Encrypt the payload (legacy signature or generic packet) with ChaCha20-Poly1305 |
@@ -157,10 +157,10 @@ steganographer encode -i cover.png -o packed.png \
 
 Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
 carrier behavior and prints the public key needed by `verify`. The generic
-packet path currently supports sequential `lsb_video` and the DEFLATE
-(`--compress`), AEAD encryption (`--encrypt`), and chunked Reed-Solomon
-(`--ecc`) transforms; signing, keyed placement, and multi-frame spreading
-remain unsupported for generic packets.
+packet path currently supports sequential `lsb_video` and the Ed25519 signing
+(`--signing-key`), DEFLATE (`--compress`), AEAD encryption (`--encrypt`), and
+chunked Reed-Solomon (`--ecc`) transforms; keyed placement and multi-frame
+spreading remain unsupported for generic packets.
 
 ---
 

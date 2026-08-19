@@ -9,26 +9,31 @@
 //! Transform order is fixed and matches the platform plan
 //! ("sign logical content; compress; AEAD encrypt; ECC; embed"):
 //!
-//! 1. **Compression** — DEFLATE via `flate2`, recorded only when it actually
+//! 1. **Signing** — Ed25519 over the logical payload, recording the public
+//!    key and signature so a decoder can attribute the payload to an identity.
+//! 2. **Compression** — DEFLATE via `flate2`, recorded only when it actually
 //!    shrinks the payload.
-//! 2. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
+//! 3. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
 //!    [`crate::encryption`]. The ciphertext is bound to the packet identity
 //!    (packet id + payload kind + original length) as associated data, and the
 //!    packet nonce supplies 8 bytes of the encryption nonce so a fresh packet
 //!    never reuses a nonce.
-//! 3. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
+//! 4. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
 //!    [`crate::error_correction`], so payloads larger than the 255-symbol RS
 //!    codeword ceiling are covered by independent per-chunk codewords.
 //!
-//! Payload signing is not yet implemented here; a decoder that meets an
-//! unknown *critical* transform fails closed with
+//! A decoder that meets an unknown *critical* transform fails closed with
 //! [`TransformError::UnsupportedTransform`].
 
 use std::io::{Read, Write};
 
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+
 use crate::encryption::{self, EncryptionKey};
 use crate::error_correction;
-use crate::packet::{TransformDescriptor, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_ERROR_CORRECTED};
+use crate::packet::{
+    TransformDescriptor, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_ERROR_CORRECTED, FLAG_PAYLOAD_SIGNED,
+};
 use thiserror::Error;
 
 /// ChaCha20-Poly1305 AEAD transform.
@@ -37,6 +42,12 @@ pub const TRANSFORM_AEAD_CHACHA20_POLY1305: u16 = 1;
 pub const TRANSFORM_ECC_REED_SOLOMON: u16 = 2;
 /// DEFLATE compression transform.
 pub const TRANSFORM_COMPRESS_DEFLATE: u16 = 3;
+/// Ed25519 payload-signature transform.
+pub const TRANSFORM_PAYLOAD_SIGN_ED25519: u16 = 4;
+
+/// Serialized size of the Ed25519 sign-transform parameters
+/// (`public_key || signature`).
+pub const SIGN_PARAMS_SIZE: usize = 32 + 64;
 
 /// Default per-chunk Reed-Solomon data length (symbols). `239 + 16 parity`
 /// stays within the 255-symbol GF(2⁸) codeword ceiling.
@@ -101,6 +112,8 @@ pub enum TransformError {
     DecompressionFailed(String),
     #[error("error correction failed: {0}")]
     ErrorCorrectionFailed(String),
+    #[error("payload signature is invalid or was made by a different key")]
+    SignatureInvalid,
 }
 
 /// Whether an AEAD transform is present (and therefore a key is required to
@@ -111,20 +124,37 @@ pub fn is_encrypted(transforms: &[TransformDescriptor]) -> bool {
         .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305)
 }
 
-/// Apply compression (optional), encryption (optional), and error correction
-/// (optional) to a logical payload, returning the encoded body, the transform
-/// descriptors, and the locator flag bits to set.
+/// Apply signing (optional), compression (optional), encryption (optional),
+/// and error correction (optional) to a logical payload, returning the encoded
+/// body, the transform descriptors, and the locator flag bits to set.
 pub fn apply(
     payload: &[u8],
     context: &TransformContext<'_>,
+    signer: Option<&SigningKey>,
     compress: bool,
     encrypt_key: Option<&EncryptionKey>,
     ecc_parity: usize,
     ecc_chunk_len: usize,
 ) -> Result<(Vec<u8>, Vec<TransformDescriptor>, u16), TransformError> {
     let mut body = payload.to_vec();
-    let mut transforms = Vec::with_capacity(3);
+    let mut transforms = Vec::with_capacity(4);
     let mut flags = 0u16;
+
+    if let Some(signing_key) = signer {
+        // Sign the logical payload before any other transform, so the signature
+        // authenticates the exact bytes a decoder recovers.
+        let signature: Signature = signing_key.sign(payload);
+        let mut parameters = Vec::with_capacity(SIGN_PARAMS_SIZE);
+        parameters.extend_from_slice(&signing_key.verifying_key().to_bytes());
+        parameters.extend_from_slice(&signature.to_bytes());
+        transforms.push(TransformDescriptor {
+            algorithm: TRANSFORM_PAYLOAD_SIGN_ED25519,
+            version: 1,
+            critical: true,
+            parameters,
+        });
+        flags |= FLAG_PAYLOAD_SIGNED;
+    }
 
     if compress {
         let compressed = deflate_compress(&body)?;
@@ -203,6 +233,11 @@ pub fn reverse(
                 // logical payload length. `original_len + 1` bounds the read
                 // to reject a decompression bomb.
                 body = deflate_decompress(&body, original_len as usize)?;
+            }
+            TRANSFORM_PAYLOAD_SIGN_ED25519 => {
+                // Signing is the innermost transform, so by the time we reach
+                // it the recovered body is the logical payload that was signed.
+                verify_ed25519_signature(&body, &transform.parameters)?;
             }
             other => {
                 return Err(if transform.critical {
@@ -293,6 +328,23 @@ fn ecc_decode(
         );
     }
     Ok(output)
+}
+
+/// Verify an Ed25519 signature recorded in the sign-transform parameters
+/// (`public_key || signature`) over the recovered logical payload.
+fn verify_ed25519_signature(body: &[u8], parameters: &[u8]) -> Result<(), TransformError> {
+    if parameters.len() != SIGN_PARAMS_SIZE {
+        return Err(TransformError::InvalidDescriptor(
+            "Ed25519 sign transform parameters must be 96 bytes (pubkey || signature)",
+        ));
+    }
+    let public_key =
+        VerifyingKey::from_bytes(&parameters[..32].try_into().expect("fixed slice"))
+            .map_err(|_| TransformError::InvalidDescriptor("invalid Ed25519 public key"))?;
+    let signature = Signature::from_bytes(&parameters[32..].try_into().expect("fixed slice"));
+    public_key
+        .verify(body, &signature)
+        .map_err(|_| TransformError::SignatureInvalid)
 }
 
 /// DEFLATE-compress a byte slice.
@@ -395,8 +447,16 @@ mod tests {
         let ctx = context(&packet);
 
         let key = test_key();
-        let (body, transforms, flags) =
-            apply(&payload, &ctx, false, Some(&key), 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            None,
+            false,
+            Some(&key),
+            0,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
         assert!(flags & FLAG_ENCRYPTED != 0);
         assert_eq!(transforms.len(), 1);
         assert_ne!(body, payload);
@@ -435,8 +495,16 @@ mod tests {
         let ctx = context(&packet);
 
         let parity = 4;
-        let (body, transforms, flags) =
-            apply(&payload, &ctx, false, None, parity, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            None,
+            false,
+            None,
+            parity,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
         assert!(flags & FLAG_ERROR_CORRECTED != 0);
         assert_eq!(transforms.len(), 1);
 
@@ -465,8 +533,16 @@ mod tests {
         let ctx = context(&packet);
 
         let key = test_key();
-        let (body, transforms, flags) =
-            apply(&payload, &ctx, false, Some(&key), 8, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            None,
+            false,
+            Some(&key),
+            8,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
         assert_eq!(flags, FLAG_ENCRYPTED | FLAG_ERROR_CORRECTED);
         assert_eq!(transforms.len(), 2);
         assert_eq!(transforms[0].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
@@ -493,7 +569,7 @@ mod tests {
         let ctx = context(&packet);
 
         let (body, transforms, flags) =
-            apply(&payload, &ctx, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+            apply(&payload, &ctx, None, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert!(flags & FLAG_COMPRESSED != 0);
         assert_eq!(transforms.len(), 1);
         assert_eq!(transforms[0].algorithm, TRANSFORM_COMPRESS_DEFLATE);
@@ -529,7 +605,7 @@ mod tests {
         let ctx = context(&packet);
 
         let (body, transforms, flags) =
-            apply(&data, &ctx, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
+            apply(&data, &ctx, None, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert_eq!(
             flags & FLAG_COMPRESSED,
             0,
@@ -555,14 +631,116 @@ mod tests {
         let ctx = context(&packet);
         let key = test_key();
 
-        let (body, transforms, flags) =
-            apply(&payload, &ctx, true, Some(&key), 4, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            None,
+            true,
+            Some(&key),
+            4,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
         assert_eq!(
             flags,
             FLAG_COMPRESSED | FLAG_ENCRYPTED | FLAG_ERROR_CORRECTED
         );
         assert_eq!(transforms.len(), 3);
         assert_eq!(transforms[0].algorithm, TRANSFORM_COMPRESS_DEFLATE);
+        assert_eq!(transforms[1].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
+        assert_eq!(transforms[2].algorithm, TRANSFORM_ECC_REED_SOLOMON);
+
+        let recovered =
+            reverse(&body, &ctx, Some(&key), &transforms, payload.len() as u64).unwrap();
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn signing_roundtrip_and_tamper_detection() {
+        let payload = b"signed logical payload".to_vec();
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            Some(&signing_key),
+            false,
+            None,
+            0,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        assert!(flags & FLAG_PAYLOAD_SIGNED != 0);
+        assert_eq!(transforms.len(), 1);
+        assert_eq!(transforms[0].algorithm, TRANSFORM_PAYLOAD_SIGN_ED25519);
+        assert_eq!(transforms[0].parameters.len(), SIGN_PARAMS_SIZE);
+
+        // Valid signature reverses cleanly.
+        let recovered = reverse(&body, &ctx, None, &transforms, payload.len() as u64).unwrap();
+        assert_eq!(recovered, payload);
+
+        // A tampered recovered payload fails verification.
+        let tampered = b"signed logical payload!".to_vec();
+        let mut bad_transforms = transforms.clone();
+        // Signature was over the original payload; verifying over the tampered
+        // body must fail.
+        assert!(matches!(
+            verify_ed25519_signature(&tampered, &bad_transforms[0].parameters),
+            Err(TransformError::SignatureInvalid)
+        ));
+
+        // Corrupting the recorded signature must fail verification.
+        bad_transforms[0].parameters[40] ^= 1;
+        assert!(matches!(
+            reverse(&body, &ctx, None, &bad_transforms, payload.len() as u64),
+            Err(TransformError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn signing_composes_with_encrypt_and_ecc() {
+        let payload = b"signed, encrypted, corrected".to_vec();
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let signing_key = SigningKey::from_bytes(&[11u8; 32]);
+        let key = test_key();
+
+        let (body, transforms, flags) = apply(
+            &payload,
+            &ctx,
+            Some(&signing_key),
+            false,
+            Some(&key),
+            4,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        assert_eq!(
+            flags,
+            FLAG_PAYLOAD_SIGNED | FLAG_ENCRYPTED | FLAG_ERROR_CORRECTED
+        );
+        assert_eq!(transforms.len(), 3);
+        assert_eq!(transforms[0].algorithm, TRANSFORM_PAYLOAD_SIGN_ED25519);
         assert_eq!(transforms[1].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
         assert_eq!(transforms[2].algorithm, TRANSFORM_ECC_REED_SOLOMON);
 
@@ -588,6 +766,7 @@ mod tests {
         let (body, transforms, _) = apply(
             &payload,
             &context(&packet_a),
+            None,
             false,
             Some(&key),
             0,

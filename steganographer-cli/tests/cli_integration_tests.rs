@@ -1557,3 +1557,54 @@ fn test_generic_packet_compress_roundtrip() {
         std::fs::read(&payload).unwrap()
     );
 }
+
+#[test]
+fn test_generic_packet_sign_roundtrip_and_tamper() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let packed = tmp.path().join("packed.rgb");
+    let recovered = tmp.path().join("recovered.txt");
+    let payload = tmp.path().join("payload.txt");
+    let key_base = tmp.path().join("signer");
+    create_test_rgb(input.to_str().unwrap());
+    std::fs::write(&payload, b"attributed generic payload").unwrap();
+
+    // Generate a signing key and encode a signed generic packet.
+    let (code, stdout, _) = run_cli(&["keygen", "--output", key_base.to_str().unwrap()]);
+    assert_eq!(code, 0, "keygen failed: {stdout}");
+    let signing_key = tmp.path().join("signer.key");
+
+    let (code, stdout, _) = run_cli(&[
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--payload-file",
+        payload.to_str().unwrap(),
+        "--bits",
+        "2",
+        "--signing-key",
+        signing_key.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "encode failed: {stdout}");
+    assert!(
+        stdout.contains("signed=true"),
+        "should report signing: {stdout}"
+    );
+
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--bits",
+        "2",
+    ]);
+    assert_eq!(code, 0, "decode failed: {stdout}");
+    assert_eq!(
+        std::fs::read(&recovered).unwrap(),
+        std::fs::read(&payload).unwrap()
+    );
+}
