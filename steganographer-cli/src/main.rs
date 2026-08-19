@@ -116,6 +116,9 @@ enum Commands {
         /// Number of Reed-Solomon parity symbols (default: 4)
         #[arg(long, default_value = "4")]
         ecc_parity: usize,
+        /// DEFLATE-compress a generic packet payload before embedding (opt-in)
+        #[arg(long)]
+        compress: bool,
         /// Multi-frame spreading: spread one signature across N frames (1 = no spreading)
         #[arg(long, default_value = "1")]
         spread: u32,
@@ -437,6 +440,7 @@ fn main() -> anyhow::Result<()> {
             embedding_key_file,
             ecc,
             ecc_parity,
+            compress,
             spread,
             hash_algorithm,
             signing_key,
@@ -492,6 +496,7 @@ fn main() -> anyhow::Result<()> {
                         encryption_key_file: opts.encryption_key_file.clone(),
                         ecc: opts.ecc,
                         ecc_parity: opts.ecc_parity,
+                        compress,
                     },
                 )
             } else if dir {

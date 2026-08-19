@@ -1513,3 +1513,47 @@ fn test_generic_packet_ecc_only_roundtrip() {
         std::fs::read(&payload).unwrap()
     );
 }
+
+#[test]
+fn test_generic_packet_compress_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let packed = tmp.path().join("packed.rgb");
+    let recovered = tmp.path().join("recovered.txt");
+    let payload = tmp.path().join("payload.txt");
+    create_test_rgb(input.to_str().unwrap());
+    std::fs::write(&payload, vec![b'x'; 2048]).unwrap(); // highly compressible
+
+    let (code, stdout, _) = run_cli(&[
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--payload-file",
+        payload.to_str().unwrap(),
+        "--bits",
+        "1",
+        "--compress",
+    ]);
+    assert_eq!(code, 0, "encode failed: {stdout}");
+    assert!(
+        stdout.contains("compressed=true"),
+        "compression should be reported: {stdout}"
+    );
+
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--bits",
+        "1",
+    ]);
+    assert_eq!(code, 0, "decode failed: {stdout}");
+    assert_eq!(
+        std::fs::read(&recovered).unwrap(),
+        std::fs::read(&payload).unwrap()
+    );
+}

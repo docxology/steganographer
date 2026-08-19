@@ -8,7 +8,7 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers, LSB video/audio, crypto, overlays, signing, metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, and steganalysis (27 modules, 259 unit tests, 113 integration tests) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers, LSB video/audio, crypto, overlays, signing, metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, and steganalysis (27 modules, 262 unit tests, 113 integration tests) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines (4 modules) |
 | `steganographer-cli/` | Crate | CLI binary: 13 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, derive, config, revoke, dashboard, ots (9 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
@@ -21,7 +21,7 @@
 
 - **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
 - **Source files**: 27 Rust source files + 6 static web assets across 4 crates
-- **Tests**: 259 core unit + 113 core integration + 6 CLI unit + 24 CLI integration + 23 dashboard + 2 GStreamer/doc = **427 passing tests**
+- **Tests**: 262 core unit + 113 core integration + 6 CLI unit + 25 CLI integration + 23 dashboard + 2 GStreamer/doc = **431 passing tests**
 - **Doc files**: 25 markdown files under `docs/` (18 existing docs + 7 program planning specifications) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -29,9 +29,9 @@
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 372 tests (259 unit + 113 integration, Ed25519 default)
+cargo test -p steganographer-core              # 375 tests (262 unit + 113 integration, Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 427 total tests
+cargo test --workspace                         # 431 total tests
 ./run.sh                                       # Interactive menu
 ```
 
