@@ -110,6 +110,7 @@ graph TD
 | `audio.rs` | `AudioBuffer`, `AudioStegoModule` trait | ~42 | — |
 | `packet.rs` | Bounded generic locator, canonical envelope, packet and legacy codecs | ~1180 | 9 |
 | `carrier.rs` | Shared carrier contracts; byte + PCM S16 LSB kernels (sequential + keyed placement) | ~1000 | 13 |
+| `forensics.rs` | Structural detectors: entropy, magic-byte family, embedded signature/packet magic | ~250 | 5 |
 | `lsb_video.rs` | Sequential LSB video embedding/extraction | ~290 | 5 |
 | `lsb_audio.rs` | Keyed PRNG LSB audio embedding/extraction | ~340 | 7 |
 | `overlay.rs` | Text overlay with built-in bitmap font | ~340 | 9 |
@@ -142,11 +143,12 @@ graph TD
 
 | Module | Purpose | Lines |
 | --- | --- | --- |
-| `main.rs` | Clap CLI entry point, 13 subcommands including generic packet `decode` and OpenTimestamps `ots` | — |
+| `main.rs` | Clap CLI entry point, 14 subcommands including generic packet `decode`, forensic `scan`, and OpenTimestamps `ots` | — |
 | `cmd_video.rs` | Live video pipeline command | ~130 |
 | `cmd_audio.rs` | Live audio pipeline command | ~90 |
 | `cmd_encode.rs` | Correctness-preserving legacy offline encode, capacity, info, and analysis | ~1330 |
 | `cmd_packet.rs` | Opt-in generic packet encode/decode vertical slice | ~300 |
+| `cmd_scan.rs` | Bounded forensic scan of files/directories (JSONL + exit policy) | ~230 |
 | `cmd_verify.rs` | Legacy signature extraction and verification | ~1010 |
 | `media_io.rs` | Decoded image/WAV/raw carrier I/O and output compatibility policy | ~330 |
 | `carrier_binding.rs` | Kernel-canonical carrier bytes used by signing and verification | ~130 |

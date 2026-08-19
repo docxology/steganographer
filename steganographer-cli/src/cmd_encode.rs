@@ -13,6 +13,10 @@ use steganographer_core::error_correction;
 use steganographer_core::lsb_video::LsbVideo;
 use steganographer_core::steganalysis;
 use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
+use steganographer_core::{
+    AudioSpatialLsb, CarrierEmbedder, EmbeddingConfig, KeyedAudioSpatialLsb, KeyedSpatialLsb,
+    SpatialLsb,
+};
 
 use crate::carrier_binding;
 use crate::media_io;
@@ -72,6 +76,12 @@ pub struct CapacityResult {
     pub payload_size: usize,
     pub total_capacity_bytes: usize,
     pub max_payloads: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic_max_packet_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic_usable_units: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic_keyed: Option<bool>,
 }
 
 /// Machine-readable analysis result.
@@ -971,6 +981,7 @@ pub fn info(
     format: &str,
     raw_width: Option<u32>,
     raw_height: Option<u32>,
+    embedding_key: Option<&str>,
 ) -> anyhow::Result<()> {
     if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
         anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
@@ -1011,6 +1022,35 @@ pub fn info(
         _ => anyhow::bail!("Unsupported stego type: {}", stego_type),
     };
 
+    // Exact generic-packet capacity uses the same descriptor/slot math as the
+    // encode/decode kernels (FMT-001 / SUR-004). Only spatial-LSB kernels are
+    // reported; frequency-domain kernels keep `None`.
+    let (generic_max_packet_bytes, generic_usable_units, generic_keyed) =
+        match (stego_type, embedding_key) {
+            ("lsb_video" | "lsb_audio", key) => {
+                let config = EmbeddingConfig::new(bits)?;
+                let descriptor = media.carrier_descriptor();
+                let report = match (key, media.is_audio()) {
+                    (Some(hex), true) => {
+                        let parsed = steganographer_core::config::resolve_key(Some(hex), None)?;
+                        KeyedAudioSpatialLsb::new(parsed).capacity(&descriptor, &config)?
+                    }
+                    (Some(hex), false) => {
+                        let parsed = steganographer_core::config::resolve_key(Some(hex), None)?;
+                        KeyedSpatialLsb::new(parsed).capacity(&descriptor, &config)?
+                    }
+                    (None, true) => AudioSpatialLsb.capacity(&descriptor, &config)?,
+                    (None, false) => SpatialLsb.capacity(&descriptor, &config)?,
+                };
+                (
+                    Some(report.max_packet_bytes),
+                    Some(report.usable_units),
+                    Some(key.is_some()),
+                )
+            }
+            _ => (None, None, None),
+        };
+
     let result = CapacityResult {
         file: input.to_string(),
         file_size: media.encoded_len,
@@ -1019,6 +1059,9 @@ pub fn info(
         payload_size,
         total_capacity_bytes,
         max_payloads,
+        generic_max_packet_bytes,
+        generic_usable_units,
+        generic_keyed,
     };
 
     match format {
@@ -1031,6 +1074,18 @@ pub fn info(
             println!("Payload size: {} bytes", result.payload_size);
             println!("Total capacity: {} bytes", result.total_capacity_bytes);
             println!("Max payloads: {}", result.max_payloads);
+            if let (Some(bytes), Some(units), Some(keyed)) = (
+                result.generic_max_packet_bytes,
+                result.generic_usable_units,
+                result.generic_keyed,
+            ) {
+                println!(
+                    "Generic packet capacity: {} bytes ({} usable units, {})",
+                    bytes,
+                    units,
+                    if keyed { "keyed" } else { "sequential" }
+                );
+            }
         }
     }
     Ok(())

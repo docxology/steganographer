@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use steganographer_core::CarrierDescriptor;
+
 /// Decoded media kind and the properties required to write it safely.
 #[derive(Debug, Clone, Copy)]
 pub enum MediaKind {
@@ -42,6 +44,23 @@ impl MediaInput {
     /// Number of complete 8x8 image blocks.
     pub fn dct_blocks(&self) -> usize {
         (self.width as usize / 8) * (self.height as usize / 8)
+    }
+
+    /// The shared carrier descriptor used by generic packet capacity math.
+    /// Byte carriers (`Rgb8`/`ByteStream`) report one unit per byte; PCM S16LE
+    /// carriers report one unit per interleaved sample.
+    pub fn carrier_descriptor(&self) -> CarrierDescriptor {
+        match self.kind {
+            MediaKind::Rgb8Image | MediaKind::RawRgb8 => CarrierDescriptor::rgb8(self.data.len()),
+            MediaKind::WavPcm16(_) | MediaKind::RawS16Le => {
+                CarrierDescriptor::pcm_s16le(self.data.len() / 2)
+            }
+        }
+    }
+
+    /// Whether this carrier is PCM S16LE audio (2-byte units).
+    pub fn is_audio(&self) -> bool {
+        matches!(self.kind, MediaKind::WavPcm16(_) | MediaKind::RawS16Le)
     }
 }
 

@@ -8,7 +8,7 @@ User-facing CLI binary built with Clap. Wires together core algorithms, GStreame
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/main.rs` | 729 | `Cli` struct, `Commands` enum (13 subcommands), `main()` |
+| `src/main.rs` | 729 | `Cli` struct, `Commands` enum (14 subcommands), `main()` |
 | `src/cmd_video.rs` | 257 | `run(config, source, sink, max_frames)` |
 | `src/cmd_audio.rs` | 141 | `run(config, source, sink, max_buffers)` |
 | `src/cmd_encode.rs` | 1371 | Legacy offline encode, keygen, info, and analysis |
