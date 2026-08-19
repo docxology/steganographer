@@ -132,6 +132,7 @@ steganographer encode [OPTIONS]
 | `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
 | `--mime-type <TYPE>` | — | None | Public generic-packet MIME metadata |
 | `--filename <NAME>` | — | Payload basename | Safe display filename; path components are rejected |
+| `--no-verify-write` | — | `false` | Skip the post-write re-read verification of a generic packet carrier |
 
 **Currently supported formats**:
 
@@ -160,7 +161,9 @@ carrier behavior and prints the public key needed by `verify`. The generic
 packet path supports `lsb_video` (RGB/PNG) and `lsb_audio` (PCM S16 WAV / raw
 S16LE) carriers, sequential or keyed placement (`--embedding-key`), and the
 Ed25519 signing (`--signing-key`), DEFLATE (`--compress`), AEAD encryption
-(`--encrypt`), and chunked Reed-Solomon (`--ecc`) transforms. Multi-frame
+(`--encrypt`), and chunked Reed-Solomon (`--ecc`) transforms. After writing, the
+carrier is re-read and re-extracted to confirm byte-identical packet recovery
+(post-write verification); `--no-verify-write` skips that check. Multi-frame
 spreading remains unsupported for generic packets.
 
 ---

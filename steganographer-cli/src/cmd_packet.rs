@@ -30,6 +30,7 @@ pub struct GenericEncodeOptions {
     pub signing_key: Option<String>,
     pub embedding_key: Option<String>,
     pub embedding_key_file: Option<String>,
+    pub verify_write: bool,
 }
 
 pub struct GenericDecodeOptions {
@@ -224,6 +225,17 @@ pub fn encode(
         }
     };
     media_io::write_output(output, &media, stego_type)?;
+    if options.verify_write {
+        verify_written_carrier(
+            output,
+            stego_type,
+            audio,
+            &config,
+            embedding_key,
+            &packet_bytes,
+            &limits,
+        )?;
+    }
 
     let result = GenericEncodeResult {
         protocol: "1.0-alpha",
@@ -412,6 +424,47 @@ fn validate_kernel(stego_type: &str) -> anyhow::Result<()> {
 
 fn is_audio_kernel(stego_type: &str) -> bool {
     stego_type == "lsb_audio"
+}
+
+/// Post-write verification (`FMT-005`): re-read the written carrier and confirm
+/// the same extractor recovers byte-identical packet bytes. This catches any
+/// writer that silently alters the carrier's LSBs.
+fn verify_written_carrier(
+    output: &str,
+    stego_type: &str,
+    audio: bool,
+    config: &EmbeddingConfig,
+    embedding_key: Option<[u8; 32]>,
+    packet_bytes: &[u8],
+    limits: &DecodeLimits,
+) -> anyhow::Result<()> {
+    let format = media_io::detect_format(output, stego_type);
+    let media = media_io::read_input(output, &format, stego_type)?;
+    let report = if audio {
+        match embedding_key {
+            Some(key) => {
+                KeyedAudioSpatialLsb::new(key).extract_packet(&media.data, config, limits)?
+            }
+            None => AudioSpatialLsb.extract_packet(&media.data, config, limits)?,
+        }
+    } else {
+        match embedding_key {
+            Some(key) => KeyedSpatialLsb::new(key).extract_packet(&media.data, config, limits)?,
+            None => SpatialLsb.extract_packet(&media.data, config, limits)?,
+        }
+    };
+    let reencoded = report
+        .packet
+        .encode(limits)
+        .map_err(|e| anyhow::anyhow!("post-write verification re-encode failed: {e}"))?;
+    if reencoded != packet_bytes {
+        anyhow::bail!(
+            "post-write verification failed: re-read packet ({} bytes) differs from embedded packet ({} bytes)",
+            reencoded.len(),
+            packet_bytes.len()
+        );
+    }
+    Ok(())
 }
 
 fn bits_candidates(value: &str) -> anyhow::Result<Vec<u8>> {
