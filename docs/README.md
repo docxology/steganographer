@@ -56,7 +56,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 - **Run**: `./run.sh` (interactive menu, reads `steganographer.toml`)
 - **Dashboard**: `./run.sh` → option `d` or `a` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace` (419 tests across 4 crates)
+- **Test**: `cargo test --workspace` (427 tests across 4 crates)
 - **CLI**: `cargo run -p steganographer-cli -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
@@ -98,12 +98,12 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   253 tests (packet/carrier, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, OTS)
+steganographer-core (unit):   259 tests (packet/carrier, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, OTS)
 steganographer-core (integ):  113 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC, OTS)
 steganographer-cli (unit):      6 tests (media descriptors/I/O and canonical carrier binding)
-steganographer-cli (integ):    22 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation)
+steganographer-cli (integ):    24 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms)
 steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
 steganographer-gst:            2 tests (plugin skeleton and doctest)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        419 tests, 0 failures
+Total:                        427 tests, 0 failures
 ```

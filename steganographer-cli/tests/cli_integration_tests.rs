@@ -459,7 +459,7 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
             .envelope
             .transforms
             .push(TransformDescriptor {
-                algorithm: 1,
+                algorithm: 9999, // unknown to the decoder
                 version: 1,
                 critical: true,
                 parameters: Vec::new(),
@@ -498,7 +498,10 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
             transformed_output.to_str().unwrap(),
         ]);
         assert_ne!(code, 0);
-        assert!(stderr.contains("does not support"));
+        assert!(
+            stderr.contains("not supported") || stderr.contains("unknown"),
+            "unknown critical transform must fail closed: {stderr}"
+        );
         assert!(!transformed_output.exists());
     }
 }
@@ -1377,4 +1380,136 @@ fn test_derive_from_password_without_salt_generates_one() {
         stdout
     );
     assert!(out.join("signing.key").exists());
+}
+
+#[test]
+fn test_generic_packet_encrypt_ecc_roundtrip_and_fail_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let packed = tmp.path().join("packed.rgb");
+    let recovered = tmp.path().join("recovered.txt");
+    let payload = tmp.path().join("payload.txt");
+    create_test_rgb(input.to_str().unwrap());
+    std::fs::write(&payload, b"secret generic payload with encrypt + ecc").unwrap();
+    let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    let (code, stdout, _) = run_cli(&[
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--payload-file",
+        payload.to_str().unwrap(),
+        "--bits",
+        "2",
+        "--encrypt",
+        "--encryption-key",
+        key,
+        "--ecc",
+        "--ecc-parity",
+        "8",
+    ]);
+    assert_eq!(code, 0, "encode failed: {stdout}");
+    assert!(
+        stdout.contains("encrypted=true") && stdout.contains("error_corrected=true"),
+        "should report both transforms: {stdout}"
+    );
+
+    // Round-trip with the correct key.
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--bits",
+        "2",
+        "--decrypt",
+        "--decryption-key",
+        key,
+    ]);
+    assert_eq!(code, 0, "decode failed: {stdout}");
+    assert_eq!(
+        std::fs::read(&recovered).unwrap(),
+        std::fs::read(&payload).unwrap(),
+        "decoded payload must match the original"
+    );
+
+    // A wrong key must fail closed.
+    let (code, _, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        tmp.path().join("bad.txt").to_str().unwrap(),
+        "--bits",
+        "2",
+        "--decrypt",
+        "--decryption-key",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ]);
+    assert_ne!(code, 0, "wrong decryption key must fail");
+
+    // Omitting --decrypt on an encrypted packet must fail with a clear message.
+    let (code, _, stderr) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        tmp.path().join("bad2.txt").to_str().unwrap(),
+        "--bits",
+        "2",
+    ]);
+    assert_ne!(code, 0, "encrypted packet without --decrypt must fail");
+    assert!(
+        stderr.contains("decryption key"),
+        "should name the missing key: {stderr}"
+    );
+}
+
+#[test]
+fn test_generic_packet_ecc_only_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let packed = tmp.path().join("packed.rgb");
+    let recovered = tmp.path().join("recovered.txt");
+    let payload = tmp.path().join("payload.txt");
+    create_test_rgb(input.to_str().unwrap());
+    std::fs::write(&payload, b"ecc-only generic payload").unwrap();
+
+    let (code, stdout, _) = run_cli(&[
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--payload-file",
+        payload.to_str().unwrap(),
+        "--bits",
+        "2",
+        "--ecc",
+        "--ecc-parity",
+        "4",
+    ]);
+    assert_eq!(code, 0, "encode failed: {stdout}");
+    assert!(
+        stdout.contains("encrypted=false") && stdout.contains("error_corrected=true"),
+        "should report ECC only: {stdout}"
+    );
+
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--bits",
+        "2",
+    ]);
+    assert_eq!(code, 0, "decode failed: {stdout}");
+    assert_eq!(
+        std::fs::read(&recovered).unwrap(),
+        std::fs::read(&payload).unwrap()
+    );
 }

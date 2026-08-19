@@ -2,11 +2,16 @@
 
 use rand::RngCore;
 use serde::Serialize;
+use steganographer_core::encryption::EncryptionKey;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, KERNEL_SPATIAL_LSB,
     PLACEMENT_SEQUENTIAL,
 };
-use steganographer_core::{CarrierEmbedder, CarrierExtractor, EmbeddingConfig, SpatialLsb};
+use steganographer_core::transforms;
+use steganographer_core::{
+    CarrierEmbedder, CarrierExtractor, EmbeddingConfig, SpatialLsb, TransformContext,
+    DEFAULT_ECC_CHUNK_LEN,
+};
 
 use crate::media_io;
 
@@ -16,6 +21,17 @@ pub struct GenericEncodeOptions {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
     pub input_format: Option<String>,
+    pub encrypt: bool,
+    pub encryption_key: Option<String>,
+    pub encryption_key_file: Option<String>,
+    pub ecc: bool,
+    pub ecc_parity: usize,
+}
+
+pub struct GenericDecodeOptions {
+    pub decrypt: bool,
+    pub decryption_key: Option<String>,
+    pub decryption_key_file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +44,8 @@ struct GenericEncodeResult {
     bits: u8,
     input: String,
     output: String,
+    encrypted: bool,
+    error_corrected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,6 +62,8 @@ struct GenericDecodeResult {
     bits: u8,
     input: String,
     output: String,
+    encrypted: bool,
+    error_corrected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +142,37 @@ pub fn encode(
         AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
         &limits,
     )?;
+
+    // Apply opt-in transforms (AEAD encryption, chunked Reed-Solomon ECC).
+    let encrypt_key = resolve_encryption_key(options)?;
+    let ecc_parity = if options.ecc { options.ecc_parity } else { 0 };
+    if options.ecc && !(1..=steganographer_core::MAX_ECC_PARITY).contains(&ecc_parity) {
+        anyhow::bail!(
+            "--ecc-parity must be in 1..={}, got {}",
+            steganographer_core::MAX_ECC_PARITY,
+            ecc_parity
+        );
+    }
+    let encrypted = encrypt_key.is_some();
+    let error_corrected = ecc_parity > 0;
+    let context = TransformContext {
+        packet_id: &packet.envelope.packet_id,
+        nonce: &packet.locator.nonce,
+        payload_kind: packet.envelope.payload_kind as u16,
+        original_len: packet.envelope.original_len,
+    };
+    let (encoded_body, transforms, flags) = transforms::apply(
+        &packet.body,
+        &context,
+        encrypt_key.as_ref(),
+        ecc_parity,
+        DEFAULT_ECC_CHUNK_LEN,
+    )
+    .map_err(|e| anyhow::anyhow!("transform application failed: {e}"))?;
+    packet.body = encoded_body;
+    packet.envelope.transforms = transforms;
+    packet.locator.flags = flags;
+
     packet.envelope.mime_type = options.mime_type.clone();
     packet.envelope.filename = display_filename.clone();
     synchronize_locator(&mut packet, &limits)?;
@@ -134,11 +185,13 @@ pub fn encode(
         protocol: "1.0-alpha",
         packet_id: hex_encode(&packet_id),
         payload_kind: payload_kind_name(payload_kind),
-        payload_bytes: packet.body.len(),
+        payload_bytes: packet.envelope.original_len as usize,
         packet_bytes: embed_report.packet_bytes,
         bits,
         input: input.to_owned(),
         output: output.to_owned(),
+        encrypted,
+        error_corrected,
         mime_type: options.mime_type.clone(),
         filename: display_filename,
     };
@@ -154,6 +207,7 @@ pub fn decode(
     format: &str,
     input_format: Option<&str>,
     force: bool,
+    options: &GenericDecodeOptions,
 ) -> anyhow::Result<()> {
     if stego_type != "lsb_video" {
         anyhow::bail!("generic packet alpha currently supports --stego-type lsb_video only");
@@ -197,14 +251,33 @@ pub fn decode(
             errors.join("; ")
         )
     })?;
-    if report.packet.locator.flags != 0 || !report.packet.envelope.transforms.is_empty() {
-        anyhow::bail!(
-            "generic packet uses transforms that this alpha decoder does not support; \
-             no payload was written"
-        );
+
+    // Reverse any recorded transforms (AEAD decryption, Reed-Solomon ECC) and
+    // re-verify the recovered logical payload against the envelope digest.
+    let decrypt_key = resolve_decryption_key(options)?;
+    let context = TransformContext {
+        packet_id: &report.packet.envelope.packet_id,
+        nonce: &report.packet.locator.nonce,
+        payload_kind: report.packet.envelope.payload_kind as u16,
+        original_len: report.packet.envelope.original_len,
+    };
+    let payload = transforms::reverse(
+        &report.packet.body,
+        &context,
+        decrypt_key.as_ref(),
+        &report.packet.envelope.transforms,
+        report.packet.envelope.original_len,
+    )
+    .map_err(|e| anyhow::anyhow!("transform reversal failed: {e}"))?;
+    if !report.packet.envelope.content_digest.verify(&payload) {
+        anyhow::bail!("recovered payload digest does not match the packet envelope");
     }
 
-    std::fs::write(output, &report.packet.body)?;
+    let encrypted = report.packet.locator.flags & steganographer_core::packet::FLAG_ENCRYPTED != 0;
+    let error_corrected =
+        report.packet.locator.flags & steganographer_core::packet::FLAG_ERROR_CORRECTED != 0;
+
+    std::fs::write(output, &payload)?;
     let ots_meta =
         steganographer_core::OtsMetadata::from_extensions(&report.packet.envelope.extensions);
     let ots_info = if ots_meta.is_present() {
@@ -223,11 +296,13 @@ pub fn decode(
         ),
         packet_id: hex_encode(&report.packet.envelope.packet_id),
         payload_kind: payload_kind_name(report.packet.envelope.payload_kind),
-        payload_bytes: report.packet.body.len(),
+        payload_bytes: payload.len(),
         packet_bytes: report.packet.encoded_len()?,
         bits: report.bits_per_unit,
         input: input.to_owned(),
         output: output.to_owned(),
+        encrypted,
+        error_corrected,
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
         ots: ots_info,
@@ -261,6 +336,41 @@ fn bits_candidates(value: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("--bits must be 'auto' or an integer from 1 to 4"))?;
     EmbeddingConfig::new(bits)?;
     Ok(vec![bits])
+}
+
+fn resolve_encryption_key(options: &GenericEncodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
+    if !options.encrypt {
+        return Ok(None);
+    }
+    let key = if let Some(ref path) = options.encryption_key_file {
+        let hex_str = std::fs::read_to_string(path)?.trim().to_string();
+        EncryptionKey::from_hex(&hex_str)?
+    } else if let Some(ref hex_str) = options.encryption_key {
+        EncryptionKey::from_hex(hex_str)?
+    } else {
+        let key = EncryptionKey::generate();
+        println!(
+            "Generated random encryption key (hex, save it to decrypt later): {}",
+            key.to_hex()
+        );
+        key
+    };
+    Ok(Some(key))
+}
+
+fn resolve_decryption_key(options: &GenericDecodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
+    if !options.decrypt {
+        return Ok(None);
+    }
+    let key = if let Some(ref path) = options.decryption_key_file {
+        let hex_str = std::fs::read_to_string(path)?.trim().to_string();
+        EncryptionKey::from_hex(&hex_str)?
+    } else if let Some(ref hex_str) = options.decryption_key {
+        EncryptionKey::from_hex(hex_str)?
+    } else {
+        anyhow::bail!("--decrypt requires --decryption-key <hex> or --decryption-key-file <path>");
+    };
+    Ok(Some(key))
 }
 
 fn validate_display_filename(value: String) -> anyhow::Result<String> {
@@ -304,6 +414,10 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
             "Packet: {} bytes at {} LSB(s)",
             result.packet_bytes, result.bits
         );
+        println!(
+            "Transforms: encrypted={}, error_corrected={}",
+            result.encrypted, result.error_corrected
+        );
         println!("Encoded carrier: {}", result.output);
     }
     Ok(())
@@ -320,6 +434,10 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
             result.payload_bytes, result.payload_kind
         );
         println!("Detected LSB strength: {}", result.bits);
+        println!(
+            "Transforms: encrypted={}, error_corrected={}",
+            result.encrypted, result.error_corrected
+        );
         println!("Decoded payload: {}", result.output);
     }
     Ok(())

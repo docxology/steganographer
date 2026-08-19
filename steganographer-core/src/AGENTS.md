@@ -7,8 +7,9 @@
 Entry point. Declares and re-exports: `packet`, `carrier`, `video`, `audio`,
 `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
-`error_correction`, `multi_frame`, `kdf`, `adaptive`, `hash_chain`,
-`steganalysis`, `mdct_audio`.
+`error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
+`hash_chain`, `steganalysis`, `mdct_audio`, `ots_client`, `ots_config`,
+`ots_handler`.
 
 ### packet.rs
 
@@ -26,6 +27,23 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `video`, `audio`,
 - `CarrierEmbedder`, `CarrierExtractor` — capacity/embed/extract contracts
 - `SpatialLsb` — sequential generic packet kernel with locator-first bounded
   extraction and descriptor validation
+
+### password.rs
+
+- `Argon2Params`, `PasswordKdfError` — Argon2id (RFC 9106) password-stretching
+  parameters and typed failures
+- `derive_master_from_password`, `derive_all_from_password` — stretch a
+  human-chosen password into a high-entropy master, then reuse `kdf::derive_all`
+- `generate_salt`, `RECOMMENDED_MEMORY_KIB` / `RECOMMENDED_ITERATIONS` — 128-bit
+  salt generation and the OWASP parameter floor
+
+### transforms.rs
+
+- `TransformContext` — packet identity (id, nonce, kind, length) bound into AEAD
+- `apply` / `reverse` — ChaCha20-Poly1305 encryption and chunked Reed-Solomon
+  error correction over a generic packet body, with envelope descriptor + flag
+  bookkeeping
+- `is_encrypted`, `TransformError`, `DEFAULT_ECC_CHUNK_LEN`, `MAX_ECC_PARITY`
 
 ### video.rs
 
