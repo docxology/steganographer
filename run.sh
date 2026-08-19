@@ -473,7 +473,7 @@ action_run_tests() {
     separator
     echo ""
     setup_path
-    cargo test -p steganographer-core --manifest-path "${SCRIPT_DIR}/Cargo.toml" 2>&1
+    cargo test --workspace --manifest-path "${SCRIPT_DIR}/Cargo.toml" 2>&1
     press_enter
 }
 
@@ -619,7 +619,8 @@ action_show_info() {
     echo -e "  ${BOLD}Crates:${RESET}"
     echo "    steganographer-core  — Pure algorithms (BLAKE3, Ed25519, LSB, Overlay, InfoBar)"
     echo "    steganographer-gst   — GStreamer integration (AppSink/AppSrc)"
-    echo "    steganographer-cli   — CLI binary (Clap, 5 subcommands)"
+    echo "    steganographer-cli   — CLI binary (Clap, 13 subcommands)"
+    echo "    steganographer-dashboard — Web GUI (Axum + WebSocket, 3 tabs)"
     echo ""
 
     echo -e "  ${BOLD}Modules:${RESET}"

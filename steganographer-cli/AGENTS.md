@@ -8,12 +8,13 @@ User-facing CLI binary built with Clap. Wires together core algorithms, GStreame
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/main.rs` | 646 | `Cli` struct, `Commands` enum (12 subcommands), `main()` |
-| `src/cmd_video.rs` | 254 | `run(config, source, sink, max_frames)` |
+| `src/main.rs` | 729 | `Cli` struct, `Commands` enum (13 subcommands), `main()` |
+| `src/cmd_video.rs` | 257 | `run(config, source, sink, max_frames)` |
 | `src/cmd_audio.rs` | 141 | `run(config, source, sink, max_buffers)` |
-| `src/cmd_encode.rs` | 1328 | Legacy offline encode, keygen, info, and analysis |
-| `src/cmd_packet.rs` | 304 | Opt-in generic packet encode/decode |
-| `src/cmd_verify.rs` | 1006 | Legacy extraction/verification and `VerifyResult` |
+| `src/cmd_encode.rs` | 1371 | Legacy offline encode, keygen, info, and analysis |
+| `src/cmd_packet.rs` | 326 | Opt-in generic packet encode/decode |
+| `src/cmd_verify.rs` | 1158 | Legacy extraction/verification and `VerifyResult` |
+| `src/cmd_ots.rs` | 398 | OpenTimestamps `stamp` / `verify` attestation |
 | `src/media_io.rs` | 326 | Descriptor-preserving image/WAV/raw I/O and output policy |
 | `src/carrier_binding.rs` | 132 | Kernel-canonical carrier bytes for signing |
 
@@ -33,6 +34,7 @@ User-facing CLI binary built with Clap. Wires together core algorithms, GStreame
 | `config` | Validate a TOML configuration file |
 | `revoke` | Add a signing identity to a revoked-key list |
 | `dashboard` | Launch the live round-trip verification dashboard (web GUI) |
+| `ots` | OpenTimestamps attestation: `stamp` or `verify` a file's Merkle root |
 
 ## Global Options
 

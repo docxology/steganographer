@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-311_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-402_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -42,7 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
-cargo test --workspace   # 311 tests, 0 failures
+cargo test --workspace   # 402 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -119,7 +119,7 @@ Four Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│  steganographer-cli       (binary)           │  Clap CLI: 12 subcommands
+│  steganographer-cli       (binary)           │  Clap CLI: 13 subcommands
 ├──────────────────────────────────────────────┤
 │  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
@@ -130,10 +130,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 261 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config | 351 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
-| **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 1 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 25 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 2 | [GStreamer Guide](docs/gstreamer.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 26 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -223,20 +223,20 @@ bits = 2
 
 ## ✅ Tests
 
-311 tests across 4 crates — all passing:
+402 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 185 | `steganographer-core/src/*.rs` |
-| Core integration tests | 76 | `steganographer-core/tests/integration_tests.rs` |
-| CLI unit + integration tests | 25 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
+| Core unit tests | 238 | `steganographer-core/src/*.rs` |
+| Core integration tests | 113 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
+| CLI unit + integration tests | 26 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **311** | **0 failures** |
+| **Total** | **402** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 311 tests
-cargo test -p steganographer-core     # Core only (261 tests)
+cargo test --workspace                # All 402 tests
+cargo test -p steganographer-core     # Core only (351 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 
@@ -269,7 +269,7 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | [**Security**](docs/security.md) | Cachin's ε-security, deployment guidance |
 | [**Threat Model**](docs/threat-model.md) | Adversary model, attack catalog, mitigations |
 | [**Key Rotation**](docs/key-rotation.md) | Key rotation record, incident report, revocation procedure |
-| [**CLI Reference**](docs/cli-reference.md) | All 12 commands with examples |
+| [**CLI Reference**](docs/cli-reference.md) | All 13 commands with examples |
 | [**API Reference**](docs/api-reference.md) | HTTP + WebSocket endpoints, JSON schemas |
 | [**Configuration**](docs/configuration.md) | Full TOML schema, template variables |
 | [**GStreamer**](docs/gstreamer.md) | Pipeline integration, AppSink/AppSrc |

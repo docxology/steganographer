@@ -49,6 +49,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (superseded by `verify_extracted_bits`) — clears unused-function build
   warnings from `cargo build --all-targets`.
 
+- **Doc/CI accuracy sweep.** The test-count badge and every test summary
+  (`README.md`, `AGENTS.md`, per-crate `README.md`/`AGENTS.md`, `docs/README.md`,
+  `docs/getting-started.md`, `docs/contributing.md`) drifted from the real
+  count — 311 claimed versus 402 actually passing (core 351 = 238 unit + 113
+  integration, CLI 26, dashboard 23, gst 2). The CI badge job counted
+  `#[test]` attributes with `grep`, which misses `#[tokio::test]` and
+  macro-generated tests, so it could never converge on the real number. It now
+  sums `cargo test --workspace` result lines. Also fixed the stale CLI
+  subcommand count (13, including `ots`) and the `run.sh` info text.
+
 ### Added
 
 - `error_correction` tests `alpha_is_primitive` and

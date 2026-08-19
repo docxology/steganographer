@@ -99,10 +99,12 @@ jobs:
       - name: Count tests
         id: count
         run: |
-          COUNT=$(cargo test --workspace --no-run 2>/dev/null | grep -c "test " || echo 0)
-          # Alternative: count #[test] attributes
-          TEST_COUNT=$(grep -rn "#\[test\]" --include="*.rs" steganographer-core/ steganographer-cli/ steganographer-dashboard/ steganographer-gst/ | wc -l)
-          echo "count=$TEST_COUNT" >> $GITHUB_OUTPUT
+          # Sum the "test result: ok. N passed" lines from every test binary and
+          # doc-test target. This counts tests the same way the `test` job does,
+          # instead of grepping `#[test]` attributes (which misses `#[tokio::test]`
+          # and macro-generated tests and silently drifted the badge).
+          COUNT=$(cargo test --workspace 2>/dev/null | awk '/^test result:/ { sum += $4 } END { print sum+0 }')
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
 
       - name: Update README badge
         run: |
