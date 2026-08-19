@@ -16,6 +16,7 @@ pub const LOCATOR_SIZE: usize = 32;
 
 /// Initial registry identifiers used by the generic spatial-LSB slice.
 pub const PLACEMENT_SEQUENTIAL: u16 = 1;
+pub const PLACEMENT_KEYED: u16 = 2;
 pub const KERNEL_SPATIAL_LSB: u16 = 1;
 
 pub const FLAG_COMPRESSED: u16 = 1 << 0;

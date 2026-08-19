@@ -5,12 +5,12 @@ use serde::Serialize;
 use steganographer_core::encryption::EncryptionKey;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, KERNEL_SPATIAL_LSB,
-    PLACEMENT_SEQUENTIAL,
+    PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
 };
 use steganographer_core::transforms;
 use steganographer_core::{
-    CarrierEmbedder, CarrierExtractor, EmbeddingConfig, SpatialLsb, TransformContext,
-    DEFAULT_ECC_CHUNK_LEN,
+    CarrierEmbedder, CarrierExtractor, EmbeddingConfig, KeyedSpatialLsb, SpatialLsb,
+    TransformContext, DEFAULT_ECC_CHUNK_LEN,
 };
 
 use crate::media_io;
@@ -28,12 +28,16 @@ pub struct GenericEncodeOptions {
     pub ecc_parity: usize,
     pub compress: bool,
     pub signing_key: Option<String>,
+    pub embedding_key: Option<String>,
+    pub embedding_key_file: Option<String>,
 }
 
 pub struct GenericDecodeOptions {
     pub decrypt: bool,
     pub decryption_key: Option<String>,
     pub decryption_key_file: Option<String>,
+    pub embedding_key: Option<String>,
+    pub embedding_key_file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +54,7 @@ struct GenericEncodeResult {
     error_corrected: bool,
     compressed: bool,
     signed: bool,
+    keyed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +75,7 @@ struct GenericDecodeResult {
     error_corrected: bool,
     compressed: bool,
     signed: bool,
+    keyed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,12 +145,19 @@ pub fn encode(
     let mut nonce = [0u8; 8];
     rand::rngs::OsRng.fill_bytes(&mut packet_id);
     rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let embedding_key = resolve_embedding_key(options)?;
+    let keyed = embedding_key.is_some();
+    let placement = if keyed {
+        AlgorithmDescriptor::new(PLACEMENT_KEYED, 1, Vec::new())
+    } else {
+        AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new())
+    };
     let mut packet = GenericPacket::new_untransformed(
         payload,
         packet_id,
         nonce,
         payload_kind,
-        AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new()),
+        placement,
         AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
         &limits,
     )?;
@@ -180,7 +193,12 @@ pub fn encode(
     .map_err(|e| anyhow::anyhow!("transform application failed: {e}"))?;
     packet.body = encoded_body;
     packet.envelope.transforms = transforms;
-    packet.locator.flags = flags;
+    packet.locator.flags = flags
+        | if keyed {
+            steganographer_core::packet::FLAG_KEYED_LOCATOR
+        } else {
+            0
+        };
     let compressed = flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
     let signed = flags & steganographer_core::packet::FLAG_PAYLOAD_SIGNED != 0;
 
@@ -189,7 +207,12 @@ pub fn encode(
     synchronize_locator(&mut packet, &limits)?;
     let packet_bytes = packet.encode(&limits)?;
 
-    let embed_report = SpatialLsb.embed_packet(&mut media.data, &packet_bytes, &config)?;
+    let embed_report = match &embedding_key {
+        Some(key) => {
+            KeyedSpatialLsb::new(*key).embed_packet(&mut media.data, &packet_bytes, &config)?
+        }
+        None => SpatialLsb.embed_packet(&mut media.data, &packet_bytes, &config)?,
+    };
     media_io::write_output(output, &media, stego_type)?;
 
     let result = GenericEncodeResult {
@@ -205,6 +228,7 @@ pub fn encode(
         error_corrected,
         compressed,
         signed,
+        keyed,
         mime_type: options.mime_type.clone(),
         filename: display_filename,
     };
@@ -246,10 +270,20 @@ pub fn decode(
     let media = media_io::read_input(input, &selected_format, stego_type)?;
     let limits = DecodeLimits::default();
     let candidates = bits_candidates(bits)?;
+    let embedding_key = resolve_embedding_key(options)?;
     let mut extracted = None;
     let mut errors = Vec::new();
     for candidate in candidates {
         let config = EmbeddingConfig::new(candidate)?;
+        if let Some(key) = embedding_key {
+            match KeyedSpatialLsb::new(key).extract_packet(&media.data, &config, &limits) {
+                Ok(report) => {
+                    extracted = Some(report);
+                    break;
+                }
+                Err(error) => errors.push(format!("{candidate} bits (keyed): {error}")),
+            }
+        }
         match SpatialLsb.extract_packet(&media.data, &config, &limits) {
             Ok(report) => {
                 extracted = Some(report);
@@ -293,6 +327,7 @@ pub fn decode(
         report.packet.locator.flags & steganographer_core::packet::FLAG_COMPRESSED != 0;
     let signed =
         report.packet.locator.flags & steganographer_core::packet::FLAG_PAYLOAD_SIGNED != 0;
+    let keyed = report.packet.locator.flags & steganographer_core::packet::FLAG_KEYED_LOCATOR != 0;
 
     std::fs::write(output, &payload)?;
     let ots_meta =
@@ -322,6 +357,7 @@ pub fn decode(
         error_corrected,
         compressed,
         signed,
+        keyed,
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
         ots: ots_info,
@@ -355,6 +391,43 @@ fn bits_candidates(value: &str) -> anyhow::Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("--bits must be 'auto' or an integer from 1 to 4"))?;
     EmbeddingConfig::new(bits)?;
     Ok(vec![bits])
+}
+
+fn resolve_embedding_key<O: EmbeddingKeySource>(options: &O) -> anyhow::Result<Option<[u8; 32]>> {
+    match (options.embedding_key(), options.embedding_key_file()) {
+        (Some(hex), None) => steganographer_core::config::resolve_key(Some(hex), None).map(Some),
+        (None, Some(path)) => steganographer_core::config::resolve_key(None, Some(path)).map(Some),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--embedding-key and --embedding-key-file are mutually exclusive")
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Shared view of the embedding-key CLI fields used by both encode and decode.
+trait EmbeddingKeySource {
+    fn embedding_key(&self) -> Option<&str>;
+    fn embedding_key_file(&self) -> Option<&str>;
+}
+
+impl EmbeddingKeySource for GenericEncodeOptions {
+    fn embedding_key(&self) -> Option<&str> {
+        self.embedding_key.as_deref()
+    }
+
+    fn embedding_key_file(&self) -> Option<&str> {
+        self.embedding_key_file.as_deref()
+    }
+}
+
+impl EmbeddingKeySource for GenericDecodeOptions {
+    fn embedding_key(&self) -> Option<&str> {
+        self.embedding_key.as_deref()
+    }
+
+    fn embedding_key_file(&self) -> Option<&str> {
+        self.embedding_key_file.as_deref()
+    }
 }
 
 fn resolve_signing_key(
@@ -464,6 +537,10 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
             "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
             result.signed, result.compressed, result.encrypted, result.error_corrected
         );
+        println!(
+            "Placement: {}",
+            if result.keyed { "keyed" } else { "sequential" }
+        );
         println!("Encoded carrier: {}", result.output);
     }
     Ok(())
@@ -483,6 +560,10 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
         println!(
             "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
             result.signed, result.compressed, result.encrypted, result.error_corrected
+        );
+        println!(
+            "Placement: {}",
+            if result.keyed { "keyed" } else { "sequential" }
         );
         println!("Decoded payload: {}", result.output);
     }

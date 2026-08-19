@@ -179,6 +179,12 @@ enum Commands {
         /// Path to decryption key file
         #[arg(long)]
         decryption_key_file: Option<String>,
+        /// Embedding key (hex-encoded 32 bytes) for keyed placement
+        #[arg(long)]
+        embedding_key: Option<String>,
+        /// Path to embedding key file for keyed placement
+        #[arg(long)]
+        embedding_key_file: Option<String>,
     },
 
     /// Verify steganographic signatures in a media file
@@ -475,13 +481,9 @@ fn main() -> anyhow::Result<()> {
                 if dir {
                     anyhow::bail!("generic packet encoding does not support --dir");
                 }
-                if opts.spread > 1
-                    || opts.embedding_key.is_some()
-                    || opts.embedding_key_file.is_some()
-                {
+                if opts.spread > 1 {
                     anyhow::bail!(
-                        "generic packet alpha does not yet support keyed placement \
-                         or multi-frame spreading"
+                        "generic packet alpha does not yet support multi-frame spreading"
                     );
                 }
                 cmd_packet::encode(
@@ -503,6 +505,8 @@ fn main() -> anyhow::Result<()> {
                         ecc_parity: opts.ecc_parity,
                         compress,
                         signing_key: opts.signing_key.clone(),
+                        embedding_key: opts.embedding_key.clone(),
+                        embedding_key_file: opts.embedding_key_file.clone(),
                     },
                 )
             } else if dir {
@@ -539,6 +543,8 @@ fn main() -> anyhow::Result<()> {
             decrypt,
             decryption_key,
             decryption_key_file,
+            embedding_key,
+            embedding_key_file,
         } => cmd_packet::decode(
             &input,
             &output,
@@ -551,6 +557,8 @@ fn main() -> anyhow::Result<()> {
                 decrypt,
                 decryption_key,
                 decryption_key_file,
+                embedding_key,
+                embedding_key_file,
             },
         ),
 

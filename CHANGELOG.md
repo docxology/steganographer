@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Keyed placement and keyed locator (`PKT-008` / `PLC-002`).** New
+  `steganographer-core::placement::KeyedPermutation` is an O(1)-memory keyed
+  permutation (balanced Feistel over the next power-of-two domain with cycle
+  walking) that covers every carrier slot exactly once under a 32-byte key.
+  `KeyedSpatialLsb` (in `carrier`) derives domain-separated locator/placement
+  subkeys from an embedding key (`kdf::derive_locator_key` /
+  `derive_placement_key`), writes a short keyed recognition tag to the canonical
+  bootstrap slots, and spreads the whole packet over keyed-permuted positions.
+  A key-less scanner sees no `STG3` magic (privacy), and a wrong/missing key
+  reports `NoPacket` indistinguishably. Generic `encode`/`decode` gain
+  `--embedding-key` / `--embedding-key-file` and report `keyed` placement;
+  packets record `PLACEMENT_KEYED` and set `FLAG_KEYED_LOCATOR`.
 - **GStreamer is now feature-gated behind the CLI's `gst` feature (on by
   default).** `steganographer-gst` and the `gstreamer` crate are optional
   dependencies of `steganographer-cli`; the `video`/`audio` subcommands (and
