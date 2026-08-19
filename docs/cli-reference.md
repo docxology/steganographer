@@ -157,10 +157,11 @@ steganographer encode -i cover.png -o packed.png \
 
 Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
 carrier behavior and prints the public key needed by `verify`. The generic
-packet path currently supports sequential `lsb_video` and the Ed25519 signing
-(`--signing-key`), DEFLATE (`--compress`), AEAD encryption (`--encrypt`), and
-chunked Reed-Solomon (`--ecc`) transforms; keyed placement and multi-frame
-spreading remain unsupported for generic packets.
+packet path supports `lsb_video` (RGB/PNG) and `lsb_audio` (PCM S16 WAV / raw
+S16LE) carriers, sequential or keyed placement (`--embedding-key`), and the
+Ed25519 signing (`--signing-key`), DEFLATE (`--compress`), AEAD encryption
+(`--encrypt`), and chunked Reed-Solomon (`--ecc`) transforms. Multi-frame
+spreading remains unsupported for generic packets.
 
 ---
 
@@ -177,14 +178,16 @@ steganographer decode --input packed.png --output recovered.pdf [OPTIONS]
 | --- | --- | --- | --- |
 | `--input <PATH>` | `-i` | Required | Encoded carrier |
 | `--output <PATH>` | `-o` | Required | Decoded payload destination |
-| `--stego-type <TYPE>` | — | `lsb_video` | Generic kernel; only `lsb_video` in the alpha |
+| `--stego-type <TYPE>` | — | `lsb_video` | Generic kernel: `lsb_video` or `lsb_audio` |
 | `--bits <VALUE>` | — | `auto` | Probe 1–4, or require an exact strength |
-| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `png`, or `image` |
+| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
 | `--format <FORMAT>` | — | `plain` | `plain` or `json` report |
 | `--force` | — | `false` | Replace an existing payload output |
 | `--decrypt` | — | `false` | Decrypt an AEAD-encrypted generic packet payload |
 | `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
 | `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
+| `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for keyed placement |
+| `--embedding-key-file <PATH>` | — | None | File containing the embedding key |
 
 ```bash
 steganographer decode -i packed.png -o recovered.pdf --bits auto --format json

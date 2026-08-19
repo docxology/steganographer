@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-443_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-449_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 443 tests, 0 failures
+cargo test --workspace   # 449 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -131,10 +131,10 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms | 372 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms | 390 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 2 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 32 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 34 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -224,20 +224,20 @@ bits = 2
 
 ## ✅ Tests
 
-443 tests across 4 crates — all passing:
+449 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 272 | `steganographer-core/src/*.rs` |
+| Core unit tests | 277 | `steganographer-core/src/*.rs` |
 | Core integration tests | 113 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
-| CLI unit + integration tests | 33 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
+| CLI unit + integration tests | 34 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **443** | **0 failures** |
+| **Total** | **449** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 443 tests
-cargo test -p steganographer-core     # Core only (385 tests)
+cargo test --workspace                # All 449 tests
+cargo test -p steganographer-core     # Core only (390 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 

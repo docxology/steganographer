@@ -22,15 +22,17 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 
 ### carrier.rs
 
-- `CarrierDescriptor`, `EmbeddingConfig` — shared decoded-unit descriptor and
-  checked 1–4 bit strength
+- `CarrierDescriptor`, `EmbeddingConfig` — shared decoded-unit descriptor
+  (`Rgb8`/`ByteStream`/`PcmS16Le`), unit stride, and checked 1–4 bit strength
 - `CarrierEmbedder`, `CarrierExtractor` — capacity/embed/extract contracts
-- `SpatialLsb` — sequential generic packet kernel with locator-first bounded
-  extraction and descriptor validation
-- `KeyedSpatialLsb` — keyed generic packet kernel: a short recognition tag at
-  the canonical bootstrap slots (key-less scanners see no `STG3` magic) and the
-  packet spread over keyed-permuted positions; wrong/missing keys report
-  `NoPacket`
+- `SpatialLsb` — sequential generic packet kernel over byte units with
+  locator-first bounded extraction and descriptor validation
+- `AudioSpatialLsb` — sequential generic packet kernel over interleaved S16LE
+  PCM samples (one unit per sample; only the low byte's LSBs change)
+- `KeyedSpatialLsb` / `KeyedAudioSpatialLsb` — keyed byte/sample packet
+  kernels: a short recognition tag at the canonical bootstrap slots (key-less
+  scanners see no `STG3` magic) and the packet spread over keyed-permuted
+  positions; wrong/missing keys report `NoPacket`
 
 ### placement.rs
 
