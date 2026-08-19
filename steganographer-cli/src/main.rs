@@ -3,11 +3,13 @@
 use clap::{Parser, Subcommand};
 
 mod carrier_binding;
+#[cfg(feature = "gst")]
 mod cmd_audio;
 mod cmd_encode;
 mod cmd_ots;
 mod cmd_packet;
 mod cmd_verify;
+#[cfg(feature = "gst")]
 mod cmd_video;
 mod media_io;
 
@@ -44,6 +46,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run live video pipeline: capture → steganography → virtual device
+    #[cfg(feature = "gst")]
     Video {
         #[arg(long)]
         source: Option<String>,
@@ -58,6 +61,7 @@ enum Commands {
     },
 
     /// Run live audio pipeline: capture → steganography → virtual device
+    #[cfg(feature = "gst")]
     Audio {
         #[arg(long)]
         source: Option<String>,
@@ -410,6 +414,7 @@ fn main() -> anyhow::Result<()> {
     log::info!("Config: {}", cli.config);
 
     match cli.command {
+        #[cfg(feature = "gst")]
         Commands::Video {
             source,
             sink,
@@ -417,6 +422,7 @@ fn main() -> anyhow::Result<()> {
             signing_key,
         } => cmd_video::run(&cli.config, source, sink, max_frames, signing_key),
 
+        #[cfg(feature = "gst")]
         Commands::Audio {
             source,
             sink,

@@ -16,7 +16,10 @@ toolchain selected by `rust-toolchain.toml`.
 
 ### GStreamer (Optional)
 
-GStreamer is required for live video/audio pipelines. The core crate and offline encode/verify commands work without it.
+GStreamer is required only for the live `video`/`audio` subcommands. The CLI's
+`gst` Cargo feature (on by default) controls that dependency; build with
+`--no-default-features` for a GStreamer-free binary that keeps the offline
+encode/verify and generic-packet/OTS surfaces.
 
 **macOS**:
 
@@ -51,6 +54,9 @@ cargo build --workspace
 
 # Build only the core (no GStreamer needed)
 cargo build -p steganographer-core
+
+# Build the CLI without GStreamer (drops the live video/audio subcommands)
+cargo build -p steganographer-cli --no-default-features
 
 # Build in release mode
 cargo build --workspace --release

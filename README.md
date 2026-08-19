@@ -42,6 +42,7 @@ Steganographer embeds **cryptographic signatures** (BLAKE3 + Ed25519) and **visi
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
+cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
 cargo test --workspace   # 434 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
