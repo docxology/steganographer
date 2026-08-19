@@ -163,6 +163,15 @@ enum Commands {
         /// Replace an existing decoded payload output
         #[arg(long)]
         force: bool,
+        /// Decrypt an AEAD-encrypted packet payload (ChaCha20-Poly1305)
+        #[arg(long)]
+        decrypt: bool,
+        /// Decryption key (hex-encoded 32 bytes)
+        #[arg(long)]
+        decryption_key: Option<String>,
+        /// Path to decryption key file
+        #[arg(long)]
+        decryption_key_file: Option<String>,
     },
 
     /// Verify steganographic signatures in a media file
@@ -456,16 +465,14 @@ fn main() -> anyhow::Result<()> {
                 if dir {
                     anyhow::bail!("generic packet encoding does not support --dir");
                 }
-                if opts.encrypt
-                    || opts.ecc
-                    || opts.spread > 1
+                if opts.spread > 1
                     || opts.signing_key.is_some()
                     || opts.embedding_key.is_some()
                     || opts.embedding_key_file.is_some()
                 {
                     anyhow::bail!(
-                        "generic packet alpha does not yet support encryption, ECC, \
-                         signing, keyed placement, or multi-frame spreading"
+                        "generic packet alpha does not yet support signing, keyed \
+                         placement, or multi-frame spreading"
                     );
                 }
                 cmd_packet::encode(
@@ -480,6 +487,11 @@ fn main() -> anyhow::Result<()> {
                         mime_type,
                         filename,
                         input_format: opts.input_format.clone(),
+                        encrypt: opts.encrypt,
+                        encryption_key: opts.encryption_key.clone(),
+                        encryption_key_file: opts.encryption_key_file.clone(),
+                        ecc: opts.ecc,
+                        ecc_parity: opts.ecc_parity,
                     },
                 )
             } else if dir {
@@ -513,6 +525,9 @@ fn main() -> anyhow::Result<()> {
             format,
             input_format,
             force,
+            decrypt,
+            decryption_key,
+            decryption_key_file,
         } => cmd_packet::decode(
             &input,
             &output,
@@ -521,6 +536,11 @@ fn main() -> anyhow::Result<()> {
             &format,
             input_format.as_deref(),
             force,
+            &cmd_packet::GenericDecodeOptions {
+                decrypt,
+                decryption_key,
+                decryption_key_file,
+            },
         ),
 
         Commands::Verify {

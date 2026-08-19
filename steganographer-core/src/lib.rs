@@ -48,6 +48,7 @@ pub mod password;
 pub mod signer_backend;
 pub mod spread_spectrum;
 pub mod steganalysis;
+pub mod transforms;
 pub mod video;
 
 pub use audio::{AudioBuffer, AudioStegoModule};
@@ -75,6 +76,7 @@ pub use steganalysis::{
     analyze_combined, chi_squared_detect, rs_analyze, sample_pair_detect, CombinedResult,
     DetectionResult,
 };
+pub use transforms::{TransformContext, TransformError, DEFAULT_ECC_CHUNK_LEN, MAX_ECC_PARITY};
 pub use video::{VideoFormat, VideoFrame, VideoStegoModule};
 
 #[cfg(feature = "ethereum")]

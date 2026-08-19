@@ -122,10 +122,10 @@ steganographer encode [OPTIONS]
 | `--signing-key <PATH>` | — | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file |
 | `--embedding-key <HEX>` | — | Config/random | Keyed audio/spread placement key |
 | `--embedding-key-file <PATH>` | — | Config/random | File containing the embedding key |
-| `--encrypt` | — | `false` | Encrypt the legacy signature payload |
+| `--encrypt` | — | `false` | Encrypt the payload (legacy signature or generic packet) with ChaCha20-Poly1305 |
 | `--encryption-key <HEX>` | — | Random | ChaCha20-Poly1305 key |
 | `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
-| `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction |
+| `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction (legacy signature or generic packet) |
 | `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
 | `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
 | `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
@@ -155,9 +155,10 @@ steganographer encode -i cover.png -o packed.png \
 ```
 
 Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
-carrier behavior and prints the public key needed by `verify`. Generic packet
-alpha currently supports sequential `lsb_video` only and explicitly rejects
-generic transforms that are not implemented yet.
+carrier behavior and prints the public key needed by `verify`. The generic
+packet path currently supports sequential `lsb_video` and the AEAD encryption
+(`--encrypt`) and chunked Reed-Solomon (`--ecc`) transforms; signing, keyed
+placement, and multi-frame spreading remain unsupported for generic packets.
 
 ---
 
@@ -179,14 +180,22 @@ steganographer decode --input packed.png --output recovered.pdf [OPTIONS]
 | `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `png`, or `image` |
 | `--format <FORMAT>` | — | `plain` | `plain` or `json` report |
 | `--force` | — | `false` | Replace an existing payload output |
+| `--decrypt` | — | `false` | Decrypt an AEAD-encrypted generic packet payload |
+| `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
+| `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
 
 ```bash
 steganographer decode -i packed.png -o recovered.pdf --bits auto --format json
+
+# Encrypted packet requires the key
+steganographer decode -i packed.png -o recovered.pdf --decrypt --decryption-key <hex>
 ```
 
 Decode validates locator limits, envelope CRC32C, canonical metadata, declared
 kernel parameters, payload length, and the content digest before writing. It
-refuses to overwrite an existing output unless `--force` is explicit.
+also reverses any recorded AEAD/ECC transforms (requiring `--decrypt` for
+encrypted packets) and refuses to overwrite an existing output unless
+`--force` is explicit.
 
 ---
 
