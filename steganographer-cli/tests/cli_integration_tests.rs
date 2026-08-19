@@ -1608,3 +1608,97 @@ fn test_generic_packet_sign_roundtrip_and_tamper() {
         std::fs::read(&payload).unwrap()
     );
 }
+
+#[test]
+fn test_generic_packet_keyed_placement_roundtrip_and_fail_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let packed = tmp.path().join("keyed.rgb");
+    let recovered = tmp.path().join("recovered.txt");
+    create_test_rgb(input.to_str().unwrap());
+    let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let payload = "keyed placement secret";
+
+    let (code, stdout, stderr) = run_cli(&[
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        packed.to_str().unwrap(),
+        "--payload-text",
+        payload,
+        "--bits",
+        "2",
+        "--embedding-key",
+        key,
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "keyed encode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(
+        parse_json(&stdout)["keyed"],
+        true,
+        "encode should report keyed placement: {stdout}"
+    );
+
+    let (code, stdout, stderr) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--bits",
+        "auto",
+        "--embedding-key",
+        key,
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "keyed decode failed: stdout={stdout}, stderr={stderr}"
+    );
+    assert_eq!(
+        parse_json(&stdout)["keyed"],
+        true,
+        "decode should report keyed placement: {stdout}"
+    );
+    assert_eq!(std::fs::read_to_string(&recovered).unwrap(), payload);
+
+    // A wrong key fails closed and produces no output.
+    let wrong_key = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let wrong_out = tmp.path().join("wrong.txt");
+    let (code, stdout, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        wrong_out.to_str().unwrap(),
+        "--bits",
+        "auto",
+        "--embedding-key",
+        wrong_key,
+    ]);
+    assert_ne!(code, 0, "wrong key must fail closed: {stdout}");
+    assert!(!wrong_out.exists(), "wrong key must not write output");
+
+    // A key-less scanner sees no packet at all (privacy property).
+    let no_key_out = tmp.path().join("nokey.txt");
+    let (code, _, _) = run_cli(&[
+        "decode",
+        "--input",
+        packed.to_str().unwrap(),
+        "--output",
+        no_key_out.to_str().unwrap(),
+        "--bits",
+        "auto",
+    ]);
+    assert_ne!(code, 0, "keyed packet must be invisible without a key");
+    assert!(
+        !no_key_out.exists(),
+        "key-less decode must not write output"
+    );
+}

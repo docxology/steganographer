@@ -23,6 +23,8 @@
 const SIGNING_CONTEXT: &str = "steganographer-signing-v1";
 const ENCRYPTION_CONTEXT: &str = "steganographer-encryption-v1";
 const EMBEDDING_CONTEXT: &str = "steganographer-embedding-v1";
+const LOCATOR_CONTEXT: &str = "steganographer-locator-v1";
+const PLACEMENT_CONTEXT: &str = "steganographer-placement-v1";
 
 /// All keys derived from a master secret.
 #[derive(Debug, Clone)]
@@ -48,6 +50,19 @@ pub fn derive_encryption_key(master: &[u8]) -> [u8; 32] {
 /// Derive the LSB embedding key from a master secret.
 pub fn derive_embedding_key(master: &[u8]) -> [u8; 32] {
     blake3::derive_key(EMBEDDING_CONTEXT, master)
+}
+
+/// Derive the keyed-locator subkey from an embedding key.
+///
+/// Keyed-locator placement uses a separate domain label so the locator
+/// schedule never shares key material with body placement or encryption.
+pub fn derive_locator_key(embedding_key: &[u8; 32]) -> [u8; 32] {
+    blake3::derive_key(LOCATOR_CONTEXT, embedding_key)
+}
+
+/// Derive the keyed body-placement subkey from an embedding key.
+pub fn derive_placement_key(embedding_key: &[u8; 32]) -> [u8; 32] {
+    blake3::derive_key(PLACEMENT_CONTEXT, embedding_key)
 }
 
 /// Derive all three keys from a master secret.

@@ -67,10 +67,10 @@ cargo build --workspace --release
 ## Run Tests
 
 ```bash
-# All workspace tests (434 tests)
+# All workspace tests (443 tests)
 cargo test --workspace
 
-# Core only (377 tests)
+# Core only (385 tests)
 cargo test -p steganographer-core
 
 # Dashboard only (23 tests)
@@ -157,9 +157,10 @@ cargo run -p steganographer-cli -- decode \
 ```
 
 Generic mode is explicit: without `--payload-file` or `--payload-text`,
-`encode` retains the legacy signed-carrier behavior. The alpha currently rejects
-generic encryption, ECC, payload signing, keyed placement, and multi-frame
-options until those packet transforms are implemented.
+`encode` retains the legacy signed-carrier behavior. Generic packets support
+keyed placement (`--embedding-key`), payload signing (`--signing-key`),
+compression (`--compress`), AEAD encryption (`--encrypt`), and Reed-Solomon
+error correction (`--ecc`); multi-frame spreading remains unsupported.
 
 ### 5. Run a Live Video Pipeline (requires GStreamer)
 

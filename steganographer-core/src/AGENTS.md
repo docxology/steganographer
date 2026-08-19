@@ -4,8 +4,8 @@
 
 ### lib.rs
 
-Entry point. Declares and re-exports: `packet`, `carrier`, `video`, `audio`,
-`crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
+Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
+`audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
 `hash_chain`, `steganalysis`, `mdct_audio`, `ots_client`, `ots_config`,
@@ -27,6 +27,17 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `video`, `audio`,
 - `CarrierEmbedder`, `CarrierExtractor` — capacity/embed/extract contracts
 - `SpatialLsb` — sequential generic packet kernel with locator-first bounded
   extraction and descriptor validation
+- `KeyedSpatialLsb` — keyed generic packet kernel: a short recognition tag at
+  the canonical bootstrap slots (key-less scanners see no `STG3` magic) and the
+  packet spread over keyed-permuted positions; wrong/missing keys report
+  `NoPacket`
+
+### placement.rs
+
+- `KeyedPermutation` — O(1)-memory keyed permutation over `0..len` built from a
+  balanced Feistel network over the next power-of-two domain with cycle walking
+  (`PLC-002` bounded-memory schedule); every slot is hit exactly once and a
+  different key/label yields an unrelated order
 
 ### password.rs
 
