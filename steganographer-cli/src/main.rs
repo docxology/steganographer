@@ -147,6 +147,9 @@ enum Commands {
         /// Safe display filename for a generic packet payload
         #[arg(long)]
         filename: Option<String>,
+        /// Skip the post-write re-read verification of a generic packet carrier
+        #[arg(long)]
+        no_verify_write: bool,
     },
 
     /// Decode an opt-in generic packet payload from a carrier
@@ -461,6 +464,7 @@ fn main() -> anyhow::Result<()> {
             payload_text,
             mime_type,
             filename,
+            no_verify_write,
         } => {
             let opts = cmd_encode::EncodeOptions {
                 encrypt,
@@ -507,6 +511,7 @@ fn main() -> anyhow::Result<()> {
                         signing_key: opts.signing_key.clone(),
                         embedding_key: opts.embedding_key.clone(),
                         embedding_key_file: opts.embedding_key_file.clone(),
+                        verify_write: !no_verify_write,
                     },
                 )
             } else if dir {

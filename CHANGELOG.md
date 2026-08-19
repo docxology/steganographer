@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Post-write verification (`FMT-005`).** Generic packet `encode` now re-reads
+  the written carrier and re-extracts it with the same kernel to confirm
+  byte-identical packet recovery, so a writer that silently alters carrier LSBs
+  fails the command instead of producing a corrupt output. `--no-verify-write`
+  skips the check.
 - **WAV generic-packet vertical slice (`FMT-004` / audio `KER-001`).** The
   generic packet carrier now supports PCM S16 WAV and raw S16LE audio. New
   `AudioSpatialLsb` and `KeyedAudioSpatialLsb` carriers interpret the byte
