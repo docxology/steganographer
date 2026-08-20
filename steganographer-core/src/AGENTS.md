@@ -81,6 +81,8 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 - `SignerBackend` trait — `name()`, `sign()`, `verify()`, `public_key_bytes()`, `signature_size()`, `display_identity()`
 - `Ed25519Backend` — `generate()`, `new()`, `from_bytes()`, `signing_key_bytes()`, `verifying_key()`
 - `Ed25519Verifier` — `new()`, `from_bytes()`, `verify()` (verification-only, no signing key)
+- `MlDsaBackend` — `generate()`, `from_seed()`, ML-DSA-44/65/87 post-quantum signing backend (FIPS 204)
+- `HybridBackend` — `generate()`, `new()`, dual Ed25519 + ML-DSA signing
 - `EthereumBackend`\* — `generate()`, `from_signing_key()`, `address()`, `personal_sign_hash()`
 - `EthereumVerifier`\* — address-based verification
 

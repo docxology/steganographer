@@ -23,6 +23,9 @@ Integration tests that exercise cross-module interactions and end-to-end workflo
 | Metrics JSON | 1 | `to_json()` roundtrip |
 | Signer backend E2E | 2 | `Ed25519Backend` sign/verify, public key export |
 | Payload/serialization | 3 | Size constants, invalid bytes, video format bytes |
+| Post-quantum (ML-DSA) & Hybrid | 2 | `MlDsaBackend` (ML-DSA-44/65/87), `HybridBackend` E2E sign/verify |
+| Multi-frame payload sharding | 1 | `split_payload_bytes()` / `reconstruct_payload_bytes()` E2E |
+| WASM inspector | 1 | Zero-I/O in-memory capacity and forensic metadata extraction |
 | Stress tests | 2 | Sequential embeds, multiple signers |
 | Config parsing | 7 | Defaults, overrides, audio, full, errors |
 

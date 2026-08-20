@@ -1928,6 +1928,7 @@ fn test_scan_detects_inline_packet_magic_and_exit_code() {
     let line: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(line["detected"], true);
     assert_eq!(line["embedded_magic"], "generic_packet");
+    assert_eq!(line["magic_offsets"], serde_json::json!([7]));
 }
 
 #[test]

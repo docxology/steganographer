@@ -46,6 +46,9 @@ pub enum FileFamily {
     Pdf,
     Zip,
     Gzip,
+    Tar,
+    Ogg,
+    Flac,
     Unknown,
 }
 
@@ -63,6 +66,9 @@ impl FileFamily {
             FileFamily::Pdf => "pdf",
             FileFamily::Zip => "zip",
             FileFamily::Gzip => "gzip",
+            FileFamily::Tar => "tar",
+            FileFamily::Ogg => "ogg",
+            FileFamily::Flac => "flac",
             FileFamily::Unknown => "unknown",
         }
     }
@@ -105,6 +111,15 @@ pub fn detect_file_family(data: &[u8]) -> FileFamily {
     if data.starts_with(b"\x1f\x8b") {
         return FileFamily::Gzip;
     }
+    if data.starts_with(b"fLaC") {
+        return FileFamily::Flac;
+    }
+    if data.starts_with(b"OggS") {
+        return FileFamily::Ogg;
+    }
+    if data.len() >= 262 && &data[257..262] == b"ustar" {
+        return FileFamily::Tar;
+    }
     FileFamily::Unknown
 }
 
@@ -126,6 +141,13 @@ impl EmbeddedMagic {
     }
 }
 
+/// A specific location match for an embedded magic header found inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedMagicMatch {
+    pub magic: EmbeddedMagic,
+    pub offset: usize,
+}
+
 /// Scan `data` for an embedded `STEG` (legacy) or `STG3` (generic) magic.
 ///
 /// This finds signatures/packets that are stored *inline* in the raw bytes
@@ -144,6 +166,25 @@ pub fn detect_embedded_magic(data: &[u8]) -> Option<EmbeddedMagic> {
     None
 }
 
+/// Find all occurrences and byte offsets of inline steganographic magics.
+pub fn detect_embedded_magics_detailed(data: &[u8]) -> Vec<EmbeddedMagicMatch> {
+    let mut matches = Vec::new();
+    for (offset, window) in data.windows(4).enumerate() {
+        if window == b"STEG" {
+            matches.push(EmbeddedMagicMatch {
+                magic: EmbeddedMagic::LegacySignature,
+                offset,
+            });
+        } else if window == b"STG3" {
+            matches.push(EmbeddedMagicMatch {
+                magic: EmbeddedMagic::GenericPacket,
+                offset,
+            });
+        }
+    }
+    matches
+}
+
 /// Aggregated forensic scan of one byte buffer.
 #[derive(Debug, Clone)]
 pub struct ForensicScan {
@@ -153,6 +194,8 @@ pub struct ForensicScan {
     pub file_family: FileFamily,
     /// Embedded signature/packet magic, if present inline.
     pub embedded_magic: Option<EmbeddedMagic>,
+    /// All inline embedded magic matches and their offsets.
+    pub magic_matches: Vec<EmbeddedMagicMatch>,
     /// Aggregated statistical detector results.
     pub statistical: CombinedResult,
     /// `true` if any detector flags the buffer as suspicious.
@@ -170,7 +213,8 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
     let statistical = steganalysis::analyze_combined(data);
     let entropy = shannon_entropy(data);
     let file_family = detect_file_family(data);
-    let embedded_magic = detect_embedded_magic(data);
+    let magic_matches = detect_embedded_magics_detailed(data);
+    let embedded_magic = magic_matches.first().map(|m| m.magic);
     let detected = statistical.detected || embedded_magic.is_some();
     let message = if let Some(magic) = embedded_magic {
         format!("embedded {} magic found inline", magic.as_str())
@@ -183,6 +227,7 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
         entropy,
         file_family,
         embedded_magic,
+        magic_matches,
         statistical,
         detected,
         message,
@@ -225,6 +270,8 @@ mod tests {
         assert_eq!(detect_file_family(b"%PDF-1.7\n"), FileFamily::Pdf);
         assert_eq!(detect_file_family(b"PK\x03\x04\x14\x00"), FileFamily::Zip);
         assert_eq!(detect_file_family(b"\x1f\x8b\x08\x00"), FileFamily::Gzip);
+        assert_eq!(detect_file_family(b"fLaC\x00\x00"), FileFamily::Flac);
+        assert_eq!(detect_file_family(b"OggS\x00\x02"), FileFamily::Ogg);
         assert_eq!(detect_file_family(b"random bytes"), FileFamily::Unknown);
         assert_eq!(detect_file_family(b""), FileFamily::Unknown);
     }
@@ -241,6 +288,13 @@ mod tests {
         );
         assert_eq!(detect_embedded_magic(b"no magic here"), None);
         assert_eq!(detect_embedded_magic(b"ST"), None);
+
+        let detailed = detect_embedded_magics_detailed(b"header STEG ... body STG3 end");
+        assert_eq!(detailed.len(), 2);
+        assert_eq!(detailed[0].magic, EmbeddedMagic::LegacySignature);
+        assert_eq!(detailed[0].offset, 7);
+        assert_eq!(detailed[1].magic, EmbeddedMagic::GenericPacket);
+        assert_eq!(detailed[1].offset, 21);
     }
 
     #[test]

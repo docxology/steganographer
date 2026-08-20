@@ -28,6 +28,12 @@ pub enum CarrierKind {
     /// Interleaved little-endian 16-bit PCM samples. One carrier unit is one
     /// sample (two bytes); only the low byte's LSBs are modified.
     PcmS16Le,
+    /// Interleaved little-endian 24-bit PCM samples (three bytes per sample).
+    PcmS24Le,
+    /// Interleaved little-endian 32-bit PCM samples (four bytes per sample).
+    PcmS32Le,
+    /// Packed 32-bit RGBA/BGRA pixels (four bytes per unit).
+    Rgba8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +50,20 @@ impl CarrierDescriptor {
         }
     }
 
+    pub fn rgba8(pixel_count: usize) -> Self {
+        Self {
+            kind: CarrierKind::Rgba8,
+            unit_count: pixel_count,
+        }
+    }
+
+    pub fn byte_stream(byte_len: usize) -> Self {
+        Self {
+            kind: CarrierKind::ByteStream,
+            unit_count: byte_len,
+        }
+    }
+
     pub fn pcm_s16le(sample_count: usize) -> Self {
         Self {
             kind: CarrierKind::PcmS16Le,
@@ -51,9 +71,25 @@ impl CarrierDescriptor {
         }
     }
 
+    pub fn pcm_s24le(sample_count: usize) -> Self {
+        Self {
+            kind: CarrierKind::PcmS24Le,
+            unit_count: sample_count,
+        }
+    }
+
+    pub fn pcm_s32le(sample_count: usize) -> Self {
+        Self {
+            kind: CarrierKind::PcmS32Le,
+            unit_count: sample_count,
+        }
+    }
+
     /// Bytes between the start of one carrier unit and the next.
     pub fn unit_stride(&self) -> usize {
         match self.kind {
+            CarrierKind::PcmS32Le | CarrierKind::Rgba8 => 4,
+            CarrierKind::PcmS24Le => 3,
             CarrierKind::PcmS16Le => 2,
             CarrierKind::Rgb8 | CarrierKind::ByteStream => 1,
         }
@@ -107,10 +143,13 @@ pub enum CarrierError {
     InvalidBits(u8),
     #[error("carrier capacity arithmetic overflow")]
     CapacityOverflow,
-    #[error("packet needs {needed_bits} carrier bits but only {available_bits} are available")]
+    #[error("packet needs {needed_bits} carrier bits ({needed_units} units at {bits_per_unit} bpu) but only {available_bits} bits ({available_units} units) are available")]
     InsufficientCapacity {
         needed_bits: usize,
         available_bits: usize,
+        needed_units: usize,
+        available_units: usize,
+        bits_per_unit: u8,
     },
     #[error("packet descriptor does not match sequential spatial-LSB configuration")]
     DescriptorMismatch,
@@ -418,6 +457,9 @@ fn embed_sequential_lsb(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits,
             available_bits: capacity.available_bits,
+            needed_units: needed_bits.div_ceil(config.bits_per_unit as usize),
+            available_units: capacity.usable_units,
+            bits_per_unit: config.bits_per_unit,
         });
     }
 
@@ -441,9 +483,13 @@ fn extract_sequential_lsb(
     let unit_count = carrier.len() / stride;
     let capacity = sequential_capacity(&descriptor_from_stride(stride, unit_count), config)?;
     if capacity.max_packet_bytes < LOCATOR_SIZE {
+        let needed_bits = LOCATOR_SIZE * 8;
         return Err(CarrierError::InsufficientCapacity {
-            needed_bits: LOCATOR_SIZE * 8,
+            needed_bits,
             available_bits: capacity.available_bits,
+            needed_units: needed_bits.div_ceil(config.bits_per_unit as usize),
+            available_units: capacity.usable_units,
+            bits_per_unit: config.bits_per_unit,
         });
     }
 
@@ -451,11 +497,15 @@ fn extract_sequential_lsb(
     let locator = crate::packet::Locator::from_bytes(&locator_bytes, limits)?;
     let packet_len = locator.packet_len()?;
     if !capacity.fits(packet_len) {
+        let needed_bits = packet_len
+            .checked_mul(8)
+            .ok_or(CarrierError::CapacityOverflow)?;
         return Err(CarrierError::InsufficientCapacity {
-            needed_bits: packet_len
-                .checked_mul(8)
-                .ok_or(CarrierError::CapacityOverflow)?,
+            needed_bits,
             available_bits: capacity.available_bits,
+            needed_units: needed_bits.div_ceil(config.bits_per_unit as usize),
+            available_units: capacity.usable_units,
+            bits_per_unit: config.bits_per_unit,
         });
     }
 
@@ -493,6 +543,9 @@ fn embed_keyed_lsb(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits: 64,
             available_bits: unit_count.saturating_mul(bits as usize),
+            needed_units: tag_units,
+            available_units: unit_count,
+            bits_per_unit: bits,
         });
     }
     let body_units = unit_count - tag_units;
@@ -505,6 +558,9 @@ fn embed_keyed_lsb(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits,
             available_bits: body_units.saturating_mul(bits as usize),
+            needed_units,
+            available_units: body_units,
+            bits_per_unit: bits,
         });
     }
 
@@ -574,6 +630,9 @@ fn extract_keyed_lsb(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits: packet_len.saturating_mul(8),
             available_bits: body_units.saturating_mul(bits as usize),
+            needed_units,
+            available_units: body_units,
+            bits_per_unit: bits,
         });
     }
 
@@ -632,6 +691,9 @@ fn read_bytes_keyed(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits: bit_count,
             available_bits: perm.len().saturating_mul(bits as usize),
+            needed_units: required_units,
+            available_units: perm.len(),
+            bits_per_unit: bits,
         });
     }
 
@@ -652,7 +714,7 @@ fn read_bytes_keyed(
     Ok(output)
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -683,6 +745,9 @@ fn extract_bytes(
         return Err(CarrierError::InsufficientCapacity {
             needed_bits: bit_count,
             available_bits: unit_count.saturating_mul(bits_per_unit as usize),
+            needed_units: required_units,
+            available_units: unit_count,
+            bits_per_unit,
         });
     }
 
@@ -1003,6 +1068,16 @@ mod tests {
         assert_eq!(descriptor.kind, CarrierKind::PcmS16Le);
         assert_eq!(descriptor.unit_count, 4800);
         assert_eq!(descriptor.unit_stride(), 2);
+
+        let d24 = CarrierDescriptor::pcm_s24le(48_000);
+        assert_eq!(d24.unit_stride(), 3);
+        let d32 = CarrierDescriptor::pcm_s32le(48_000);
+        assert_eq!(d32.unit_stride(), 4);
+        let drgba = CarrierDescriptor::rgba8(1920 * 1080);
+        assert_eq!(drgba.unit_stride(), 4);
+        let dstream = CarrierDescriptor::byte_stream(1024);
+        assert_eq!(dstream.unit_stride(), 1);
+
         let config = EmbeddingConfig::new(1).unwrap();
         let capacity = AudioSpatialLsb.capacity(&descriptor, &config).unwrap();
         assert_eq!(capacity.usable_units, 4800);

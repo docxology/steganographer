@@ -38,6 +38,128 @@ pub struct SignatureShard {
     pub data: [u8; SignaturePayload::SERIALIZED_SIZE],
 }
 
+/// A generic shard of arbitrary payload bytes spread across multiple frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericPayloadShard {
+    /// Frame index this shard belongs to.
+    pub frame_index: u64,
+    /// Shard index (0-based, within the spread group).
+    pub shard_index: u8,
+    /// Total number of shards in the group.
+    pub total_shards: u8,
+    /// Shard byte buffer (same size as the original data).
+    pub data: Vec<u8>,
+}
+
+/// Split arbitrary payload bytes into N shards using XOR secret sharing.
+pub fn split_payload_bytes(
+    payload: &[u8],
+    n: u8,
+    base_frame_index: u64,
+) -> anyhow::Result<Vec<GenericPayloadShard>> {
+    if n < 2 {
+        anyhow::bail!("Number of shards must be at least 2, got {}", n);
+    }
+    if n > 8 {
+        anyhow::bail!("Number of shards must be at most 8, got {}", n);
+    }
+    if payload.is_empty() {
+        anyhow::bail!("Cannot split an empty payload");
+    }
+
+    let len = payload.len();
+    let n = n as usize;
+
+    // Generate n-1 random masks of length `len`
+    let mut masks = Vec::with_capacity(n - 1);
+    for _ in 0..(n - 1) {
+        let mut mask = vec![0u8; len];
+        OsRng.fill_bytes(&mut mask);
+        masks.push(mask);
+    }
+
+    // Shard 0 = payload XOR mask_0 XOR mask_1 ... XOR mask_{n-2}
+    let mut shard0 = payload.to_vec();
+    for mask in &masks {
+        for (byte, m) in shard0.iter_mut().zip(mask.iter()) {
+            *byte ^= m;
+        }
+    }
+
+    let mut shards = Vec::with_capacity(n);
+    shards.push(GenericPayloadShard {
+        frame_index: base_frame_index,
+        shard_index: 0,
+        total_shards: n as u8,
+        data: shard0,
+    });
+
+    for (i, mask) in masks.into_iter().enumerate() {
+        shards.push(GenericPayloadShard {
+            frame_index: base_frame_index + (i + 1) as u64,
+            shard_index: (i + 1) as u8,
+            total_shards: n as u8,
+            data: mask,
+        });
+    }
+
+    Ok(shards)
+}
+
+/// Reconstruct arbitrary payload bytes from N generic shards.
+pub fn reconstruct_payload_bytes(shards: &[GenericPayloadShard]) -> anyhow::Result<Vec<u8>> {
+    if shards.is_empty() {
+        anyhow::bail!("No shards provided");
+    }
+
+    let expected_total = shards[0].total_shards as usize;
+    if shards.len() != expected_total {
+        anyhow::bail!("Expected {} shards, got {}", expected_total, shards.len());
+    }
+    if !(2..=8).contains(&expected_total) {
+        anyhow::bail!("Invalid shard group size: {}", expected_total);
+    }
+
+    let expected_len = shards[0].data.len();
+    if expected_len == 0 {
+        anyhow::bail!("Shard data must not be empty");
+    }
+
+    let mut seen = [false; 8];
+    for shard in shards {
+        if shard.total_shards as usize != expected_total {
+            anyhow::bail!("Inconsistent total_shards across shards");
+        }
+        if shard.data.len() != expected_len {
+            anyhow::bail!("Inconsistent shard data lengths");
+        }
+        let idx = shard.shard_index as usize;
+        if idx >= expected_total {
+            anyhow::bail!(
+                "Shard index {} out of range for group size {}",
+                shard.shard_index,
+                expected_total
+            );
+        }
+        if seen[idx] {
+            anyhow::bail!("Duplicate shard index {}", shard.shard_index);
+        }
+        seen[idx] = true;
+    }
+
+    let mut sorted: Vec<&GenericPayloadShard> = shards.iter().collect();
+    sorted.sort_by_key(|shard| shard.shard_index);
+
+    let mut result = vec![0u8; expected_len];
+    for shard in sorted {
+        for (r, s) in result.iter_mut().zip(shard.data.iter()) {
+            *r ^= s;
+        }
+    }
+
+    Ok(result)
+}
+
 /// Split a signature payload into N shards using XOR secret sharing.
 ///
 /// This is an n-of-n scheme: all N shards are required to reconstruct
@@ -319,5 +441,21 @@ mod tests {
         let mut shards = split(&payload, 3, 0).unwrap();
         shards[1].shard_index = 9; // out of range for a 3-shard group
         assert!(reconstruct(&shards).is_err());
+    }
+
+    #[test]
+    fn test_split_reconstruct_payload_bytes() {
+        let payload = b"Hello, post-quantum and multi-frame generic packet data!";
+        for n in [2, 3, 5, 8] {
+            let shards = split_payload_bytes(payload, n, 50).unwrap();
+            assert_eq!(shards.len(), n as usize);
+            for (i, shard) in shards.iter().enumerate() {
+                assert_eq!(shard.shard_index, i as u8);
+                assert_eq!(shard.frame_index, 50 + i as u64);
+                assert_eq!(shard.data.len(), payload.len());
+            }
+            let recovered = reconstruct_payload_bytes(&shards).unwrap();
+            assert_eq!(recovered, payload);
+        }
     }
 }
