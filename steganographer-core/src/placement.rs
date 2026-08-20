@@ -73,6 +73,24 @@ impl KeyedPermutation {
             }
         }
     }
+
+    /// Map physical index `y` back to its logical index `i` in `0..len`.
+    ///
+    /// This is the exact inverse of [`permute`]: `inverse_permute(permute(i)) == i`.
+    pub fn inverse_permute(&self, y: usize) -> usize {
+        let mut x = y as u64;
+        loop {
+            x = feistel_inverse(x, self.bits, &self.key, &self.label);
+            if x < self.len {
+                return x as usize;
+            }
+        }
+    }
+
+    /// Generate the entire permutation schedule as a vector of physical indices.
+    pub fn schedule(&self) -> Vec<usize> {
+        (0..self.len()).map(|i| self.permute(i)).collect()
+    }
 }
 
 fn ceil_log2(value: u64) -> u32 {
@@ -98,6 +116,26 @@ fn feistel(x: u64, bits: u32, key: &[u8; 32], label: &[u8; 16]) -> u64 {
         let next_right = (left ^ f) & mask;
         left = next_left;
         right = next_right;
+    }
+    ((left << half) | right) & domain_mask
+}
+
+fn feistel_inverse(y: u64, bits: u32, key: &[u8; 32], label: &[u8; 16]) -> u64 {
+    let half = bits / 2;
+    let mask = (1u64 << half) - 1;
+    let domain_mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut left = (y >> half) & mask;
+    let mut right = y & mask;
+    for round in (0..ROUNDS).rev() {
+        let prev_right = left;
+        let f = round_fn(key, label, round, prev_right) & mask;
+        let prev_left = (right ^ f) & mask;
+        left = prev_left;
+        right = prev_right;
     }
     ((left << half) | right) & domain_mask
 }
@@ -180,5 +218,22 @@ mod tests {
             seen[p] = true;
         }
         assert!(seen.iter().all(|&hit| hit));
+    }
+
+    #[test]
+    fn inverse_permutation_roundtrip() {
+        for len in [1, 2, 7, 16, 63, 100, 256, 500] {
+            let perm = KeyedPermutation::new(len, key(42), b"inverse-test");
+            for i in 0..len {
+                let physical = perm.permute(i);
+                let logical = perm.inverse_permute(physical);
+                assert_eq!(
+                    logical, i,
+                    "inverse_permute(permute({i})) = {logical} != {i} (len={len})"
+                );
+            }
+            let sched = perm.schedule();
+            assert_eq!(sched.len(), len);
+        }
     }
 }

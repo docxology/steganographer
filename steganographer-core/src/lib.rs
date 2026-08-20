@@ -52,6 +52,7 @@ pub mod spread_spectrum;
 pub mod steganalysis;
 pub mod transforms;
 pub mod video;
+pub mod wasm_inspector;
 
 pub use audio::{AudioBuffer, AudioStegoModule};
 pub use carrier::{
@@ -67,6 +68,10 @@ pub use kdf::{
     derive_placement_key, derive_signing_key, DerivedKeys,
 };
 pub use metrics::StegoMetrics;
+pub use multi_frame::{
+    reconstruct, reconstruct_payload_bytes, split, split_payload_bytes, GenericPayloadShard,
+    SignatureShard,
+};
 pub use ots_client::{OTSClient, OTSError, OTSMethod, OTSVResult};
 pub use ots_config::{OtsConfig, OtsSettings};
 pub use packet::{
@@ -74,7 +79,9 @@ pub use packet::{
     OtsMetadata, PacketCodec, PacketEnvelope, PacketError, PayloadKind, SignaturePayloadCodec,
 };
 pub use password::{Argon2Params, PasswordKdfError};
-pub use signer_backend::{Ed25519Backend, Ed25519Verifier, SignerBackend};
+pub use signer_backend::{
+    Ed25519Backend, Ed25519Verifier, HybridBackend, MlDsaBackend, MlDsaLevel, SignerBackend,
+};
 pub use spread_spectrum::{SpreadSpectrumAudio, SpreadSpectrumVideo};
 pub use steganalysis::{
     analyze_combined, chi_squared_detect, rs_analyze, sample_pair_detect, CombinedResult,
@@ -82,6 +89,7 @@ pub use steganalysis::{
 };
 pub use transforms::{TransformContext, TransformError, DEFAULT_ECC_CHUNK_LEN, MAX_ECC_PARITY};
 pub use video::{VideoFormat, VideoFrame, VideoStegoModule};
+pub use wasm_inspector::{capacity_rgb8, extract_packet_rgb8, inspect_bytes, WasmInspectionReport};
 
 #[cfg(feature = "ethereum")]
 pub use signer_backend::{EthereumBackend, EthereumVerifier};

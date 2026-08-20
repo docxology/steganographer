@@ -25,8 +25,9 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 | `src/spread_spectrum.rs` | `SpreadSpectrumVideo`, `SpreadSpectrumAudio`, `capacity()` | — | 592 |
 | `src/encryption.rs` | `EncryptionKey`, `encrypt()`, `decrypt()` | — | 270 |
 | `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 490 |
-| `src/multi_frame.rs` | `SignatureShard`, `split()`, `reconstruct()` | — | 263 |
-| `tests/integration_tests.rs` | — | — | ~1100 |
+| `src/multi_frame.rs` | `SignatureShard`, `GenericPayloadShard`, `split()`, `reconstruct()`, `split_payload_bytes()`, `reconstruct_payload_bytes()` | — | 350 |
+| `src/wasm_inspector.rs` | `inspect_bytes()`, `extract_packet_rgb8()`, `capacity_rgb8()`, `WasmInspectionReport` | — | 120 |
+| `tests/integration_tests.rs` | — | — | ~1200 |
 
 \* Feature-gated behind `ethereum`
 

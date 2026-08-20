@@ -22,6 +22,8 @@ struct ScanFinding {
     file_family: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     embedded_magic: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    magic_offsets: Vec<usize>,
     statistical_detected: bool,
     statistical_confidence: f64,
     message: String,
@@ -37,6 +39,7 @@ struct ScanSummary {
 
 impl ScanFinding {
     fn from_scan(path: &Path, size: usize, truncated: bool, scan: forensics::ForensicScan) -> Self {
+        let magic_offsets = scan.magic_matches.iter().map(|m| m.offset).collect();
         ScanFinding {
             file: path.display().to_string(),
             size,
@@ -45,6 +48,7 @@ impl ScanFinding {
             entropy: scan.entropy,
             file_family: scan.file_family.as_str().to_string(),
             embedded_magic: scan.embedded_magic.map(|m| m.as_str().to_string()),
+            magic_offsets,
             statistical_detected: scan.statistical.detected,
             statistical_confidence: scan.statistical.confidence,
             message: scan.message,

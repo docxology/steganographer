@@ -1262,6 +1262,67 @@ fn test_signer_backend_e2e_sign_verify() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Post-Quantum (ML-DSA) & Hybrid Backend Integration Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_mldsa_signer_backend_e2e_sign_verify() {
+    use steganographer_core::signer_backend::{MlDsaBackend, MlDsaLevel, SignerBackend};
+
+    for level in [
+        MlDsaLevel::MlDsa44,
+        MlDsaLevel::MlDsa65,
+        MlDsaLevel::MlDsa87,
+    ] {
+        let backend = MlDsaBackend::generate(level);
+        let data = b"E2E Post-Quantum Authentication Test";
+        let sig = backend.sign(data);
+        assert_eq!(sig.len(), backend.signature_size());
+        assert!(backend.verify(data, &sig));
+        assert!(!backend.verify(b"tampered", &sig));
+    }
+}
+
+#[test]
+fn test_hybrid_backend_e2e_sign_verify() {
+    use steganographer_core::signer_backend::{HybridBackend, MlDsaLevel, SignerBackend};
+
+    let backend = HybridBackend::generate(MlDsaLevel::MlDsa44);
+    let data = b"E2E Hybrid Dual Classical/PQ Authentication";
+    let sig = backend.sign(data);
+    assert_eq!(sig.len(), 64 + 2420);
+    assert!(backend.verify(data, &sig));
+    assert!(!backend.verify(b"corrupted data", &sig));
+    assert!(backend.display_identity().starts_with("hybrid:"));
+}
+
+#[test]
+fn test_multi_frame_generic_payload_sharding_e2e() {
+    use steganographer_core::multi_frame::{reconstruct_payload_bytes, split_payload_bytes};
+
+    let payload = b"End-to-end multi-frame generic packet data with 512 bytes capacity payload.";
+    for shards_count in 2..=8 {
+        let shards = split_payload_bytes(payload, shards_count, 100).unwrap();
+        assert_eq!(shards.len(), shards_count as usize);
+
+        let reconstructed = reconstruct_payload_bytes(&shards).unwrap();
+        assert_eq!(reconstructed, payload);
+    }
+}
+
+#[test]
+fn test_wasm_inspector_e2e() {
+    use steganographer_core::wasm_inspector::{capacity_rgb8, inspect_bytes};
+
+    let capacity = capacity_rgb8(10_000, 1).unwrap();
+    assert_eq!(capacity, 10_000 / 8);
+
+    let clean = b"Clean text stream for WASM analysis...".repeat(20);
+    let report = inspect_bytes(&clean);
+    assert_eq!(report.embedded_magic, None);
+}
+
 #[test]
 fn test_signer_backend_public_key_bytes() {
     let backend = Ed25519Backend::generate();
