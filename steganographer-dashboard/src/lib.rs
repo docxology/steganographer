@@ -492,13 +492,12 @@ async fn ots_stamp(
     // Use the request body if provided, otherwise derive a deterministic
     // digest from the session start so the endpoint is always callable.
     let data: Vec<u8> = if body.is_empty() {
-        let elapsed = state
+        state
             .session_start
             .elapsed()
             .as_secs()
             .to_be_bytes()
-            .to_vec();
-        elapsed
+            .to_vec()
     } else {
         body.to_vec()
     };

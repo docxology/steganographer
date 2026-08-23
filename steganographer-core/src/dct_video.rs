@@ -54,6 +54,12 @@ pub struct DctVideo {
     channel: usize,
 }
 
+impl Default for DctVideo {
+    fn default() -> Self {
+        Self::new(20, 16, 1)
+    }
+}
+
 impl DctVideo {
     /// Create a new DCT steganography module.
     ///
@@ -63,7 +69,7 @@ impl DctVideo {
     /// * `channel` — Color channel index (0, 1, or 2).
     pub fn new(coef_index: usize, quant_step: i32, channel: usize) -> Self {
         assert!(
-            coef_index >= 1 && coef_index < 64,
+            (1..64).contains(&coef_index),
             "Coefficient index must be 1–63"
         );
         assert!(quant_step > 0, "Quantization step must be positive");
@@ -76,7 +82,7 @@ impl DctVideo {
     }
 
     /// Create with defaults: coef_index=20, quant_step=16, channel=1 (green).
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(20, 16, 1)
     }
 
@@ -284,9 +290,10 @@ impl VideoStegoModule for DctVideo {
 
         let mut payload_bytes = [0u8; SignaturePayload::SERIALIZED_SIZE];
 
+        #[allow(clippy::needless_range_loop)] // bit_idx indexes geometry, not just payload_bytes
         for bit_idx in 0..payload_bytes.len() {
-            for bit_in_byte in 0..8 {
-                let payload_bit = bit_idx * 8 + bit_in_byte;
+            for bit_in_byte in 0..8u32 {
+                let payload_bit = bit_idx * 8 + bit_in_byte as usize;
 
                 let block_x = (payload_bit % blocks_x) * BLOCK_SIZE;
                 let block_y = (payload_bit / blocks_x) * BLOCK_SIZE;

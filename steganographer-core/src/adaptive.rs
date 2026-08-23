@@ -65,7 +65,7 @@ impl AdaptiveLsbVideo {
     /// computing variance, so the variance map is stable across
     /// embed/extract (embedding only modifies those LSBs).
     fn compute_variance_map(frame: &VideoFrame, bits_per_byte: u8) -> Vec<(usize, u32)> {
-        let bpp = frame.format.bytes_per_pixel().unwrap_or(1) as usize;
+        let bpp = frame.format.bytes_per_pixel().unwrap_or(1);
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride as usize;
@@ -118,7 +118,7 @@ impl AdaptiveLsbVideo {
         variance_map.retain(|(_, v)| *v >= self.threshold);
 
         // Sort by variance descending (highest variance = least detectable)
-        variance_map.sort_by(|a, b| b.1.cmp(&a.1));
+        variance_map.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Extract positions
         variance_map.into_iter().map(|(pos, _)| pos).collect()
@@ -240,8 +240,7 @@ impl VideoStegoModule for AdaptiveLsbVideo {
         // Read header (32 bits = 4 bytes)
         let header_positions_needed = HEADER_BITS.div_ceil(self.bits as usize);
         let mut header_vals: Vec<u8> = Vec::with_capacity(header_positions_needed);
-        for i in 0..header_positions_needed {
-            let pos = positions[i];
+        for &pos in positions.iter().take(header_positions_needed) {
             if pos < frame.data.len() {
                 header_vals.push(frame.data[pos] & mask);
             } else {
@@ -287,8 +286,7 @@ impl VideoStegoModule for AdaptiveLsbVideo {
         }
 
         let mut all_vals: Vec<u8> = Vec::with_capacity(total_positions_needed);
-        for i in 0..total_positions_needed {
-            let pos = positions[i];
+        for &pos in positions.iter().take(total_positions_needed) {
             if pos < frame.data.len() {
                 all_vals.push(frame.data[pos] & mask);
             } else {
@@ -614,7 +612,7 @@ mod tests {
         assert_eq!(variances.len(), w * h * bpp);
 
         // Center pixel should have high variance (checkerboard)
-        let center_offset = 1 * stride + 1 * bpp; // pixel (1,1)
+        let center_offset = stride + bpp; // pixel (1,1)
         let center_var = variances
             .iter()
             .find(|(off, _)| *off == center_offset)

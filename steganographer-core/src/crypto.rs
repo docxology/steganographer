@@ -47,9 +47,10 @@ pub const MAGIC: [u8; 4] = *b"STEG";
 pub const FORMAT_VERSION: u8 = 3;
 
 /// Configurable hash algorithm for frame data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HashAlgorithm {
     /// BLAKE3 — fast, parallel, secure (default).
+    #[default]
     Blake3,
     /// SHA-256 (FIPS 180-4).
     Sha256,
@@ -77,7 +78,7 @@ impl HashAlgorithm {
             }
             HashAlgorithm::Sha256 => {
                 let mut hasher = sha2::Sha256::new();
-                hasher.update(&frame_index.to_le_bytes());
+                hasher.update(frame_index.to_le_bytes());
                 hasher.update(video_bytes);
                 if let Some(a) = audio_bytes {
                     hasher.update(a);
@@ -89,7 +90,7 @@ impl HashAlgorithm {
             }
             HashAlgorithm::Sha3_256 => {
                 let mut hasher = sha3::Sha3_256::new();
-                hasher.update(&frame_index.to_le_bytes());
+                hasher.update(frame_index.to_le_bytes());
                 hasher.update(video_bytes);
                 if let Some(a) = audio_bytes {
                     hasher.update(a);
@@ -118,12 +119,6 @@ impl HashAlgorithm {
             Self::Sha256 => "sha256",
             Self::Sha3_256 => "sha3-256",
         }
-    }
-}
-
-impl Default for HashAlgorithm {
-    fn default() -> Self {
-        Self::Blake3
     }
 }
 
@@ -169,7 +164,7 @@ impl SignaturePayload {
         if buf[0..4] != MAGIC {
             anyhow::bail!(
                 "Invalid magic header: expected {:?}, got {:?}",
-                &MAGIC,
+                MAGIC,
                 &buf[0..4]
             );
         }

@@ -85,7 +85,7 @@ mod tests {
         let mut embedded = clean.to_vec();
         embedded.extend_from_slice(b"STG3 embedded generic packet marker");
         let report = inspect_bytes(&embedded);
-        assert_eq!(report.detected, true);
+        assert!(report.detected);
         assert_eq!(report.embedded_magic, Some("generic_packet".to_string()));
         assert!(!report.magic_offsets.is_empty());
     }

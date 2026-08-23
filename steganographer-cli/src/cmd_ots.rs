@@ -97,10 +97,8 @@ pub fn stamp(
     let segment_size = steganographer_core::hash_chain::DEFAULT_SEGMENT_SIZE;
     let chunk_size = 4096;
     let mut chain = HashChain::with_segment_size(segment_size);
-    let mut frame_index: u64 = 0;
-    for chunk in data.chunks(chunk_size) {
+    for (frame_index, chunk) in (0_u64..).zip(data.chunks(chunk_size)) {
         chain.add_frame(frame_index, chunk);
-        frame_index += 1;
     }
     let root = chain
         .build_root()
@@ -255,10 +253,8 @@ pub fn verify(
     let segment_size = steganographer_core::hash_chain::DEFAULT_SEGMENT_SIZE;
     let chunk_size = 4096;
     let mut chain = HashChain::with_segment_size(segment_size);
-    let mut frame_index: u64 = 0;
-    for chunk in data.chunks(chunk_size) {
+    for (frame_index, chunk) in (0_u64..).zip(data.chunks(chunk_size)) {
         chain.add_frame(frame_index, chunk);
-        frame_index += 1;
     }
     let root = chain
         .build_root()

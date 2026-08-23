@@ -429,7 +429,7 @@ mod tests {
         let bar_top = 480 - 80;
         // Pick a pixel at y=bar_top+60 (below text rows) and x=10 (left side, no barcode/QR)
         let check_y = bar_top + 60;
-        let offset = (check_y as usize * 640 * 3 + 10 * 3) as usize;
+        let offset = check_y as usize * 640 * 3 + 10 * 3;
         assert_eq!(data[offset], BAR_BG[0], "Bar background should be rendered");
     }
 
