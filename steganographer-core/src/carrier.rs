@@ -393,7 +393,7 @@ impl CarrierExtractor for KeyedAudioSpatialLsb {
 /// Reject a byte buffer whose length is not a multiple of the unit stride, so
 /// the last partial unit is never silently dropped.
 fn ensure_aligned(byte_len: usize, stride: usize) -> Result<(), CarrierError> {
-    if byte_len % stride != 0 {
+    if !byte_len.is_multiple_of(stride) {
         return Err(CarrierError::UnalignedCarrier { stride, byte_len });
     }
     Ok(())

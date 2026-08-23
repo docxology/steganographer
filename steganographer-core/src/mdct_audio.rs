@@ -48,12 +48,12 @@ fn mdct_basis(n: usize, k: usize) -> f64 {
 /// X[k] = Σ_{n=0}^{2N-1} x[n] * cos(π/N * (n + 1/2) * (k + 1/2))
 fn mdct(input: &[f64; BLOCK_SIZE]) -> [f64; MDCT_N] {
     let mut output = [0.0f64; MDCT_N];
-    for k in 0..MDCT_N {
+    for (k, out) in output.iter_mut().enumerate() {
         let mut sum = 0.0;
-        for n in 0..BLOCK_SIZE {
-            sum += input[n] * mdct_basis(n, k);
+        for (n, &sample) in input.iter().enumerate() {
+            sum += sample * mdct_basis(n, k);
         }
-        output[k] = sum;
+        *out = sum;
     }
     output
 }
@@ -64,12 +64,12 @@ fn mdct(input: &[f64; BLOCK_SIZE]) -> [f64; MDCT_N] {
 fn imdct(input: &[f64; MDCT_N]) -> [f64; BLOCK_SIZE] {
     let mut output = [0.0f64; BLOCK_SIZE];
     let scale = 1.0 / MDCT_N as f64;
-    for n in 0..BLOCK_SIZE {
+    for (n, out) in output.iter_mut().enumerate() {
         let mut sum = 0.0;
-        for k in 0..MDCT_N {
-            sum += input[k] * mdct_basis(n, k);
+        for (k, &coef) in input.iter().enumerate() {
+            sum += coef * mdct_basis(n, k);
         }
-        output[n] = sum * scale;
+        *out = sum * scale;
     }
     output
 }
@@ -84,6 +84,12 @@ pub struct MdctAudio {
     coef_index: usize,
     /// Quantization step for embedding. Higher = more robust but more audible.
     quant_step: f64,
+}
+
+impl Default for MdctAudio {
+    fn default() -> Self {
+        Self::new(3, 16)
+    }
 }
 
 impl MdctAudio {
@@ -106,7 +112,7 @@ impl MdctAudio {
     }
 
     /// Create with defaults: coef_index=3, quant_step=16.
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(3, 16)
     }
 

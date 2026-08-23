@@ -215,8 +215,10 @@ timeout_secs = 10
 
     #[test]
     fn test_method_canonical() {
-        let mut cfg = OtsConfig::default();
-        cfg.method = "Bitcoin".to_string();
+        let mut cfg = OtsConfig {
+            method: "Bitcoin".to_string(),
+            ..Default::default()
+        };
         assert_eq!(cfg.method_canonical(), "bitcoin");
         cfg.method = "ETH".to_string();
         assert_eq!(cfg.method_canonical(), "ethereum");

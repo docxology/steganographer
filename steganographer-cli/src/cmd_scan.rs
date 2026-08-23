@@ -74,6 +74,7 @@ fn scan_one(path: &Path, max_bytes: usize) -> anyhow::Result<ScanFinding> {
     Ok(ScanFinding::from_scan(path, size, truncated, scan))
 }
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Bounded, non-following directory walk.
 fn walk(
     dir: &Path,

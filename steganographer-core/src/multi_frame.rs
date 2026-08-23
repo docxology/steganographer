@@ -190,8 +190,8 @@ pub fn split(
 
     // Generate n-1 random masks
     let mut masks = [[0u8; SignaturePayload::SERIALIZED_SIZE]; 8];
-    for i in 0..(n - 1) {
-        OsRng.fill_bytes(&mut masks[i]);
+    for mask in masks.iter_mut().take(n - 1) {
+        OsRng.fill_bytes(mask);
     }
 
     let mut shards = Vec::with_capacity(n);
@@ -210,9 +210,9 @@ pub fn split(
 
     // Recompute shard 0 with all masks XORed
     let mut all_masks_xor = [0u8; SignaturePayload::SERIALIZED_SIZE];
-    for i in 0..(n - 1) {
-        for j in 0..all_masks_xor.len() {
-            all_masks_xor[j] ^= masks[i][j];
+    for mask in masks.iter().take(n - 1) {
+        for (acc, &byte) in all_masks_xor.iter_mut().zip(mask.iter()) {
+            *acc ^= byte;
         }
     }
 
@@ -299,8 +299,8 @@ pub fn reconstruct(shards: &[SignatureShard]) -> anyhow::Result<SignaturePayload
 
     let mut result = [0u8; SignaturePayload::SERIALIZED_SIZE];
     for shard in sorted {
-        for i in 0..result.len() {
-            result[i] ^= shard.data[i];
+        for (acc, &byte) in result.iter_mut().zip(shard.data.iter()) {
+            *acc ^= byte;
         }
     }
 

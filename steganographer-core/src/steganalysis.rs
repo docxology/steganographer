@@ -232,7 +232,7 @@ fn normal_upper_tail(z: f64) -> f64 {
             + t2 * (-0.284496736 + t2 * (1.421413741 + t2 * (-1.453152027 + t2 * 1.061405429))))
         * (-x * x).exp();
     let upper = 0.5 * erfc;
-    if z >= 0.0 { upper } else { 1.0 - upper }.max(0.0).min(1.0)
+    (if z >= 0.0 { upper } else { 1.0 - upper }).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ pub fn sample_pair_detect(data: &[u8]) -> DetectionResult {
         let a = data[2 * i];
         let b = data[2 * i + 1];
         total += 1;
-        let diff = (a as i16 - b as i16).unsigned_abs() as u16;
+        let diff = (a as i16 - b as i16).unsigned_abs();
         if diff <= 1 {
             same_or_lsb_diff += 1;
         }
