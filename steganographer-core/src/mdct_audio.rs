@@ -206,11 +206,9 @@ impl AudioStegoModule for MdctAudio {
         );
 
         // Process each 16-sample block
-        for (block_idx, chunk) in samples.chunks_exact_mut(BLOCK_SIZE).enumerate() {
-            if block_idx >= bits.len() {
-                break;
-            }
-
+        let (blocks, _remainder) = samples.as_chunks_mut::<BLOCK_SIZE>();
+        let block_count = blocks.len().min(bits.len());
+        for (block_idx, chunk) in blocks[..block_count].iter_mut().enumerate() {
             // Convert i16 samples to f64
             let mut input: [f64; BLOCK_SIZE] = [0.0; BLOCK_SIZE];
             for (i, &s) in chunk.iter().enumerate() {
@@ -256,7 +254,8 @@ impl AudioStegoModule for MdctAudio {
         // Extract bits from each block
         let mut all_bits: Vec<u8> = Vec::with_capacity(num_blocks);
 
-        for chunk in samples.chunks_exact(BLOCK_SIZE) {
+        let (blocks, _remainder) = samples.as_chunks::<BLOCK_SIZE>();
+        for chunk in blocks.iter() {
             // Convert i16 samples to f64
             let mut input: [f64; BLOCK_SIZE] = [0.0; BLOCK_SIZE];
             for (i, &s) in chunk.iter().enumerate() {

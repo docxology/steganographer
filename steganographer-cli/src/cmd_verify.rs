@@ -560,10 +560,8 @@ fn extract_payload(
                          --embedding-key-file, or configuration"
                 )
             })?;
-            let samples: Vec<i16> = data
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (pcm_chunks, _remainder) = data.as_chunks::<2>();
+            let samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
             let mut fallback = None;
             let mut verified: Option<ExtractedPayload> = None;
             for &bits in opts.bits.candidates() {
