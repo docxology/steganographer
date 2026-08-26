@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Clippy `-D warnings` gate restored under Rust 1.98.** The new
+  `clippy::chunks_exact_to_as_chunks` lint (warnings-on-by-default, promoted to
+  errors by the CI `-D warnings` gate) fired on eight constant-chunk loops
+  across `steganographer-core` (`mdct_audio`), `steganographer-cli`
+  (`carrier_binding`, `cmd_encode`, `cmd_verify`, `media_io`),
+  `steganographer-dashboard` (`ws_handler`), and `steganographer-gst`
+  (`audio_filter`). All were migrated from `chunks_exact`/`chunks_exact_mut`
+  to `as_chunks`/`as_chunks_mut`; no behavior change (full workspace test run:
+  467 passed / 0 failed before and after).
+- **`deny.toml` repaired for current cargo-deny.** The config had not kept up
+  with cargo-deny's schema changes: `[sources]` used removed keys
+  (`allow-registry`/`deny-git`) and the file failed to deserialize at all,
+  meaning `cargo deny check` — a CI job — could never have passed in its
+  presence. Migrated to `unknown-registry = "warn"`, replaced removed
+  `[advisories]` keys (`version-scope`, `deny`, `warn`) with the supported
+  schema, added the licenses now required by the dependency graph
+  (`BSD-2-Clause`, `NCSA`, `CDLA-Permissive-2.0`, `MPL-2.0`, `CC0-1.0`,
+  `Apache-2.0 WITH LLVM-exception`), and ignored RUSTSEC-2024-0436 (`paste` is
+  unmaintained but transitive via gstreamer-rs; no vulnerability). Verified:
+  `cargo deny check` → advisories ok, bans ok, licenses ok, sources ok.
+
 - **`verify --bits auto` now detects the correct LSB strength and reports
   `valid`.** When the encoder used a non-default LSB strength (e.g. `--bits 2`),
   auto-detection tried each candidate `[1,2,3,4]` and returned the *first* that
