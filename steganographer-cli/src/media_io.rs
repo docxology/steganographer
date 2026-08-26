@@ -233,8 +233,9 @@ pub fn write_output(path: &str, media: &MediaInput, stego_type: &str) -> anyhow:
         }
         MediaKind::WavPcm16(spec) => {
             let mut writer = hound::WavWriter::create(path, spec)?;
-            for bytes in media.data.chunks_exact(2) {
-                writer.write_sample(i16::from_le_bytes([bytes[0], bytes[1]]))?;
+            let (pcm_chunks, _remainder) = media.data.as_chunks::<2>();
+            for bytes in pcm_chunks.iter() {
+                writer.write_sample(i16::from_le_bytes(*bytes))?;
             }
             writer.finalize()?;
         }

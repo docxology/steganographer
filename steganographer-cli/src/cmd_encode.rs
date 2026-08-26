@@ -643,10 +643,8 @@ fn embed_payload(
             let audio_key = embedding_key
                 .ok_or_else(|| anyhow::anyhow!("Missing resolved audio embedding key"))?;
             let key_hex = hex_encode(audio_key);
-            let mut samples: Vec<i16> = data
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (pcm_chunks, _remainder) = data.as_chunks::<2>();
+            let mut samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
             embed_raw_lsb_audio(&mut samples, payload_bytes, bits, audio_key)?;
             // Write samples back to data
             for (i, s) in samples.iter().enumerate() {

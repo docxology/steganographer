@@ -454,10 +454,8 @@ async fn handle_audio_encode_socket(mut socket: WebSocket, state: Arc<DashboardS
             }
         };
 
-        let mut samples: Vec<i16> = pcm_bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (pcm_chunks, _remainder) = pcm_bytes.as_chunks::<2>();
+        let mut samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
 
         if samples.is_empty() {
             continue;

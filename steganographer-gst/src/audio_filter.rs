@@ -183,10 +183,9 @@ pub fn extract_from_source(
             gstreamer_audio::AudioInfo::from_caps(caps).map_err(|_| anyhow::anyhow!("Bad caps"))?;
 
         let sample_bytes = map.as_ref();
-        let mut samples_copy: Vec<i16> = sample_bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (pcm_chunks, _remainder) = sample_bytes.as_chunks::<2>();
+        let mut samples_copy: Vec<i16> =
+            pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
 
         let buf = AudioBuffer {
             channels: audio_info.channels() as u16,
