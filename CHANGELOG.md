@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native GStreamer element `stegovideo` (first slice).**
+  `steganographer-gst` now ships a real in-place `BaseTransform` subclass
+  instead of only a registration stub: negotiation captures the `VideoInfo`,
+  buffers are transformed in place (`AlwaysInPlace`, IP-on-non-writable), and
+  a `key-hex` property carries the 32-byte hex key with validation and tests.
+  `register_elements(plugin: Option<&mut Plugin>)` registers the element both
+  for cdylib plugin loading and direct application registration. The payload
+  embedding hook lands with the next slice; wire format will match the raw
+  LSB paths so existing `verify` works unchanged.
+
 ### Fixed
 
 - **Clippy `-D warnings` gate restored under Rust 1.98.** The new
