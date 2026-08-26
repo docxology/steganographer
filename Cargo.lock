@@ -3105,6 +3105,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-audio",
+ "gstreamer-base",
  "gstreamer-video",
  "log",
  "steganographer-core",
