@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-469_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-472_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 457 tests, 0 failures
+cargo test --workspace   # 472 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -224,19 +224,19 @@ bits = 2
 
 ## ✅ Tests
 
-457 tests across 4 crates — all passing:
+472 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 282 | `steganographer-core/src/*.rs` |
-| Core integration tests | 113 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
+| Core unit tests | 288 | `steganographer-core/src/*.rs` |
+| Core integration tests | 117 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
 | CLI unit + integration tests | 37 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
-| GStreamer + Doc-tests | 2 | `steganographer-gst/src/` + doc-test |
-| **Total** | **457** | **0 failures** |
+| GStreamer + Doc-tests | 7 | `steganographer-gst/src/` + doc-test |
+| **Total** | **472** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 457 tests
+cargo test --workspace                # All 472 tests
 cargo test -p steganographer-core     # Core only (395 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
