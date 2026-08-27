@@ -181,11 +181,46 @@ gst::plugin_define!(
 );
 ```
 
-To develop a full native plugin, you would:
+### Native `stegovideo` element (landed)
 
-1. Implement `gst_base::BaseTransform` or `gst::Element`
-2. Register the element in `plugin_init`
-3. Build as a `cdylib` and install to `GST_PLUGIN_PATH`
+`steganographer-gst::elements` now ships a real in-place `BaseTransform`
+element, `stegovideo`, registered via `register_elements()` for both cdylib
+plugin loading and direct application registration. It embeds a pre-encoded
+generic packet into every frame's least-significant bits without changing
+buffer sizes or caps.
+
+Properties:
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `packet-hex` | string | Hex-encoded generic packet bytes (from `packet encode`) |
+| `bits-per-unit` | uint (1-4, default 1) | LSB bits used per carrier byte |
+| `clear-payload` | bool (default false) | After the first embedded frame, clear packet slots instead of re-embedding |
+| `key-hex` | string | 32-byte hex key (reserved for keyed placement) |
+
+Wire format note: embedding routes through `steganographer-core`'s
+`carrier::SpatialLsb` kernel (sequential placement), so a pipeline output
+frame decodes with the same `packet extract` CLI command and `bits-per-unit`
+value used at embed time. Packed single-plane RGB/BGR/RGBx/BGRx/XRGB/XBGR
+formats are supported; other formats pass through unembedded with a warning.
+
+Example application-side registration:
+
+```rust
+use steganographer_gst::plugin::register_elements;
+steganographer_gst::init()?;
+let element = gstreamer::ElementFactory::make("stegovideo")
+    .property("packet-hex", packet_hex)
+    .property("bits-per-unit", 1u32)
+    .build()?;
+```
+
+### Remaining plugin work
+
+1. Keyed placement schedule inside the element (the `key-hex` property is
+   currently reserved; the sequential kernel ignores it)
+2. An audio sibling element (`stegoaudio`) over `AudioSpatialLsb`
+3. cdylib packaging and a `GST_PLUGIN_PATH` smoke pipeline
 
 ---
 

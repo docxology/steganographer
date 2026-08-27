@@ -15,9 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffers are transformed in place (`AlwaysInPlace`, IP-on-non-writable), and
   a `key-hex` property carries the 32-byte hex key with validation and tests.
   `register_elements(plugin: Option<&mut Plugin>)` registers the element both
-  for cdylib plugin loading and direct application registration. The payload
-  embedding hook lands with the next slice; wire format will match the raw
-  LSB paths so existing `verify` works unchanged.
+  for cdylib plugin loading and direct application registration.
+
+- **Native GStreamer element `stegovideo` (payload embedding slice).**
+  The element now embeds pre-encoded generic packets directly into video
+  frames in place. New properties: `packet-hex` (hex-encoded packet bytes),
+  `bits-per-unit` (1-4, default 1), and `clear-payload` (stop embedding and
+  clear packet slots after the first delivery frame). Embedding routes through
+  the core `carrier::SpatialLsb` kernel, so the wire format is identical to
+  the CLI `packet encode`/`packet extract` path — output verifies unchanged.
+  Packed single-plane RGB/BGR/RGBx/BGRx/XRGB/XBGR formats are supported;
+  other formats and undersized frames pass through unembedded with a
+  once-only warning. Tests: property round-trip, hex decoding, format
+  allowlist guard, and an end-to-end packet round-trip through the core
+  extractor (gst suite now 6 tests).
 
 ### Fixed
 
