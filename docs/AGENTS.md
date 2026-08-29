@@ -4,7 +4,7 @@
 
 Comprehensive documentation suite for the steganographer project, covering steganographic theory, cryptographic foundations, system architecture, dashboard operations, and user guides.
 
-## Contents (25 files)
+## Contents (26 files)
 
 | File                      | Topic                                                                                                |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -14,14 +14,15 @@ Comprehensive documentation suite for the steganographer project, covering stega
 | `cryptography.md`         | BLAKE3 + Ed25519/Ethereum signing, SignerBackend trait, EIP-191, provable security, post-quantum     |
 | `algorithms.md`           | LSB video/audio protocols, QR data matrix overlay, template placeholders, capacity math              |
 | `getting-started.md`      | Prerequisites, build, test, dashboard quickstart, pipeline customization                             |
-| `cli-reference.md`        | All 13 commands, generic encode/decode alpha, JSON output, and exit behavior                         |
+| `cli-reference.md`        | Command reference (12 of the 14 commands detailed), generic encode/decode alpha, JSON output         |
 | `configuration.md`        | Full TOML schema, dashboard live config, template placeholders (`{timestamp}`, `{frame_index}`)      |
 | `gstreamer.md`            | AppSink/AppSrc architecture, pipeline elements, config-driven construction                           |
 | `platforms.md`            | macOS, Linux, Windows, Docker setup guides with config recommendations                               |
+| `ots-integration.md`      | OpenTimestamps attestation: stamping, verification, and configuration                                |
 | `api-reference.md`        | Complete public API: types, traits, methods, dashboard LiveConfig, DashboardState, HTTP routes        |
 | `security.md`             | Threat analysis, Cachin's framework, steganalysis resistance, key management                         |
 | `contributing.md`         | Dev workflow, code style, adding new algorithms, project structure with dashboard crate               |
-| `roadmap.md`              | Short/medium/long term plans — timestamp watermarks + JSON verify output now implemented             |
+| `roadmap.md`              | Release sequence from v0.6.1 correctness baseline through v1.0 stable platform contracts             |
 | `faq.md`                  | 30+ Q&As on concepts, build, usage, crypto, dashboard, MetaMask, template placeholders, JSON output  |
 | `threat-model.md`         | Attacker models, LSB statistical detection, JPEG/MP3 robustness, countermeasures                     |
 | `key-rotation.md`         | Key rotation record — 2026-07-22 daf.key incident report, new public key, revocation procedure      |

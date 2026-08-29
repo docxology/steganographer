@@ -12,7 +12,7 @@ Web-based live dashboard for real-time round-trip steganography verification wit
 - **Signature preview**: First 16 bytes of the Ed25519/secp256k1 signature displayed in decoded payload
 - **Audio steganography**: Microphone capture → LSB embed/extract → real-time waveform + spectrum visualization
 - **Audio recording**: Record and export WAV files from microphone capture
-- **Documentation viewer**: Browse and read all project markdown docs with syntax highlighting
+- **Documentation viewer**: Browse and read all 19 embedded project markdown docs, rendered client-side with marked.js
 - **Live configuration**: Opacity, LSB bits, overlay text, sign rate, QR scale, resolution — all hot-configurable
 - **Signing backend selector**: Ed25519 or Ethereum (secp256k1) with MetaMask integration
 - **Premium dark theme**: Gray/black/red glassmorphism, smooth animations, responsive layout
@@ -24,7 +24,7 @@ Web-based live dashboard for real-time round-trip steganography verification wit
 # Via CLI
 cargo run -p steganographer-cli -- dashboard --port 8080 --backend ed25519
 
-# Via run.sh (option 'd' or 'a' for run-all)
+# Via run.sh (menu option 1)
 ./run.sh
 ```
 
@@ -52,11 +52,17 @@ steganographer-core (LsbVideo, LsbAudio, Signer, StegoMetrics)
 | `GET /api/metrics` | JSON metrics snapshot |
 | `GET/POST /api/config` | Get/update live config |
 | `GET /api/docs` | List available documentation files |
-| `GET /api/docs/:name` | Return markdown content of a doc file |
+| `GET /api/docs/{name}` | Return markdown content of a doc file |
+| `GET /api/session` | Session stats (uptime, config, backend, identity) |
+| `GET /api/version` | Version info |
+| `POST /api/metrics/reset` | Reset metrics counters |
+| `GET /ots/status` | OpenTimestamps configuration status |
+| `POST /ots/stamp` | Stamp a payload's Merkle root |
+| `POST /ots/verify` | Verify an OTS proof |
 
 ## Tests
 
-12 tests in `tests/dashboard_tests.rs` covering LiveConfig serialization, DashboardState construction, router creation, HTTP API endpoints (session, config GET/POST, docs, metrics), and static asset serving.
+23 tests in `tests/dashboard_tests.rs` covering LiveConfig serialization, DashboardState construction, router creation, HTTP API endpoints (session, config GET/POST, docs, metrics), and static asset serving.
 
 ## Dependencies
 

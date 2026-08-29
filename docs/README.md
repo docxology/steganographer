@@ -24,7 +24,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | --- | --- |
 | [Architecture](architecture.md) | System design, four-crate structure, data flow, threading models, dashboard websocket architecture |
 | [Security](security.md) | Security model, threat analysis, steganalysis resistance, dashboard security, and hardening guidelines |
-| [Threat Model](threat-model.md) | Adversary model, 8 threat categories, security boundaries, use-case scenarios, and residual risk analysis |
+| [Threat Model](threat-model.md) | Adversary model, 10 threat categories (T1–T10), security boundaries, use-case scenarios, and residual risk analysis |
 
 ### User Guides
 
@@ -40,6 +40,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | --- | --- |
 | [GStreamer Integration](gstreamer.md) | Pipeline architecture, AppSink/AppSrc, config-driven pipeline construction |
 | [Platform Guide](platforms.md) | Linux v4l2, macOS AVFoundation, virtual devices, audio routing, Docker |
+| [OTS Integration](ots-integration.md) | OpenTimestamps attestation: stamping, verification, and configuration |
 
 ### Development
 
@@ -54,9 +55,9 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 ## Quick Links
 
 - **Run**: `./run.sh` (interactive menu, reads `steganographer.toml`)
-- **Dashboard**: `./run.sh` → option `d` or `a` (launches web GUI at `http://localhost:8080`)
+- **Dashboard**: `./run.sh` → option `1` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace` (457 tests across 4 crates)
+- **Test**: `cargo test --workspace` (467 tests across 4 crates)
 - **CLI**: `cargo run -p steganographer-cli -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
@@ -89,7 +90,7 @@ block-beta
 | **MetaMask** | Connect Ethereum wallet for secp256k1 signing |
 | **Stego Info** | Capacity, utilization, payload size — recalculated in real time |
 | **Audio Tab** | Microphone capture, waveform/spectrum visualization, audio LSB signing |
-| **Docs Tab** | Browse all 18 project docs in-dashboard with syntax highlighting |
+| **Docs Tab** | Browse all 19 project docs in-dashboard, rendered client-side with marked.js |
 | **Dynamic LSB** | Encode/decode handlers stay in sync when LSB slider changes (1–4 bits) |
 | **Signature Preview** | Decoded payload shows first 16 bytes of Ed25519/secp256k1 signature |
 | **Record & Save** | Record signed video (WebM) or audio (WAV) with embedded integrity data |
@@ -98,12 +99,12 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   282 tests (packet/carrier incl. PCM S16 LSB, keyed placement, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics, OTS)
-steganographer-core (integ):  113 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC, OTS)
+steganographer-core (unit):   288 tests (packet/carrier incl. PCM S16 LSB, keyed placement, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics, OTS)
+steganographer-core (integ):  117 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC, OTS)
 steganographer-cli (unit):      6 tests (media descriptors/I/O and canonical carrier binding)
 steganographer-cli (integ):    31 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan)
 steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
 steganographer-gst:            2 tests (plugin skeleton and doctest)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        457 tests, 0 failures
+Total:                        467 tests, 0 failures
 ```

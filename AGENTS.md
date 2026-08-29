@@ -8,30 +8,30 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, ML-DSA post-quantum, Hybrid), metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics, and WASM inspection facade (30 modules) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, ML-DSA post-quantum, Hybrid), metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics, and WASM inspection facade (30 modules + `lib.rs`) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines (4 modules) |
-| `steganographer-cli/` | Crate | CLI binary: 14 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (9 modules) |
-| `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 6 static assets) |
+| `steganographer-cli/` | Crate | CLI binary: 14 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (10 modules) |
+| `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 7 static assets) |
 | `config/` | Config | Example TOML configuration files |
-| `docs/` | Docs | 18 user-facing guides + 7 steganography-platform planning specifications |
+| `docs/` | Docs | 17 user-facing guides + 7 steganography-platform planning specifications (+ `README.md` / `AGENTS.md`) |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
 | `run.sh` | Script | Interactive terminal menu (6 options: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info) |
 
 ## File Counts
 
-- **Root files**: 11 (`.gitattributes`, `.gitignore`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `FUNDING.md`, `README.md`, `TODO.md`, `run.sh`, `steganographer.toml`)
-- **Source files**: 52 Rust source files + 6 static web assets across 4 crates
-- **Tests**: 282 core unit + 113 core integration + 6 CLI unit + 31 CLI integration + 23 dashboard + 2 GStreamer/doc = **457 passing tests**
-- **Doc files**: 25 markdown files under `docs/` (18 existing docs + 7 program planning specifications) + README.md / AGENTS.md per crate
+- **Root files**: 18 (`.dockerignore`, `.gitattributes`, `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `deny.toml`, `Dockerfile`, `FUNDING.md`, `LICENSE`, `README.md`, `release.toml`, `run.sh`, `rust-toolchain.toml`, `steganographer.toml`, `TODO.md`)
+- **Source files**: 53 Rust files (47 `src/` modules + 4 test files, 1 benchmark file, `build.rs`) + 7 static web assets across 4 crates
+- **Tests**: 288 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 2 GStreamer (1 unit + 1 doctest) = **467 passing tests**
+- **Doc files**: 26 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
 ## Build & Test
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 395 tests (282 unit + 113 integration, Ed25519 default)
+cargo test -p steganographer-core              # 405 tests (288 unit + 117 integration, Ed25519 default)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 457 total tests
+cargo test --workspace                         # 467 total tests
 ./run.sh                                       # Interactive menu
 ```
 

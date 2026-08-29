@@ -9,7 +9,7 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
 `hash_chain`, `steganalysis`, `forensics`, `mdct_audio`, `ots_client`,
-`ots_config`, `ots_handler`.
+`ots_config`, `ots_handler`, `wasm_inspector`.
 
 ### packet.rs
 
@@ -98,7 +98,7 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 ### config.rs
 
 - `Config` — `from_toml()` top-level parser
-- `LsbSignatureConfig` — `bits: u8, key: String`, `key_bytes()` → `Result<[u8;32]>`
+- `LsbSignatureConfig` — `bits: u8`, `key: Option<String>`, `key_file: Option<String>`, `key_bytes()` → `Result<[u8;32]>`
 - `OverlayConfig` — `text`, `position`, `font_size` (all `Option<String>` / `Option<u32>`)
 - `InfoBarConfig` — `label`, `show_barcode`, `show_qr`, `show_timestamp`
 - `hex_decode()` private helper
@@ -112,19 +112,19 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 ### lsb_audio.rs
 
 - `LsbAudio::new(bits, key)` — 32-byte key for PRNG, `bits()` accessor
-- `generate_indices()` — Fisher-Yates shuffle using `StdRng::from_seed(key XOR frame_index)`
+- `gen_indices()` — Fisher-Yates shuffle using `StdRng::from_seed(key XOR frame_index)` (private)
 - `embed()` / `extract()` — write/read bits at permuted sample indices
 
 ### overlay.rs
 
 - `TextOverlay` — `new(text, position)`, `.with_color()`, `.with_scale()`
 - `expand_template(text, frame_index)` — substitutes `{timestamp}`, `{frame_index}`, `{date}`, `{time}` placeholders
-- `render_text()` — 8×8 bitmap font lookup, scaled pixel rendering with bounds checks
+- `render_text()` (private) — 8×8 bitmap font lookup, scaled pixel rendering with bounds checks
 - `get_glyph(char)` → `[u8; 8]` — full A-Z, 0-9, punctuation, fallback box
 - Template expansion happens in `embed()` before rendering, original text restored after
 
 ### info_bar.rs
 
 - `InfoBar` — `new(label)`, with builder methods: `.with_barcode()`, `.with_qr()`, `.with_timestamp()`
-- Renders exoteric watermark strip: label text, timestamp, DataMatrix/QR code, 1D Code-128 barcode
+- Renders exoteric watermark strip: label text, timestamp, barcode pattern from the signature hash, QR code
 - Each feature is independently toggleable

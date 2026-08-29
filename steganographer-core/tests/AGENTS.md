@@ -6,28 +6,34 @@ Integration tests that exercise cross-module interactions and end-to-end workflo
 
 ## Coverage
 
-76 tests in `integration_tests.rs` (~1100 lines) covering:
+80 tests in `integration_tests.rs` (~1900 lines) covering:
 
 | Category | Count | Tests |
 | ---------- | ------- | ------- |
 | E2E video sign → embed → extract → verify | 1 | `test_e2e_video_sign_embed_extract_verify` |
 | E2E audio sign → embed → extract → verify | 1 | `test_e2e_audio_sign_embed_extract_verify` |
+| E2E audio multi-bit levels all verify | 1 | `test_e2e_audio_multi_bit_levels_all_verify` |
 | E2E video pipeline with overlay | 1 | `test_pipeline_lsb_then_overlay` |
-| Crypto key round-trip | 7 | Key export/import, tamper detection, cross-verification |
-| LSB video variations | 5 | Bits 1–4, BGRA format, capacity errors |
-| LSB audio variations | 7 | Bits 1–4, key/frame index compat, negative samples |
-| Overlay text rendering | 6 | Positions, colors, scale, empty text, overflow |
+| Crypto round-trip | 5 | Key export/import, verifier from bytes, hash sensitivity, field preservation, empty-data sign/verify |
+| LSB video variations | 7 | 2–4 bit round-trips, minimum frame size, one-byte-too-small, high-bit preservation, BGRA |
+| LSB audio variations | 7 | 2–4 bit round-trips, wrong key/frame index, high-bit preservation, negative samples |
+| Overlay text rendering | 4 | Scale 1, full ASCII glyph set, tiny-frame no-panic, `extract()` returns `None` |
 | Template expansion | 3 | `{frame_index}` substitution, plain text stability, `expand_template()` |
 | Info bar toggles | 2 | Barcode/QR disabled, all disabled |
 | Config overlay parsing | 1 | TOML with template placeholders |
-| Metrics JSON | 1 | `to_json()` roundtrip |
-| Signer backend E2E | 2 | `Ed25519Backend` sign/verify, public key export |
-| Payload/serialization | 3 | Size constants, invalid bytes, video format bytes |
-| Post-quantum (ML-DSA) & Hybrid | 2 | `MlDsaBackend` (ML-DSA-44/65/87), `HybridBackend` E2E sign/verify |
-| Multi-frame payload sharding | 1 | `split_payload_bytes()` / `reconstruct_payload_bytes()` E2E |
+| Metrics | 2 | Frame counter accuracy, comprehensive JSON |
+| Signer backend | 6 | Ed25519 E2E, public key bytes, wrong-key failure, display identity, signature size, deterministic `from_bytes` |
+| Payload/serialization | 3 | Size constant, invalid bytes, bad magic |
+| Post-quantum (ML-DSA) & Hybrid | 2 | `MlDsaBackend` E2E sign/verify, `HybridBackend` E2E sign/verify |
+| Multi-frame sharding | 2 | Signature `split()`/`reconstruct()` and generic payload sharding E2E |
 | WASM inspector | 1 | Zero-I/O in-memory capacity and forensic metadata extraction |
 | Stress tests | 2 | Sequential embeds, multiple signers |
-| Config parsing | 7 | Defaults, overrides, audio, full, errors |
+| Config parsing | 5 | `example.toml` parse, key-length errors, video-only, audio-only |
+| DCT / spread-spectrum / adaptive kernels | 5 | Round-trips for `DctVideo`, `SpreadSpectrumVideo/Audio`, `AdaptiveLsb` |
+| Encryption & error correction | 5 | ChaCha20-Poly1305 roundtrip/tamper/wrong-key, Reed-Solomon roundtrip/correction |
+| KDF / hash chain / steganalysis | 4 | `derive_all`, hash chain, chi-squared and combined analysis |
+| Hash-algorithm variants | 2 | SHA-256 and SHA-3 sign/verify |
+| Video/audio buffer helpers | 8 | Pixel byte counts, formats, sample count, duration |
 
 ## Test Dependencies
 

@@ -1,17 +1,20 @@
 # steganographer-core
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-395%20(282%20unit%20%2B%20113%20integration)-brightgreen)
+![Tests](https://img.shields.io/badge/tests-405%20(288%20unit%20%2B%20117%20integration)-brightgreen)
 Pure, media-agnostic algorithms for steganographic embedding, cryptographic signing, and configuration. This is the foundational crate with zero GStreamer or I/O dependencies.
 
 ## Modules
 
 | Module | File | Description |
 | -------- | ------ | ------------- |
+| `packet` | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec` — generic packet v1 alpha |
+| `carrier` | `src/carrier.rs` | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels — carrier embed/extract |
+| `placement` | `src/placement.rs` | `KeyedPermutation` — Feistel-network keyed slot placement |
 | `video` | `src/video.rs` | `VideoFrame` struct, `VideoFormat` enum, `VideoStegoModule` trait |
 | `audio` | `src/audio.rs` | `AudioBuffer` struct, `AudioStegoModule` trait |
 | `crypto` | `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload` — BLAKE3 + Ed25519 |
-| `signer_backend` | `src/signer_backend.rs` | `SignerBackend` / `Ed25519Backend` / `EthereumBackend` trait + impls |
+| `signer_backend` | `src/signer_backend.rs` | `SignerBackend` / `Ed25519Backend` / `EthereumBackend` / `MlDsaBackend` / `HybridBackend` |
 | `config` | `src/config.rs` | `Config` TOML parsing, hex key decoding, overlay/info_bar config |
 | `lsb_video` | `src/lsb_video.rs` | `LsbVideo` — 1–4 bit LSB video embed/extract with length prefix |
 | `lsb_audio` | `src/lsb_audio.rs` | `LsbAudio` — keyed PRNG index permutation LSB audio embed/extract |
@@ -21,9 +24,9 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 
 ## Tests
 
-- **Unit tests**: 282 inline tests across all modules
-- **Integration tests**: 113 tests (`76` in `tests/integration_tests.rs` + `37` in `tests/ots_integration_tests.rs`)
-- **Total**: 395 tests (core only)
+- **Unit tests**: 288 inline tests across all modules
+- **Integration tests**: 117 tests (`80` in `tests/integration_tests.rs` + `37` in `tests/ots_integration_tests.rs`)
+- **Total**: 405 tests (core only)
 
 ```bash
 cargo test -p steganographer-core
@@ -47,10 +50,12 @@ chrono = "0.4"
 
 ```text
 lib.rs
+├── packet.rs            → GenericPacket / Locator / PacketEnvelope codec
+├── carrier.rs           → CarrierDescriptor / SpatialLsb / keyed kernels
 ├── video.rs             → VideoFrame / VideoStegoModule trait
 ├── audio.rs             → AudioBuffer / AudioStegoModule trait
 ├── crypto.rs            → Signer + Verifier (BLAKE3 hash, Ed25519 sign)
-├── signer_backend.rs    → SignerBackend trait + Ed25519/Ethereum impls
+├── signer_backend.rs    → SignerBackend trait + Ed25519/Ethereum/ML-DSA/Hybrid impls
 ├── config.rs            → Config model + TOML parsing
 ├── lsb_video.rs         → LsbVideo implements VideoStegoModule
 ├── lsb_audio.rs         → LsbAudio implements AudioStegoModule
