@@ -1,7 +1,7 @@
 # steganographer-cli
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-26-brightgreen)
+![Tests](https://img.shields.io/badge/tests-37-brightgreen)
 User-facing command-line binary for all steganographic functions.
 
 Built with [Clap](https://docs.rs/clap) for argument parsing with 14 subcommands.
@@ -12,12 +12,13 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 14 subcommands
 | --------- | ------------- |
 | `video` | Run live video pipeline: capture → steganography → virtual device |
 | `audio` | Run live audio pipeline: capture → steganography → virtual device |
-| `encode` | Embed steganographic data into a raw file (offline) |
+| `encode` | Embed steganographic data into a file (offline) |
 | `decode` | Decode and validate an opt-in generic packet payload |
 | `verify` | Extract and verify steganographic signatures (`--format plain\|json`) |
 | `keygen` | Generate a new Ed25519 signing key pair |
 | `info` | Report steganographic capacity of a media file |
 | `analyze` | Analyze a file for steganographic artifacts |
+| `scan` | Bounded forensic scan of files and directories (plain/JSON/JSONL output) |
 | `derive` | Derive keys (signing, encryption, embedding) from a master secret |
 | `config` | Validate a TOML configuration file |
 | `revoke` | Add a signing identity to a revoked-key list |
@@ -31,9 +32,10 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 14 subcommands
 | `main` | `src/main.rs` | Clap CLI definition, logging init, command dispatch |
 | `cmd_video` | `src/cmd_video.rs` | Config-driven GStreamer video pipeline launch |
 | `cmd_audio` | `src/cmd_audio.rs` | Config-driven GStreamer audio pipeline launch |
-| `cmd_encode` | `src/cmd_encode.rs` | Offline LSB video/audio encoding + keygen |
+| `cmd_encode` | `src/cmd_encode.rs` | Offline LSB video/audio encoding + keygen, info, analyze, derive, revoke |
 | `cmd_verify` | `src/cmd_verify.rs` | Signature extraction + `--format plain\|json` output |
 | `cmd_packet` | `src/cmd_packet.rs` | Opt-in generic packet encode/decode |
+| `cmd_scan` | `src/cmd_scan.rs` | Bounded forensic scan over files and directory trees |
 | `cmd_ots` | `src/cmd_ots.rs` | OpenTimestamps `stamp` / `verify` attestation |
 | `media_io` | `src/media_io.rs` | Descriptor-preserving image/WAV/raw I/O and output policy |
 | `carrier_binding` | `src/carrier_binding.rs` | Kernel-canonical carrier bytes for signing |
@@ -56,6 +58,9 @@ steganographer verify --input frame_signed.rgb --stego-type lsb_video --public-k
 # Verify a file (JSON output for CI)
 steganographer verify --input frame_signed.rgb --stego-type lsb_video --format json
 
+# Scan a file or directory for steganographic artifacts
+steganographer scan --input ./media --format jsonl
+
 # Generate keys
 steganographer keygen --output mykey
 ```
@@ -64,12 +69,14 @@ steganographer keygen --output mykey
 
 ```toml
 steganographer-core = { path = "../steganographer-core" }
-steganographer-gst = { path = "../steganographer-gst" }
+steganographer-gst = { path = "../steganographer-gst" }   # optional (feature `gst`, on by default)
 steganographer-dashboard = { path = "../steganographer-dashboard" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
+tokio = "1"
 serde_json = "1"
-chrono = "0.4"
+image = "0.25"
+hound = "3.5"
 ```

@@ -8,14 +8,15 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | ~370 | `DashboardState`, `LiveConfig`, `create_router()`, `start_server()`, `check_auth()`, `api_session()`, embedded static assets, docs API |
-| `src/ws_handler.rs` | ~660 | `handle_encode_socket()`, `handle_decode_socket()`, `handle_audio_encode_socket()`, `handle_audio_decode_socket()`, `EncodedFrame`, `EncodedAudioChunk` |
-| `src/static/index.html` | ~690 | Three-tab layout (Video/Audio/Docs), dual encode/decode panels, live config controls, copy-to-clipboard, kbd hints, footer verified counter |
-| `src/static/style.css` | ~1790 | Premium dark theme (gray/black/red), glassmorphism, responsive layout, micro-animations, help tooltips, copy-btn, kbd-hint, export-btn |
-| `src/static/app.js` | ~1000 | Webcam capture, WebSocket encode/decode, metrics rendering, live config sync, video recording, keyboard shortcuts, session export, copy-to-clipboard, help tooltip positioning |
-| `src/static/audio_tab.js` | ~710 | Microphone capture via Web Audio API, waveform/spectrum visualization, audio WebSocket encode/decode, WAV recording/export |
-| `src/static/docs_tab.js` | ~250 | Documentation viewer: fetches markdown list from API, renders with marked.js + highlight.js |
-| `tests/dashboard_tests.rs` | ~395 | 23 tests for router creation, static asset serving, API endpoints |
+| `src/lib.rs` | 566 | `DashboardState`, `LiveConfig`, `create_router()`, `start_server()`, `check_auth()`, `api_session()`, embedded static assets, docs API |
+| `src/ws_handler.rs` | 692 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `EncodedFrame`, `EncodedAudioChunk` |
+| `src/static/index.html` | 771 | Three-tab layout (Video/Audio/Docs), dual encode/decode panels, live config controls, copy-to-clipboard, kbd hints, footer verified counter |
+| `src/static/style.css` | 2621 | Premium dark theme (gray/black/red), glassmorphism, responsive layout, micro-animations, help tooltips, copy-btn, kbd-hint, export-btn |
+| `src/static/app.js` | 1446 | Webcam capture, WebSocket encode/decode, metrics rendering, live config sync, video recording, keyboard shortcuts, session export, copy-to-clipboard, help tooltip positioning |
+| `src/static/audio_tab.js` | 710 | Microphone capture via Web Audio API, waveform/spectrum visualization, audio WebSocket encode/decode, WAV recording/export |
+| `src/static/docs_tab.js` | 251 | Documentation viewer: fetches markdown list from API, renders with marked.js |
+| `src/static/js/ots.js` | 161 | OpenTimestamps status/stamp/verify client for the OTS panel |
+| `tests/dashboard_tests.rs` | 461 | 23 tests for router creation, static asset serving, API endpoints |
 
 ## Routes
 
@@ -26,15 +27,21 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 | `/app.js` | GET | Serve video tab JavaScript |
 | `/audio_tab.js` | GET | Serve audio tab JavaScript |
 | `/docs_tab.js` | GET | Serve docs tab JavaScript |
+| `/ots.js` | GET | Serve OpenTimestamps panel JavaScript |
 | `/ws/encode` | WS | Video encode — JPEG → LSB embed + sign → encoded frame |
 | `/ws/decode` | WS | Video decode — extract LSB payload → verify signature → result + signature preview |
 | `/ws/audio/encode` | WS | Audio encode — PCM → LSB embed + sign → signed chunk |
 | `/ws/audio/decode` | WS | Audio decode — extract LSB payload → verify signature → result + signature preview |
 | `/api/metrics` | GET | JSON metrics (frames, FPS, latency) |
+| `/api/metrics/reset` | POST | Reset metrics counters |
 | `/api/config` | GET/POST | Get/update live config (lsbBits, opacity, overlay, signRate, qrScale, resolution) |
 | `/api/session` | GET | Session stats: uptime, config snapshot, metrics, backend, identity |
+| `/api/version` | GET | Version info |
 | `/api/docs` | GET | List available documentation files |
-| `/api/docs/:name` | GET | Return raw markdown content of a doc file |
+| `/api/docs/{name}` | GET | Return raw markdown content of a doc file |
+| `/ots/status` | GET | OpenTimestamps configuration status |
+| `/ots/stamp` | POST | Stamp a payload's Merkle root |
+| `/ots/verify` | POST | Verify an OTS proof |
 
 ## Dynamic LSB Configuration
 
@@ -43,7 +50,7 @@ The dashboard supports live LSB bit-depth changes (1–4) via the UI slider. Bot
 ## Security
 
 - **Default bind**: `127.0.0.1` (local-only). Use `--host 0.0.0.0` for network access.
-- **Auth**: `--auth-token <token>` enables Bearer token auth on POST routes (`/api/config`, `/api/metrics/reset`). Token comparison is constant-time via `subtle::ConstantTimeEq`.
+- **Auth**: `--auth-token <token>` enables Bearer token auth on the guarded POST routes (`/api/config`, `/api/metrics/reset`, `/ots/stamp`). Token comparison is constant-time via `subtle::ConstantTimeEq`.
 - **CORS**: Restricted to GET/POST methods with Content-Type header. No permissive cross-origin access.
 - **Warning**: Binding `0.0.0.0` without `--auth-token` logs a security warning.
 

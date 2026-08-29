@@ -4,15 +4,16 @@
 
 ### lib.rs
 
-- `init()` — wraps `gstreamer::init()` with error context
-- `launch_pipeline(desc)` — `gstreamer::parse::launch()` wrapper
-- Re-exports: `video_filter`, `audio_filter`
+- `init()` — wraps `gstreamer::init()` with error context (plus macOS NSApplication setup)
+- `launch(desc)` — `gstreamer::parse::launch()` wrapper
+- Declares modules: `video_filter`, `audio_filter`, `plugin`
 
 ### video_filter.rs
 
 - `VideoFilterConfig` — `source_pipeline: String`, `sink_pipeline: String`
 - `run_video_filter(config, stego, signer, max_frames)` — main processing loop
 - `extract_from_source(pipeline_str, stego, max_frames)` → `Vec<(u64, Option<SignaturePayload>)>`
+- `process_video_file(input, output, stego, signer, max_frames)` — offline file processing
 - Supports RGB and BGRA formats via `VideoInfo::from_caps()`
 
 ### audio_filter.rs
@@ -24,5 +25,5 @@
 
 ### plugin.rs
 
-- `plugin_init()` — skeleton for future native GStreamer element registration
-- `gst_plugin_define!` macro invocation (commented pending element implementation)
+- `register_elements()` — skeleton for future native GStreamer element registration
+- Plugin metadata constants: `PLUGIN_NAME`, `PLUGIN_DESCRIPTION`, `PLUGIN_VERSION`

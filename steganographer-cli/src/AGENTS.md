@@ -6,7 +6,7 @@
 
 - `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, and `--quiet` global flags
 - `Commands` — `Video`, `Audio`, `Encode`, `Decode`, `Verify`, `Keygen`,
-  `Info`, `Analyze`, `Derive`, `Dashboard`, `Revoke`, and `Config`
+  `Info`, `Analyze`, `Scan`, `Derive`, `Dashboard`, `Revoke`, `Config`, and `Ots`
 - `main()` — initializes `env_logger`, dispatches to `cmd_*::run()`
 
 ### cmd_video.rs
@@ -33,6 +33,15 @@
 - Current alpha carrier slice: PNG or raw RGB, sequential spatial LSB, 1–4 bits
 - Validates packet digest, capacity, output aliasing, and overwrite policy
 
+### cmd_scan.rs
+
+- `run(...)` — bounded forensic scan of one file or a directory tree
+- Delegates to `steganographer_core::forensics::scan_bytes()`, which pairs
+  structural probes (Shannon entropy, file family, embedded magic bytes) with
+  `steganalysis::analyze_combined()`
+- Bounded by `--max-depth`, `--max-files`, and `--max-bytes`; emits
+  deterministic plain/JSON/JSONL findings
+
 ### cmd_verify.rs
 
 - `run(...)` — mirrors legacy encode configuration, extracts, and verifies
@@ -51,5 +60,6 @@
 
 ### carrier_binding.rs
 
-- Produces the kernel-canonical carrier representation for signing and
-  verification so mutable embedding slots cannot invalidate their own signature
+- `canonicalize()` — produces the kernel-canonical carrier representation for
+  signing and verification so mutable embedding slots cannot invalidate their
+  own signature

@@ -8,10 +8,10 @@ GStreamer integration for real-time media pipeline processing.
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | 44 | `init()`, `launch_pipeline()`, re-exports |
-| `src/video_filter.rs` | 232 | `run_video_filter()`, `extract_from_source()` |
-| `src/audio_filter.rs` | 204 | `run_audio_filter()`, `extract_from_source()` |
-| `src/plugin.rs` | 46 | `plugin_init()`, `gst_plugin_define!` skeleton |
+| `src/lib.rs` | 105 | `init()`, `launch()`, module declarations |
+| `src/video_filter.rs` | 488 | `run_video_filter()`, `extract_from_source()`, `process_video_file()` |
+| `src/audio_filter.rs` | 205 | `run_audio_filter()`, `extract_from_source()` |
+| `src/plugin.rs` | 48 | `register_elements()`, plugin metadata constants |
 
 ## Data Flow
 

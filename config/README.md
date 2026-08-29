@@ -6,7 +6,7 @@ Example and reference TOML configuration files for the steganographer pipeline.
 
 | File | Size | Description |
 | ------ | ------ | ------------- |
-| `example.toml` | 2.0 KB | Annotated example with video + audio pipeline config |
+| `example.toml` | 3.5 KB | Annotated example with video + audio pipeline config |
 
 ## Usage
 

@@ -8,26 +8,26 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 
 | File | Public Types | Trait | Lines |
 | ------ | ------------- | ------- | ------- |
-| `src/lib.rs` | re-exports | — | 74 |
+| `src/lib.rs` | re-exports | — | 95 |
 | `src/video.rs` | `VideoFrame`, `VideoFormat` | `VideoStegoModule` | 64 |
 | `src/audio.rs` | `AudioBuffer` | `AudioStegoModule` | 45 |
-| `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, codecs, limits/errors | `PacketCodec` | 1179 |
-| `src/carrier.rs` | `CarrierDescriptor`, `EmbeddingConfig`, reports, `SpatialLsb` | `CarrierEmbedder`, `CarrierExtractor` | 390 |
-| `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 538 |
-| `src/signer_backend.rs` | `SignerBackend`, `Ed25519Backend`, `Ed25519Verifier`, `EthereumBackend`*, `EthereumVerifier`* | `SignerBackend` | 442 |
-| `src/metrics.rs` | `StegoMetrics` | — | 215 |
-| `src/config.rs` | `Config`, `GlobalConfig`, `VideoConfig`, `AudioConfig`, `PayloadConfig`, `LsbSignatureConfig`, `OverlayConfig`, `InfoBarConfig`, etc. | — | 478 |
-| `src/lsb_video.rs` | `LsbVideo` | `VideoStegoModule` | 289 |
-| `src/lsb_audio.rs` | `LsbAudio` | `AudioStegoModule` | 347 |
-| `src/overlay.rs` | `TextOverlay`, `OverlayPosition`, `expand_template` | `VideoStegoModule` | 401 |
-| `src/info_bar.rs` | `InfoBar` | `VideoStegoModule` | 490 |
-| `src/dct_video.rs` | `DctVideo` | `VideoStegoModule` | 463 |
-| `src/spread_spectrum.rs` | `SpreadSpectrumVideo`, `SpreadSpectrumAudio`, `capacity()` | — | 592 |
-| `src/encryption.rs` | `EncryptionKey`, `encrypt()`, `decrypt()` | — | 270 |
-| `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 490 |
-| `src/multi_frame.rs` | `SignatureShard`, `GenericPayloadShard`, `split()`, `reconstruct()`, `split_payload_bytes()`, `reconstruct_payload_bytes()` | — | 350 |
-| `src/wasm_inspector.rs` | `inspect_bytes()`, `extract_packet_rgb8()`, `capacity_rgb8()`, `WasmInspectionReport` | — | 120 |
-| `tests/integration_tests.rs` | — | — | ~1200 |
+| `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, codecs, limits/errors | `PacketCodec` | 1278 |
+| `src/carrier.rs` | `CarrierDescriptor`, `EmbeddingConfig`, reports, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels | `CarrierEmbedder`, `CarrierExtractor` | 1086 |
+| `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 605 |
+| `src/signer_backend.rs` | `SignerBackend`, `Ed25519Backend`, `Ed25519Verifier`, `MlDsaBackend`, `HybridBackend`, `EthereumBackend`*, `EthereumVerifier`* | `SignerBackend` | 649 |
+| `src/metrics.rs` | `StegoMetrics` | — | 332 |
+| `src/config.rs` | `Config`, `GlobalConfig`, `VideoConfig`, `AudioConfig`, `PayloadConfig`, `LsbSignatureConfig`, `OverlayConfig`, `InfoBarConfig`, etc. | — | 529 |
+| `src/lsb_video.rs` | `LsbVideo` | `VideoStegoModule` | 298 |
+| `src/lsb_audio.rs` | `LsbAudio` | `AudioStegoModule` | 360 |
+| `src/overlay.rs` | `TextOverlay`, `OverlayPosition`, `expand_template` | `VideoStegoModule` | 417 |
+| `src/info_bar.rs` | `InfoBar` | `VideoStegoModule` | 568 |
+| `src/dct_video.rs` | `DctVideo` | `VideoStegoModule` | 461 |
+| `src/spread_spectrum.rs` | `SpreadSpectrumVideo`, `SpreadSpectrumAudio`, `capacity()` | — | 582 |
+| `src/encryption.rs` | `EncryptionKey`, `encrypt()`, `decrypt()` | — | 327 |
+| `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 545 |
+| `src/multi_frame.rs` | `SignatureShard`, `GenericPayloadShard`, `split()`, `reconstruct()`, `split_payload_bytes()`, `reconstruct_payload_bytes()` | — | 461 |
+| `src/wasm_inspector.rs` | `inspect_bytes()`, `extract_packet_rgb8()`, `capacity_rgb8()`, `WasmInspectionReport` | — | 119 |
+| `tests/integration_tests.rs` | — | — | ~1900 |
 
 \* Feature-gated behind `ethereum`
 
@@ -49,4 +49,4 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 
 ## Test Coverage
 
-282 unit tests (inline) + 113 integration tests (76 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) = **395 total**
+288 unit tests (inline) + 117 integration tests (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) = **405 total**
