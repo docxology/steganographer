@@ -6,7 +6,7 @@
 
 - `init()` — wraps `gstreamer::init()` with error context (plus macOS NSApplication setup)
 - `launch(desc)` — `gstreamer::parse::launch()` wrapper
-- Declares modules: `video_filter`, `audio_filter`, `plugin`
+- Declares modules: `video_filter`, `audio_filter`, `elements`, `plugin`
 
 ### video_filter.rs
 
@@ -23,7 +23,17 @@
 - `extract_from_source(pipeline_str, stego, max_buffers)` → `Vec<(u64, Option<SignaturePayload>)>`
 - Uses `unsafe` for zero-copy byte↔i16 slice conversion
 
+### elements.rs
+
+- `StegoVideo` — native `BaseTransform` element registered as `stegovideo`,
+  embedding generic packets in place (buffer size and caps unchanged)
+- Properties: `packet-hex` (pre-encoded packet bytes), `clear-payload`
+- Wire format matches `steganographer_core::carrier::SpatialLsb`, so output
+  verifies with the existing `packet extract` CLI command
+- `register(plugin)` — adds the element to the GStreamer registry
+
 ### plugin.rs
 
-- `register_elements()` — skeleton for future native GStreamer element registration
+- `register_elements()` — plugin registration entry point; delegates to
+  `crate::elements::register()`
 - Plugin metadata constants: `PLUGIN_NAME`, `PLUGIN_DESCRIPTION`, `PLUGIN_VERSION`

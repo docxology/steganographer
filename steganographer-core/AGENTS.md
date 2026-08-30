@@ -13,7 +13,7 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 | `src/audio.rs` | `AudioBuffer` | `AudioStegoModule` | 45 |
 | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, codecs, limits/errors | `PacketCodec` | 1278 |
 | `src/carrier.rs` | `CarrierDescriptor`, `EmbeddingConfig`, reports, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels | `CarrierEmbedder`, `CarrierExtractor` | 1086 |
-| `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 605 |
+| `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 600 |
 | `src/signer_backend.rs` | `SignerBackend`, `Ed25519Backend`, `Ed25519Verifier`, `MlDsaBackend`, `HybridBackend`, `EthereumBackend`*, `EthereumVerifier`* | `SignerBackend` | 649 |
 | `src/metrics.rs` | `StegoMetrics` | — | 332 |
 | `src/config.rs` | `Config`, `GlobalConfig`, `VideoConfig`, `AudioConfig`, `PayloadConfig`, `LsbSignatureConfig`, `OverlayConfig`, `InfoBarConfig`, etc. | — | 529 |
@@ -21,10 +21,10 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 | `src/lsb_audio.rs` | `LsbAudio` | `AudioStegoModule` | 360 |
 | `src/overlay.rs` | `TextOverlay`, `OverlayPosition`, `expand_template` | `VideoStegoModule` | 417 |
 | `src/info_bar.rs` | `InfoBar` | `VideoStegoModule` | 568 |
-| `src/dct_video.rs` | `DctVideo` | `VideoStegoModule` | 461 |
+| `src/dct_video.rs` | `DctVideo` | `VideoStegoModule` | 468 |
 | `src/spread_spectrum.rs` | `SpreadSpectrumVideo`, `SpreadSpectrumAudio`, `capacity()` | — | 582 |
 | `src/encryption.rs` | `EncryptionKey`, `encrypt()`, `decrypt()` | — | 327 |
-| `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 545 |
+| `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 546 |
 | `src/multi_frame.rs` | `SignatureShard`, `GenericPayloadShard`, `split()`, `reconstruct()`, `split_payload_bytes()`, `reconstruct_payload_bytes()` | — | 461 |
 | `src/wasm_inspector.rs` | `inspect_bytes()`, `extract_packet_rgb8()`, `capacity_rgb8()`, `WasmInspectionReport` | — | 119 |
 | `tests/integration_tests.rs` | — | — | ~1900 |

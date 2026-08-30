@@ -6,10 +6,11 @@ Source modules for GStreamer integration.
 
 | File | Lines | Purpose |
 | ------ | ------- | --------- |
-| `lib.rs` | 105 | `init()` wraps `gstreamer::init()` (plus macOS NSApplication setup), `launch()` helper, module declarations |
+| `lib.rs` | 107 | `init()` wraps `gstreamer::init()` (plus macOS NSApplication setup), `launch()` helper, module declarations |
 | `video_filter.rs` | 488 | `run_video_filter()` — frame-by-frame AppSink/AppSrc with signing; `extract_from_source()` for verification; `process_video_file()` / `process_audio_file()` offline helpers |
-| `audio_filter.rs` | 205 | `run_audio_filter()` — buffer-by-buffer AppSink/AppSrc with signing; `extract_from_source()` for verification |
-| `plugin.rs` | 48 | `register_elements()` — native GStreamer plugin registration skeleton with metadata constants |
+| `audio_filter.rs` | 204 | `run_audio_filter()` — buffer-by-buffer AppSink/AppSrc with signing; `extract_from_source()` for verification |
+| `elements.rs` | 424 | `StegoVideo` — native in-place `BaseTransform` element (`stegovideo`); `register()` adds it to the GStreamer registry |
+| `plugin.rs` | 50 | `register_elements()` — plugin registration entry point with metadata constants; delegates to `elements::register()` |
 
 ## Key Patterns
 
