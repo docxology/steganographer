@@ -25,9 +25,10 @@ pub fn canonicalize(
         }
         "lsb_audio" => {
             let mask = !((1i16 << validate_bits(bits)?) - 1);
-            for sample in canonical.chunks_exact_mut(2) {
-                let value = i16::from_le_bytes([sample[0], sample[1]]) & mask;
-                sample.copy_from_slice(&value.to_le_bytes());
+            let (sample_chunks, _remainder) = canonical.as_chunks_mut::<2>();
+            for sample in sample_chunks.iter_mut() {
+                let value = i16::from_le_bytes(*sample) & mask;
+                *sample = value.to_le_bytes();
             }
         }
         "spread_spectrum_video" => {

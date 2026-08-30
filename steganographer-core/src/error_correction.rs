@@ -247,8 +247,9 @@ fn solve_linear_system(mut matrix: Vec<Vec<u8>>, variable_count: usize) -> anyho
             if factor == 0 {
                 continue;
             }
-            for col in column..=variable_count {
-                matrix[row][col] ^= gf_mul(factor, matrix[next_row][col]);
+            let pivot = matrix[next_row][column..=variable_count].to_vec();
+            for (offset, cell) in matrix[row][column..=variable_count].iter_mut().enumerate() {
+                *cell ^= gf_mul(factor, pivot[offset]);
             }
         }
 
@@ -344,14 +345,14 @@ fn lagrange_interpolate(values: &[u8], k: usize) -> anyhow::Result<Vec<u8>> {
         let scale = gf_mul(values[j], gf_inv(denominator));
 
         let mut basis = vec![1u8];
-        for i in 0..k {
+        for (i, &point) in points.iter().enumerate().take(k) {
             if i == j {
                 continue;
             }
             let mut next_basis = vec![0u8; basis.len() + 1];
             for (degree, &coefficient) in basis.iter().enumerate() {
                 next_basis[degree + 1] ^= coefficient;
-                next_basis[degree] ^= gf_mul(coefficient, points[i]);
+                next_basis[degree] ^= gf_mul(coefficient, point);
             }
             basis = next_basis;
         }

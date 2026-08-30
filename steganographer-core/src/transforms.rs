@@ -510,8 +510,8 @@ mod tests {
 
         // Flip a few symbols inside one chunk; ECC should repair them.
         let mut corrupted = body.clone();
-        for i in 0..(parity / 2) {
-            corrupted[i] ^= 1;
+        for byte in corrupted.iter_mut().take(parity / 2) {
+            *byte ^= 1;
         }
         let recovered = reverse(&corrupted, &ctx, None, &transforms, payload.len() as u64).unwrap();
         assert_eq!(recovered, payload);

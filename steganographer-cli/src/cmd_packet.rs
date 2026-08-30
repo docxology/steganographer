@@ -258,6 +258,7 @@ pub fn encode(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 pub fn decode(
     input: &str,
     output: &str,

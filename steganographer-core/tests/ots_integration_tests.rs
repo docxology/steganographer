@@ -82,8 +82,10 @@ fn test_config_interval_timeout_clamped() {
 
 #[test]
 fn test_config_method_canonical_fallback() {
-    let mut cfg = OtsConfig::default();
-    cfg.method = "unknown-method".to_string();
+    let mut cfg = OtsConfig {
+        method: "unknown-method".to_string(),
+        ..Default::default()
+    };
     assert_eq!(cfg.method_canonical(), "bitcoin");
     cfg.method = "ETH".to_string();
     assert_eq!(cfg.method_canonical(), "ethereum");
@@ -422,10 +424,7 @@ fn test_handler_error_to_http_all_variants() {
         ),
         (OTSError::InvalidProof("x".into()), 400),
         (OTSError::VerificationFailed("x".into()), 422),
-        (
-            OTSError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
-            500,
-        ),
+        (OTSError::Io(std::io::Error::other("x")), 500),
     ];
     for (err, expected) in cases {
         let (status, body) = ots_handler::error_to_http(&err);

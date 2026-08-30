@@ -9,8 +9,9 @@ license.workspace = true
 [dependencies]
 steganographer-core = { path = "../steganographer-core" }
 gstreamer = { version = "0.23", features = ["v1_22"] }
-gstreamer-video = "0.23"
-gstreamer-audio = "0.23"
+gstreamer-base = { version = "0.23", features = ["v1_22"] }
+gstreamer-video = { version = "0.23", features = ["v1_22"] }
+gstreamer-audio = { version = "0.23", features = ["v1_22"] }
 gstreamer-app = "0.23"
 anyhow = { workspace = true }
 log = { workspace = true }
