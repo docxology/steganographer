@@ -8,8 +8,8 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | 566 | `DashboardState`, `LiveConfig`, `create_router()`, `start_server()`, `check_auth()`, `api_session()`, embedded static assets, docs API |
-| `src/ws_handler.rs` | 692 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `EncodedFrame`, `EncodedAudioChunk` |
+| `src/lib.rs` | 565 | `DashboardState`, `LiveConfig`, `create_router()`, `start_server()`, `check_auth()`, `api_session()`, embedded static assets, docs API |
+| `src/ws_handler.rs` | 690 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `EncodedFrame`, `EncodedAudioChunk` |
 | `src/static/index.html` | 771 | Three-tab layout (Video/Audio/Docs), dual encode/decode panels, live config controls, copy-to-clipboard, kbd hints, footer verified counter |
 | `src/static/style.css` | 2621 | Premium dark theme (gray/black/red), glassmorphism, responsive layout, micro-animations, help tooltips, copy-btn, kbd-hint, export-btn |
 | `src/static/app.js` | 1446 | Webcam capture, WebSocket encode/decode, metrics rendering, live config sync, video recording, keyboard shortcuts, session export, copy-to-clipboard, help tooltip positioning |

@@ -11,7 +11,8 @@ Uses the AppSink/AppSrc pattern to intercept media buffers, apply steganography,
 | `lib` | `src/lib.rs` | GStreamer init (with macOS NSApplication setup), `launch()` pipeline helper |
 | `video_filter` | `src/video_filter.rs` | Video AppSink→process→AppSrc pipeline with format negotiation |
 | `audio_filter` | `src/audio_filter.rs` | Audio AppSink→process→AppSrc pipeline with S16LE conversion |
-| `plugin` | `src/plugin.rs` | Native GStreamer plugin registration skeleton (`register_elements()`) |
+| `elements` | `src/elements.rs` | Native `stegovideo` in-place `BaseTransform` element with `register()` |
+| `plugin` | `src/plugin.rs` | Native GStreamer plugin registration entry point (`register_elements()`) |
 
 ## Dependencies
 

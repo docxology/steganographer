@@ -11,13 +11,13 @@ User-facing CLI binary built with Clap. Wires together core algorithms, GStreame
 | `src/main.rs` | 916 | `Cli` struct, `Commands` enum (14 subcommands), `main()` |
 | `src/cmd_video.rs` | 257 | `run(config, source, sink, max_frames)` |
 | `src/cmd_audio.rs` | 141 | `run(config, source, sink, max_buffers)` |
-| `src/cmd_encode.rs` | 1461 | Legacy offline encode, keygen, info, and analysis |
-| `src/cmd_packet.rs` | 656 | Opt-in generic packet encode/decode |
-| `src/cmd_scan.rs` | 235 | Bounded forensic scan over files and directory trees |
-| `src/cmd_verify.rs` | 1158 | Legacy extraction/verification and `VerifyResult` |
-| `src/cmd_ots.rs` | 398 | OpenTimestamps `stamp` / `verify` attestation |
-| `src/media_io.rs` | 345 | Descriptor-preserving image/WAV/raw I/O and output policy |
-| `src/carrier_binding.rs` | 132 | Kernel-canonical carrier bytes for signing |
+| `src/cmd_encode.rs` | 1457 | Legacy offline encode, keygen, info, and analysis |
+| `src/cmd_packet.rs` | 657 | Opt-in generic packet encode/decode |
+| `src/cmd_scan.rs` | 236 | Bounded forensic scan over files and directory trees |
+| `src/cmd_verify.rs` | 1159 | Legacy extraction/verification and `VerifyResult` |
+| `src/cmd_ots.rs` | 394 | OpenTimestamps `stamp` / `verify` attestation |
+| `src/media_io.rs` | 346 | Descriptor-preserving image/WAV/raw I/O and output policy |
+| `src/carrier_binding.rs` | 133 | Kernel-canonical carrier bytes for signing |
 
 ## Subcommands
 

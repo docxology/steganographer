@@ -9,13 +9,13 @@ Source modules for the CLI binary.
 | `main.rs` | 916 | Clap `#[derive(Parser)]` CLI with 14 subcommands, logging init, dispatch |
 | `cmd_video.rs` | 257 | Loads config, builds GStreamer video source/sink pipelines, runs `run_video_filter()` |
 | `cmd_audio.rs` | 141 | Loads config, builds GStreamer audio source/sink pipelines, runs `run_audio_filter()` |
-| `cmd_encode.rs` | 1461 | Reads raw file → auto-generates signing key → embeds LSB → writes output. Also handles `keygen`, `info`, `analyze`, `derive`, `revoke` |
-| `cmd_verify.rs` | 1158 | Reads raw file → extracts LSB signature → `--format plain\|json` output → `VerifyResult` struct |
-| `cmd_packet.rs` | 656 | Opt-in generic packet v1 alpha encode/decode |
-| `cmd_scan.rs` | 235 | Bounded forensic scan over files and directory trees |
-| `cmd_ots.rs` | 398 | OpenTimestamps `stamp` / `verify` attestation |
-| `media_io.rs` | 345 | Descriptor-preserving image/WAV/raw I/O and output policy |
-| `carrier_binding.rs` | 132 | Kernel-canonical carrier bytes for signing |
+| `cmd_encode.rs` | 1457 | Reads raw file → auto-generates signing key → embeds LSB → writes output. Also handles `keygen`, `info`, `analyze`, `derive`, `revoke` |
+| `cmd_verify.rs` | 1159 | Reads raw file → extracts LSB signature → `--format plain\|json` output → `VerifyResult` struct |
+| `cmd_packet.rs` | 657 | Opt-in generic packet v1 alpha encode/decode |
+| `cmd_scan.rs` | 236 | Bounded forensic scan over files and directory trees |
+| `cmd_ots.rs` | 394 | OpenTimestamps `stamp` / `verify` attestation |
+| `media_io.rs` | 346 | Descriptor-preserving image/WAV/raw I/O and output policy |
+| `carrier_binding.rs` | 133 | Kernel-canonical carrier bytes for signing |
 
 ## Subcommands
 

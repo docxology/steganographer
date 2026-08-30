@@ -8,10 +8,11 @@ GStreamer integration for real-time media pipeline processing.
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | 105 | `init()`, `launch()`, module declarations |
+| `src/lib.rs` | 107 | `init()`, `run_macos_main_loop()`, `launch()`, module declarations |
 | `src/video_filter.rs` | 488 | `run_video_filter()`, `extract_from_source()`, `process_video_file()` |
-| `src/audio_filter.rs` | 205 | `run_audio_filter()`, `extract_from_source()` |
-| `src/plugin.rs` | 48 | `register_elements()`, plugin metadata constants |
+| `src/audio_filter.rs` | 204 | `run_audio_filter()`, `extract_from_source()` |
+| `src/elements.rs` | 424 | `StegoVideo` native `BaseTransform` element, `register()` |
+| `src/plugin.rs` | 50 | `register_elements()`, plugin metadata constants |
 
 ## Data Flow
 

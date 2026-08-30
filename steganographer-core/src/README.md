@@ -9,10 +9,10 @@ Source modules for the core steganographer algorithms.
 | `lib.rs` | 95 | Crate root — module declarations and public re-exports |
 | `packet.rs` | 1278 | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec` — generic packet v1 alpha |
 | `carrier.rs` | 1086 | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels — carrier embed/extract |
-| `placement.rs` | 239 | `KeyedPermutation` — Feistel-network keyed slot placement |
+| `placement.rs` | 243 | `KeyedPermutation` — Feistel-network keyed slot placement |
 | `video.rs` | 64 | `VideoFrame` struct, `VideoFormat` enum (Rgb8/Bgra8/Yuv420), `VideoStegoModule` trait |
 | `audio.rs` | 45 | `AudioBuffer` struct (i16 samples), `AudioStegoModule` trait |
-| `crypto.rs` | 605 | `Signer` (BLAKE3 hash → Ed25519 sign), `Verifier`, `SignaturePayload` serialization |
+| `crypto.rs` | 600 | `Signer` (BLAKE3 hash → Ed25519 sign), `Verifier`, `SignaturePayload` serialization |
 | `signer_backend.rs` | 649 | `SignerBackend` trait, `Ed25519Backend`, `MlDsaBackend`, `HybridBackend`, `EthereumBackend` (feature-gated) |
 | `config.rs` | 529 | TOML config model with `serde`, hex key decode, overlay + info_bar config |
 | `metrics.rs` | 332 | `StegoMetrics` — atomic counters for frames/latency/verify, `to_json()`, `average_fps()` |
