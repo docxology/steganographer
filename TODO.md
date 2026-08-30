@@ -29,6 +29,6 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 ## 📋 Long-Term Backlog
 
 ### Platform & Distribution
-- [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines.
+- [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines. Status: `stegovideo` in-place transform with packet embedding landed (2026-08-27); remaining: keyed placement schedule in-element, audio sibling element (`stegoaudio`), cdylib packaging + `GST_PLUGIN_PATH` smoke pipeline.
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
 - [ ] **Learned watermarking encoder** — neural network-based watermarking resistant to re-encoding/cropping.

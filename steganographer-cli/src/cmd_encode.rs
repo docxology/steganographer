@@ -643,11 +643,9 @@ fn embed_payload(
             let audio_key = embedding_key
                 .ok_or_else(|| anyhow::anyhow!("Missing resolved audio embedding key"))?;
             let key_hex = hex_encode(audio_key);
-            let mut samples: Vec<i16> = data
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            embed_raw_lsb_audio(&mut samples, payload_bytes, bits, &audio_key)?;
+            let (pcm_chunks, _remainder) = data.as_chunks::<2>();
+            let mut samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
+            embed_raw_lsb_audio(&mut samples, payload_bytes, bits, audio_key)?;
             // Write samples back to data
             for (i, s) in samples.iter().enumerate() {
                 let offset = i * 2;
@@ -880,6 +878,7 @@ fn embed_ss_bit(
 
 // ─── Multi-frame spreading ──────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Encode with multi-frame spreading.
 fn encode_multi_frame(
     output: &str,
@@ -1000,11 +999,7 @@ pub fn info(
             let capacity_bits = media.lsb_units(stego_type) * bits as usize;
             let total_bits = 32 + payload_size * 8;
             let capacity_bytes = capacity_bits.saturating_sub(32) / 8;
-            let max = if total_bits > 0 {
-                capacity_bits / total_bits
-            } else {
-                0
-            };
+            let max = capacity_bits.checked_div(total_bits).unwrap_or(0);
             (capacity_bytes, max)
         }
         "spread_spectrum_video" => {
@@ -1258,7 +1253,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 pub fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         anyhow::bail!("Hex string must have even length");
     }
     (0..s.len())
@@ -1334,6 +1329,7 @@ pub fn batch_process(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Encode a multi-frame raw video file.
 ///
 /// Reads a raw RGB file containing multiple frames (each frame = width × height × 3 bytes),

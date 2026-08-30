@@ -39,7 +39,11 @@ impl KeyedPermutation {
         // Feistel halves are balanced. The domain is therefore < 4*len, which
         // keeps cycle-walk iterations bounded in expectation.
         let bits = ceil_log2(len).max(2);
-        let bits = if bits % 2 == 0 { bits } else { bits + 1 };
+        let bits = if bits.is_multiple_of(2) {
+            bits
+        } else {
+            bits + 1
+        };
         let mut padded_label = [0u8; 16];
         let take = label.len().min(16);
         padded_label[..take].copy_from_slice(&label[..take]);
@@ -211,7 +215,7 @@ mod tests {
     #[test]
     fn zero_key_is_still_a_valid_permutation() {
         let perm = KeyedPermutation::new(64, [0u8; 32], b"body");
-        let mut seen = vec![false; 64];
+        let mut seen = [false; 64];
         for i in 0..64 {
             let p = perm.permute(i);
             assert!(!seen[p]);

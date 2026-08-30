@@ -347,6 +347,7 @@ pub fn run_with_key(
 
 // ─── Verification finalization ──────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 fn finish_verification(
     payload: SignaturePayload,
     data: &[u8],
@@ -501,6 +502,7 @@ struct ExtractedPayload {
     lsb_bits: Option<u8>,
 }
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Extract raw payload bytes from media.
 ///
 /// `public_key_hex` and `hash_algo` are threaded through only so auto-mode
@@ -558,10 +560,8 @@ fn extract_payload(
                          --embedding-key-file, or configuration"
                 )
             })?;
-            let samples: Vec<i16> = data
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (pcm_chunks, _remainder) = data.as_chunks::<2>();
+            let samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
             let mut fallback = None;
             let mut verified: Option<ExtractedPayload> = None;
             for &bits in opts.bits.candidates() {
@@ -640,6 +640,7 @@ fn parse_key_32(value: &str, label: &str) -> anyhow::Result<[u8; 32]> {
     Ok(key)
 }
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Perform the *full* signature verification for a candidate extraction, using
 /// `bits` as the LSB strength for carrier canonicalization.
 ///
@@ -861,12 +862,12 @@ fn extract_raw_ss_video(data: &[u8], key: &[u8; 32]) -> anyhow::Result<Option<Ve
     }
 
     let mut result = vec![0u8; len as usize];
-    for byte_idx in 0..result.len() {
+    for (byte_idx, slot) in result.iter_mut().enumerate() {
         for bit_in_byte in 0..8 {
             let payload_bit = 32 + byte_idx * 8 + bit_in_byte;
             let start = payload_bit * spread;
             let bit = extract_ss_bit(data, start, payload_bit, 0, key);
-            result[byte_idx] |= bit << bit_in_byte;
+            *slot |= bit << bit_in_byte;
         }
     }
     Ok(Some(result))
@@ -902,9 +903,9 @@ fn extract_ss_bit(
         0
     }
 }
-
 // ─── Multi-frame verification ───────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 fn verify_multi_frame(
     input: &str,
     data: &[u8],
@@ -1052,7 +1053,7 @@ fn resolve_decryption_key(opts: &VerifyOptions) -> anyhow::Result<encryption::En
 // ─── Output ─────────────────────────────────────────────────────────
 
 fn print_result(result: &VerifyResult, format: &str) -> anyhow::Result<()> {
-    match &*format {
+    match format {
         "json" => {
             let json = serde_json::to_string_pretty(result)?;
             println!("{}", json);
@@ -1146,7 +1147,7 @@ fn check_revoked_key(public_key_hex: &str) -> Option<String> {
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         anyhow::bail!("Hex string must have even length");
     }
     (0..s.len())

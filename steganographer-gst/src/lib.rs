@@ -7,6 +7,7 @@
 //! - [`video_filter`] — Video buffer processing with `VideoStegoModule`
 //! - [`audio_filter`] — Audio buffer processing with `AudioStegoModule`
 //! - [`plugin`] — GStreamer plugin registration skeleton
+//! - [`elements`] — native `BaseTransform` elements (`stegovideo`)
 //!
 //! ## Usage Pattern
 //!
@@ -16,6 +17,7 @@
 //! install a GStreamer plugin.
 
 pub mod audio_filter;
+pub mod elements;
 pub mod plugin;
 pub mod video_filter;
 
