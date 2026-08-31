@@ -21,7 +21,7 @@
 
 - **Root files**: 18 (`.dockerignore`, `.gitattributes`, `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `deny.toml`, `Dockerfile`, `FUNDING.md`, `LICENSE`, `README.md`, `release.toml`, `run.sh`, `rust-toolchain.toml`, `steganographer.toml`, `TODO.md`)
 - **Source files**: 58 Rust files (48 `src/` modules + 4 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 7 static web assets across 4 crates
-- **Tests**: 288 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 7 GStreamer (6 unit + 1 doctest) = **472 passing tests**
+- **Tests**: 288 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 7 GStreamer (6 unit + 1 doctest) = **472 passing tests** — **canonical count home is this line** (as of 2026-08-31; verify with `cargo test --workspace` and update here first, then defer from other docs).
 - **Doc files**: 27 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications + `manuscript/MANUSCRIPT_STATUS.md`) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -29,7 +29,7 @@
 
 ```bash
 cargo build --workspace
-cargo test -p steganographer-core              # 405 tests (288 unit + 117 integration, Ed25519 default)
+cargo test -p steganographer-core              # core crate only (count: canonical Tests line above)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
 cargo test --workspace                         # 472 total tests
 ./run.sh                                       # Interactive menu

@@ -7,7 +7,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 
 ---
 
-## 🧭 Scoped Improvements (v0.8.0 Release Target)
+## 🧭 Scoped Improvements (v0.8.0 Release Target) — SUPERSEDED: all items below completed; see CHANGELOG "Unreleased" and the Long-Term Backlog for current work (marked 2026-08-31)
 
 ### 🟢 Minor Improvements (Ergonomics, Polish, Docs)
 - [x] **CLI help text & diagnostics polish** — Standardize subcommand documentation, help descriptions, and ensure clean error reporting across all subcommands.
@@ -32,3 +32,23 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 - [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines. Status: `stegovideo` in-place transform with packet embedding landed (2026-08-27); remaining: keyed placement schedule in-element, audio sibling element (`stegoaudio`), cdylib packaging + `GST_PLUGIN_PATH` smoke pipeline.
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
 - [ ] **Learned watermarking encoder** — neural network-based watermarking resistant to re-encoding/cropping.
+
+---
+
+## 🔧 Agent-Ergonomics Pass (2026-08-31)
+
+Findings from the 2026-08-31 cold-start documentation audit (agent-erg fleet). All Minor and Medium items were fixed in the same pass; Majors are deferred with reasons.
+
+### 🟢 Minor
+- [x] **"All 13 commands" stale count** — actual subcommand count is 14. Fixed in `README.md`, `docs/AGENTS.md`; `docs/cli-reference.md` gained `revoke` + `ots` sections.
+- [x] **docs/AGENTS.md contents table stale** — omitted `ots-integration.md`, miscounted files. Refreshed with as-of date + verification command.
+- [x] **docs/README.md test count stale (457)** — now points to the canonical Tests line in root `AGENTS.md`.
+- [x] **TODO.md completed section framed as active** — superseded-marked (this edit).
+
+### 🟡 Medium
+- [x] **Test-count fact-class had no canonical home** — duplicated (and disagreeing) across README, AGENTS.md, docs/README.md, docs/contributing.md, docs/getting-started.md. Root `AGENTS.md` Tests line declared canonical; README/docs now link or defer to it.
+- [x] **cli-reference.md missing 2 of 14 subcommands** — `revoke` and `ots` sections added from `steganographer-cli/src/main.rs` (source of truth: `enum Commands`).
+
+### 🔴 Major (deferred)
+- [ ] **Automate test-count provenance** — a small generator (or CI step) that writes the test count into a checked-in file would remove the manual-sync class of staleness entirely. Deferred: introduces a build step to a docs-only pass; current canonical-line convention is workable.
+- [ ] **README has no status surface beyond a badge** — a `make status`-style executable status command would beat prose. Deferred: repo has no Makefile convention; adding one is an infra decision out of scope for this pass.
