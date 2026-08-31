@@ -37,9 +37,11 @@ up=$(git status -sb | head -1 | sed 's/^## //')
 printf 'git: %s\n' "$up"
 
 # Test count (slow; needs cargo). On --check this is the provenance gate.
-printf '\nrunning cargo test --workspace -- --list (slow on cold caches) ...\n'
-tcount=$(cargo test --workspace -- --list 2>/dev/null | grep -c ': test' || echo 0)
-printf 'tests (cargo --list): %s\n' "$tcount"
+# Counting method matches CI's test-count job: sum the "test result: ok. N passed"
+# lines from every test binary and doc-test target.
+printf '\nrunning cargo test --workspace (slow on cold caches) ...\n'
+tcount=$(cargo test --workspace 2>/dev/null | awk '/^test result:/ { sum += $4 } END { print sum+0 }')
+printf 'tests (cargo test --workspace, CI method): %s\n' "$tcount"
 
 # Canonical count home: root AGENTS.md Tests line
 canon=$(grep -m1 '^\- \*\*Tests\*\*' AGENTS.md | grep -oE '= \*\*[0-9]+ passing' | grep -oE '[0-9]+' || echo 0)
