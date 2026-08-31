@@ -49,6 +49,18 @@ cargo test --workspace   # 472 tests, 0 failures
 
 > 📖 Full setup guide: [**Getting Started**](docs/getting-started.md) — includes prerequisites, build instructions, and first-run tutorial.
 
+
+## 📌 Project Status
+
+**State (as of 2026-08-31):** v0.7.0 workspace; correctness baseline and OpenTimestamps integration complete; native GStreamer `stegovideo` embedding slices landed (CHANGELOG "Unreleased"). Backlog: see **[TODO.md](TODO.md)** for current status and next actions (canonical backlog).
+
+**Verify, don't trust this block:**
+
+```bash
+cargo test --workspace   # primary verification; count = printed test totals
+git log --oneline -5     # latest landed work
+```
+
 ---
 
 ## 🏗️ How It Works
@@ -273,7 +285,7 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | [**Security**](docs/security.md) | Cachin's ε-security, deployment guidance |
 | [**Threat Model**](docs/threat-model.md) | Adversary model, attack catalog, mitigations |
 | [**Key Rotation**](docs/key-rotation.md) | Key rotation record, incident report, revocation procedure |
-| [**CLI Reference**](docs/cli-reference.md) | 12 of the 14 subcommands documented in detail, with examples |
+| [**CLI Reference**](docs/cli-reference.md) | All 14 commands with examples |
 | [**API Reference**](docs/api-reference.md) | HTTP + WebSocket endpoints, JSON schemas |
 | [**Configuration**](docs/configuration.md) | Full TOML schema, template variables |
 | [**GStreamer**](docs/gstreamer.md) | Pipeline integration, AppSink/AppSrc |

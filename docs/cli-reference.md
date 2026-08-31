@@ -19,6 +19,8 @@ flowchart LR
     CLI --> DERIVE["derive\n🔑 Key derivation"]
     CLI --> CONFIG["config\n⚙️ Config validation"]
     CLI --> DASH["dashboard\n🌐 Web GUI"]
+    CLI --> REVOKE["revoke\n🚫 Key revocation"]
+    CLI --> OTS["ots\n⏱ OpenTimestamps"]
     style CLI fill:#333,stroke:#e53935,color:#e0e0e0
     style DASH fill:#2d5016,stroke:#4a8c2a,color:#fff
 ```
@@ -545,6 +547,49 @@ steganographer derive --password-file passphrase.txt \
 | `GST_PLUGIN_PATH` | Additional GStreamer plugin search paths |
 | `GST_DEBUG` | GStreamer debug level (e.g., `3` for warnings) |
 | `PKG_CONFIG_PATH` | Path to GStreamer `.pc` files (build-time) |
+
+### `revoke` - Revoke a Signing Key
+
+Append a public key to the revoked-keys list. The `verify` command checks
+this list and warns if a signature was made with a revoked key.
+
+```bash
+steganographer revoke --public-key <HEX> [--output <PATH>]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--public-key <HEX>` | - | Public key to revoke (hex-encoded, 32 bytes / 64 hex chars) |
+| `--output <PATH>` | `keys/revoked.json` | Path to the revoked-keys file |
+
+---
+
+### `ots` - OpenTimestamps Attestation
+
+Stamp a file's BLAKE3 Merkle root with the OpenTimestamps service, or verify
+a `.ots` proof. Subcommands: `stamp`, `verify`. See
+[OTS Integration](ots-integration.md) for the full workflow.
+
+```bash
+steganographer ots stamp --input report.pdf [--method bitcoin] [--format plain]
+steganographer ots verify --input report.pdf [--proof report.pdf.ots] [--format plain]
+```
+
+| Option (stamp) | Default | Description |
+| --- | --- | --- |
+| `--input <PATH>` | - | File to attest |
+| `--output-dir <DIR>` | from config or `./ots_proofs/` | Directory for `.ots` proof files |
+| `--method <M>` | `bitcoin` | Attestation method: `bitcoin` or `ethereum` |
+| `--force` | `false` | Re-stamp even if a proof already exists for this digest |
+| `--format <F>` | `plain` | Output format: `plain` or `json` |
+
+| Option (verify) | Default | Description |
+| --- | --- | --- |
+| `--input <PATH>` | - | File whose digest to check |
+| `--proof <PATH>` | `<input>.ots` | Proof file to verify against |
+| `--format <F>` | `plain` | Output format: `plain` or `json` |
+
+---
 
 ## Configuration-Driven Defaults
 
