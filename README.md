@@ -57,6 +57,7 @@ cargo test --workspace   # 472 tests, 0 failures
 **Verify, don't trust this block:**
 
 ```bash
+./scripts/status.sh      # prints version, subcommand count, docs, git state, test count
 cargo test --workspace   # primary verification; count = printed test totals
 git log --oneline -5     # latest landed work
 ```

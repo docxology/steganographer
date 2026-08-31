@@ -38,3 +38,10 @@ See TODO.md "Agent-ergonomics pass (2026-08-31)" section appended this pass.
 ## Phase 4 — Verify and close
 
 Link checker re-run on touched docs: 0 broken. Commits and push recorded in the fleet report.
+
+## Round 2 (2026-08-31, same day)
+
+- Executed both deferred Majors from the agent-ergonomics pass:
+  - **Test-count provenance automated**: `scripts/status.sh --check` compares `cargo test --workspace -- --list` output against the canonical Tests line in AGENTS.md and exits 1 on drift. The manual-sync staleness class now has a runnable guard.
+  - **Executable status surface**: `./scripts/status.sh` prints workspace version, CLI subcommand count (from `enum Commands`), docs counts, git branch state, and test count — each with its producing source named. Linked from README "Project Status" and AGENTS.md "Build & Test".
+- Long-Term Backlog re-scoped with acceptance lines (see TODO.md).
