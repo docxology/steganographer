@@ -33,6 +33,8 @@ cargo test -p steganographer-core              # core crate only (count: canonic
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
 cargo test --workspace                         # 472 total tests
 ./run.sh                                       # Interactive menu
+./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
+./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo
 ```
 
 ## Key Dependencies
