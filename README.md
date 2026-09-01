@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-472_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-474_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 472 tests, 0 failures
+cargo test --workspace   # 474 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -240,7 +240,7 @@ bits = 1
 
 ## ✅ Tests
 
-472 tests across 4 crates — all passing:
+474 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -249,10 +249,10 @@ bits = 1
 | CLI unit + integration tests | 37 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
 | GStreamer + Doc-tests | 7 | `steganographer-gst/src/` + doc-test |
-| **Total** | **472** | **0 failures** |
+| **Total** | **474** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 472 tests
+cargo test --workspace                # All 474 tests
 cargo test -p steganographer-core     # Core only (405 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
