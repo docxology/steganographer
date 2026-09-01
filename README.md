@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 474 tests, 0 failures
+cargo test --workspace   # 472 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -240,7 +240,7 @@ bits = 1
 
 ## ✅ Tests
 
-474 tests across 4 crates — all passing:
+472 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -252,7 +252,7 @@ bits = 1
 | **Total** | **474** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 474 tests
+cargo test --workspace                # All 472 tests
 cargo test -p steganographer-core     # Core only (405 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
