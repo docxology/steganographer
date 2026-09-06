@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-472_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-484_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 472 tests, 0 failures
+cargo test --workspace   # 484 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -52,7 +52,7 @@ cargo test --workspace   # 472 tests, 0 failures
 
 ## 📌 Project Status
 
-**State (as of 2026-08-31):** v0.7.0 workspace; correctness baseline and OpenTimestamps integration complete; native GStreamer `stegovideo` embedding slices landed (CHANGELOG "Unreleased"). Backlog: see **[TODO.md](TODO.md)** for current status and next actions (canonical backlog).
+**State (as of 2026-09-02):** v0.7.0 workspace; correctness baseline and OpenTimestamps integration complete; native GStreamer `stegovideo` + `stegoaudio` elements with keyed placement and loadable cdylib packaging landed (CHANGELOG "Unreleased"). Backlog: see **[TODO.md](TODO.md)** for current status and next actions (canonical backlog).
 
 **Verify, don't trust this block:**
 
@@ -144,9 +144,9 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics | 405 | [Architecture](docs/architecture.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics | 407 | [Architecture](docs/architecture.md) |
 | **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
-| **[steganographer-gst](steganographer-gst/)** | GStreamer integration | 2 | [GStreamer Guide](docs/gstreamer.md) |
+| **[steganographer-gst](steganographer-gst/)** | GStreamer integration: `stegovideo`/`stegoaudio` native elements, cdylib plugin | 15 | [GStreamer Guide](docs/gstreamer.md) |
 | **[steganographer-cli](steganographer-cli/)** | CLI binary | 37 | [CLI Reference](docs/cli-reference.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
@@ -240,7 +240,7 @@ bits = 1
 
 ## ✅ Tests
 
-472 tests across 4 crates — all passing:
+484 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -248,11 +248,11 @@ bits = 1
 | Core integration tests | 117 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
 | CLI unit + integration tests | 37 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
-| GStreamer + Doc-tests | 7 | `steganographer-gst/src/` + doc-test |
-| **Total** | **474** | **0 failures** |
+| GStreamer unit + integration + doc-tests | 17 | `steganographer-gst/src/` + `steganographer-gst/tests/` + doc-test |
+| **Total** | **484** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 472 tests
+cargo test --workspace                # All 484 tests
 cargo test -p steganographer-core     # Core only (405 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```

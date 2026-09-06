@@ -163,46 +163,76 @@ Sink String:    "videoconvert ! v4l2sink device=/dev/video42"     ◀───�
 
 ---
 
-## Plugin Skeleton
+## Native Plugin (landed)
 
-The `plugin.rs` module provides a registration skeleton for a native GStreamer plugin. This is a future extension point for when native plugin performance or integration is needed.
+The crate builds as a loadable GStreamer plugin: `Cargo.toml` sets
+`crate-type = ["cdylib", "rlib"]` (cdylib for `GST_PLUGIN_PATH` loading,
+rlib so the CLI and tests keep linking it), and `lib.rs` declares the plugin
+via `gstreamer::plugin_define!` under the name `steganographer_gst` — which
+MUST match the cdylib file stem (`libsteganographer_gst.dylib`), because
+GStreamer's loader derives the entry-point symbol
+`gst_plugin_<file-stem>_get_desc` from the file name.
 
-```rust
-gst::plugin_define!(
-    steganographer,
-    env!("CARGO_PKG_DESCRIPTION"),
-    plugin_init,
-    concat!(env!("CARGO_PKG_VERSION")),
-    "MIT",
-    env!("CARGO_PKG_NAME"),
-    env!("CARGO_PKG_NAME"),
-    env!("CARGO_PKG_REPOSITORY"),
-    env!("BUILD_REL_DATE")
-);
+```bash
+cargo build -p steganographer-gst --lib
+GST_PLUGIN_PATH=target/debug gst-inspect-1.0 stegovideo   # lists properties
+GST_PLUGIN_PATH=target/debug gst-inspect-1.0 stegoaudio  # lists properties
+
+# Audio round-trip smoke (embed into a live tone, then decode the sink output):
+GST_PLUGIN_PATH=target/debug gst-launch-1.0 \
+  audiotestsrc num-buffers=16 samplesperbuffer=1024 \
+  ! capsfilter caps=audio/x-raw,format=S16LE,layout=interleaved,rate=44100,channels=1 \
+  ! stegoaudio packet-hex=<hex> bits-per-unit=2 \
+  ! filesink location=out.pcm
+steganographer decode --input out.pcm --output payload.bin \
+  --stego-type lsb_audio --bits 2 --input-format raw_s16le --force
 ```
 
-### Native `stegovideo` element (landed)
+### `stegovideo` element (in-place `BaseTransform`)
 
-`steganographer-gst::elements` now ships a real in-place `BaseTransform`
-element, `stegovideo`, registered via `register_elements()` for both cdylib
-plugin loading and direct application registration. It embeds a pre-encoded
-generic packet into every frame's least-significant bits without changing
-buffer sizes or caps.
+Embeds a pre-encoded generic packet into every frame's least-significant
+bits without changing buffer sizes or caps. Registered via
+`register_elements()` for both cdylib plugin loading and direct application
+registration.
 
 Properties:
 
 | Property | Type | Meaning |
 | --- | --- | --- |
-| `packet-hex` | string | Hex-encoded generic packet bytes (from `packet encode`) |
+| `packet-hex` | string | Hex-encoded generic packet bytes |
 | `bits-per-unit` | uint (1-4, default 1) | LSB bits used per carrier byte |
-| `clear-payload` | bool (default false) | After the first embedded frame, clear packet slots instead of re-embedding |
-| `key-hex` | string | 32-byte hex key (reserved for keyed placement) |
+| `clear-payload` | bool (default false) | After the first embedded frame, zero the packet slots instead of re-embedding (sequential mode only) |
+| `key-hex` | string | 32-byte hex embedding key; when set, packet bits are placed by the core `KeyedSpatialLsb` keyed permutation (key-driven slot selection instead of sequential leading slots) |
 
-Wire format note: embedding routes through `steganographer-core`'s
-`carrier::SpatialLsb` kernel (sequential placement), so a pipeline output
-frame decodes with the same `packet extract` CLI command and `bits-per-unit`
-value used at embed time. Packed single-plane RGB/BGR/RGBx/BGRx/XRGB/XBGR
-formats are supported; other formats pass through unembedded with a warning.
+Wire format notes:
+
+- Sequential mode (no `key-hex`) routes through `carrier::SpatialLsb`; output
+  decodes with the same `decode` CLI command and `bits-per-unit` value used
+  at embed time, and a whole multi-frame file decodes because the packet sits
+  in the leading slots of the first frame.
+- Keyed mode (non-empty `key-hex`) routes through `carrier::KeyedSpatialLsb`.
+  The packet must have been encoded with `--embedding-key` so its envelope
+  declares `PLACEMENT_KEYED`; extraction requires the same key. Placement is
+  frame-scoped: frame 0 uses the raw key (first-frame output decodes via
+  `decode --embedding-key` unchanged), and frame N mixes its index into the
+  derivation (`kdf::derive_frame_embedding_key`), so equal buffers embed at
+  different slots per frame while every frame decodes through the same
+  derivation with its index. The keyed carrier's recognition tag binds the
+  unit count, so keyed output decodes per frame, not from a multi-frame
+  concatenation. `clear-payload` is ignored with a one-time warning in keyed
+  mode.
+- Packed single-plane RGB/BGR/RGBx/BGRx/XRGB/XBGR formats are embedded;
+  other formats pass through unembedded with a warning.
+
+### `stegoaudio` element (in-place `BaseTransform`)
+
+Audio sibling over interleaved little-endian S16 PCM: sequential
+`carrier::AudioSpatialLsb` by default, keyed `KeyedAudioSpatialLsb` when
+`key-hex` is set. Same property set as `stegovideo`; wire format verifies
+with `decode --stego-type lsb_audio` (plus `--embedding-key` for keyed
+carriers) and `--input-format raw_s16le` for headerless sink output. Each
+buffer embeds the full packet independently, so a single-buffer capture
+decodes on its own.
 
 Example application-side registration:
 
@@ -214,13 +244,6 @@ let element = gstreamer::ElementFactory::make("stegovideo")
     .property("bits-per-unit", 1u32)
     .build()?;
 ```
-
-### Remaining plugin work
-
-1. Keyed placement schedule inside the element (the `key-hex` property is
-   currently reserved; the sequential kernel ignores it)
-2. An audio sibling element (`stegoaudio`) over `AudioSpatialLsb`
-3. cdylib packaging and a `GST_PLUGIN_PATH` smoke pipeline
 
 ---
 

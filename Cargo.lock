@@ -3108,6 +3108,7 @@ dependencies = [
  "gstreamer-base",
  "gstreamer-video",
  "log",
+ "parking_lot",
  "steganographer-core",
 ]
 

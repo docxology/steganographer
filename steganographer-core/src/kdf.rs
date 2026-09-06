@@ -65,6 +65,25 @@ pub fn derive_placement_key(embedding_key: &[u8; 32]) -> [u8; 32] {
     blake3::derive_key(PLACEMENT_CONTEXT, embedding_key)
 }
 
+/// Derive a frame-scoped embedding key for keyed carriers whose placement is
+/// computed per frame (native GStreamer elements).
+///
+/// Frame 0 intentionally returns the embedding key unchanged, so a
+/// single-frame (or first-frame) capture decodes with the raw key through
+/// `KeyedSpatialLsb::new(key)` / the CLI `decode --embedding-key` path.
+/// Frames at index N > 0 mix the index into the derivation, which is what
+/// makes equal carrier buffers embed at different slots per frame while
+/// staying decodable by the same derivation with the frame index.
+pub fn derive_frame_embedding_key(embedding_key: &[u8; 32], frame_index: u64) -> [u8; 32] {
+    if frame_index == 0 {
+        return *embedding_key;
+    }
+    blake3::derive_key(
+        "steganographer-frame-placement-v1",
+        [embedding_key.as_slice(), &frame_index.to_le_bytes()].concat().as_slice(),
+    )
+}
+
 /// Derive all three keys from a master secret.
 pub fn derive_all(master: &[u8]) -> DerivedKeys {
     DerivedKeys {
@@ -93,6 +112,29 @@ pub fn derive_session_encryption_key(master: &[u8], session_counter: u64) -> [u8
 }
 
 #[cfg(test)]
+mod frame_key_tests {
+    use super::derive_frame_embedding_key;
+
+    #[test]
+    fn frame_zero_preserves_embedding_key() {
+        let key = [9u8; 32];
+        assert_eq!(derive_frame_embedding_key(&key, 0), key);
+    }
+
+    #[test]
+    fn frame_indices_produce_distinct_keys() {
+        let key = [9u8; 32];
+        let k0 = derive_frame_embedding_key(&key, 0);
+        let k1 = derive_frame_embedding_key(&key, 1);
+        let k2 = derive_frame_embedding_key(&key, 2);
+        assert_ne!(k0, k1);
+        assert_ne!(k1, k2);
+        assert_ne!(k0, k2);
+        // Deterministic.
+        assert_eq!(derive_frame_embedding_key(&key, 1), k1);
+    }
+}
+
 mod tests {
     use super::*;
 

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native GStreamer plugin packaging + `stegoaudio` element + keyed placement
+  (2026-09-02 round).** `steganographer-gst` now builds as a loadable plugin:
+  `crate-type = ["cdylib", "rlib"]` plus a `gstreamer::plugin_define!` entry
+  named `steganographer_gst` (the loader derives
+  `gst_plugin_<file-stem>_get_desc` from the dylib file name, so plugin name
+  and file stem must agree). Both elements gained `metadata()` and
+  `pad_templates()` (any-caps sink/src; missing templates made the registry
+  refuse the factories). New `stegoaudio` in-place `BaseTransform` embeds
+  pre-encoded packets into interleaved S16LE PCM via
+  `carrier::AudioSpatialLsb` (sequential) or `KeyedAudioSpatialLsb`
+  (`key-hex` set). `stegovideo` honors `key-hex` too: keyed placement is
+  computed inside the element through the core keyed carriers; element state
+  mutexes migrated to `parking_lot` per repo rule. `clear-payload` actually
+  clears now — the previous branch embedded an empty packet, which writes
+  zero bits and was a no-op (keyed mode warns once and keeps re-embedding).
+  Acceptance verified on GStreamer 1.28.6: `gst-inspect-1.0 stegovideo` /
+  `stegoaudio` list properties from the cdylib, and a live
+  `gst-launch-1.0 audiotestsrc ! stegoaudio packet-hex=… ! filesink` run
+  decodes back to the original payload via
+  `decode --stego-type lsb_audio --input-format raw_s16le`. Tests: gst suite
+  7 → 15 (elements/audio-element unit tests, keyed divergence tests, and
+  `tests/gst_roundtrip.rs` wire-format decode check; workspace total 472 →
+  480).
 - **Native GStreamer element `stegovideo` (first slice).**
   `steganographer-gst` now ships a real in-place `BaseTransform` subclass
   instead of only a registration stub: negotiation captures the `VideoInfo`,
@@ -30,7 +53,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist guard, and an end-to-end packet round-trip through the core
   extractor (gst suite now 6 tests).
 
+### Changed
+
+- **`register_elements(plugin: Option<&Plugin>)`** now takes a shared
+  plugin reference (gstreamer-rs 0.23 `Element::register` signature);
+  application callers pass `Some(&plugin)` unchanged.
+
 ### Fixed
+
+- **`stegovideo` clear-payload no-op.** The post-first-frame clear path
+  called `embed_packet(frame, &[], config)`, which writes nothing; frames
+  advertised as cleared kept their prior LSB content. The element now zeroes
+  the exact sequential slot footprint (first `packet_len * 8 / bits` units)
+  and refuses the combination with keyed placement (permutation-scattered
+  slots cannot be cleared without the key schedule) with a one-time warning.
+- **README test table drift.** Tests table said "Total 474" against a 472
+  canonical count; all README/AGENTS counts now defer to the canonical
+  AGENTS.md Tests line (480 after this round).
 
 - **Clippy `-D warnings` gate restored under Rust 1.98.** The new
   `clippy::chunks_exact_to_as_chunks` lint (warnings-on-by-default, promoted to
