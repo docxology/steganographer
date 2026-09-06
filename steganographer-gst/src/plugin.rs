@@ -27,7 +27,7 @@ pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// element(s) from [`crate::elements`]; the AppSink/AppSrc helpers remain
 /// available for applications that build pipelines without native elements.
 pub fn register_elements(
-    plugin: Option<&mut gstreamer::Plugin>,
+    plugin: Option<&gstreamer::Plugin>,
 ) -> Result<(), gstreamer::glib::BoolError> {
     log::info!(
         "Registering GStreamer plugin: {} v{}",

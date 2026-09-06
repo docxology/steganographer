@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 steganographer-core = { path = "../steganographer-core" }
@@ -15,3 +19,4 @@ gstreamer-audio = { version = "0.23", features = ["v1_22"] }
 gstreamer-app = "0.23"
 anyhow = { workspace = true }
 log = { workspace = true }
+parking_lot = "0.12"

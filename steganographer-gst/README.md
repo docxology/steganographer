@@ -11,8 +11,11 @@ Uses the AppSink/AppSrc pattern to intercept media buffers, apply steganography,
 | `lib` | `src/lib.rs` | GStreamer init (with macOS NSApplication setup), `launch()` pipeline helper |
 | `video_filter` | `src/video_filter.rs` | Video AppSink→process→AppSrc pipeline with format negotiation |
 | `audio_filter` | `src/audio_filter.rs` | Audio AppSink→process→AppSrc pipeline with S16LE conversion |
-| `elements` | `src/elements.rs` | Native `stegovideo` in-place `BaseTransform` element with `register()` |
+| `elements` | `src/elements.rs` | Native `stegovideo` in-place `BaseTransform` element (sequential + keyed LSB) with `register()` |
+| `audio_element` | `src/audio_element.rs` | Native `stegoaudio` in-place `BaseTransform` element over interleaved S16LE PCM |
 | `plugin` | `src/plugin.rs` | Native GStreamer plugin registration entry point (`register_elements()`) |
+
+The crate also builds as a loadable GStreamer plugin (`crate-type = ["cdylib", "rlib"]`); see `docs/gstreamer.md` for `GST_PLUGIN_PATH` usage and the `stegovideo`/`stegoaudio` property reference. Round-trip acceptance lives in `tests/gst_roundtrip.rs`.
 
 ## Dependencies
 

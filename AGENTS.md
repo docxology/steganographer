@@ -9,7 +9,7 @@
 | Path | Type | Description |
 | ---- | ---- | ----------- |
 | `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, ML-DSA post-quantum, Hybrid), metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics, and WASM inspection facade (30 modules + `lib.rs`) |
-| `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines + native `stegovideo` in-place packet-embedding element (5 modules) |
+| `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines + native `stegovideo` (keyed/sequential LSB video element) and `stegoaudio` (S16 PCM audio element) with cdylib plugin packaging (6 modules + integration tests) |
 | `steganographer-cli/` | Crate | CLI binary: 14 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (10 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 7 static assets) |
 | `config/` | Config | Example TOML configuration files |
@@ -20,8 +20,8 @@
 ## File Counts
 
 - **Root files**: 18 (`.dockerignore`, `.gitattributes`, `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `deny.toml`, `Dockerfile`, `FUNDING.md`, `LICENSE`, `README.md`, `release.toml`, `run.sh`, `rust-toolchain.toml`, `steganographer.toml`, `TODO.md`)
-- **Source files**: 58 Rust files (48 `src/` modules + 4 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 7 static web assets across 4 crates
-- **Tests**: 288 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 7 GStreamer (6 unit + 1 doctest) = **472 passing tests** — **canonical count home is this line** (as of 2026-08-31; verify with `cargo test --workspace` and update here first, then defer from other docs).
+- **Source files**: 60 Rust files (49 `src/` modules + 5 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 7 static web assets across 4 crates
+- **Tests**: 290 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 17 GStreamer (14 unit + 2 integration + 1 doctest) = **484 passing tests** — **canonical count home is this line** (as of 2026-09-02; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
 - **Doc files**: 27 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications + `manuscript/MANUSCRIPT_STATUS.md`) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -31,7 +31,7 @@
 cargo build --workspace
 cargo test -p steganographer-core              # core crate only (count: canonical Tests line above)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 472 total tests
+cargo test --workspace                         # 484 total tests
 ./run.sh                                       # Interactive menu
 ./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
 ./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo

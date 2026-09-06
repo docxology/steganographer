@@ -33,9 +33,36 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 > Owner-intent items: each carries an acceptance line so a future agent can execute
 > or re-scope without guessing intent. Sequencing/priority calls need the owner.
 
-- [ ] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines.
-  Status: `stegovideo` in-place transform with packet embedding landed (2026-08-27).
-  Acceptance: (1) keyed placement schedule computed inside `stegovideo` (property `key-hex` drives per-frame slot selection, verified by a unit test that two frames with equal buffers but different indices embed to different slots); (2) `stegoaudio` element round-trips a PCM S16 packet through `gst-launch` (verified by `GST_PLUGIN_PATH=. gst-launch-1.0 ... ! fakesink` + decode check); (3) cdylib packaging produces a loadable plugin and `gst-inspect-1.0 stegovideo` lists its properties.
+- [x] **Native GStreamer plugin** — full `BaseTransform` for zero-copy pipelines.
+  Status: **complete (2026-09-02 round; all three acceptance points verified on
+  GStreamer 1.28.6)**. (1) Keyed placement: `stegovideo` computes the schedule
+  inside the element — non-empty `key-hex` routes embedding through core
+  `KeyedSpatialLsb` (key-driven slot selection + keyed recognition tag);
+  unit-tested that equal buffers under different keys embed to different slot
+  sets and that keyed output round-trips through the core keyed extractor.
+  Interpretation note updated in the 2026-09-04 comprehensive pass: the
+  literal acceptance test is now satisfied — placement is frame-scoped via
+  `kdf::derive_frame_embedding_key` (frame 0 keeps the raw key, frame N
+  mixes its index in), so the unit test verifies that equal buffers at
+  different frame indices embed to different slot sets AND that every frame
+  decodes through the same derivation with its index. No core wire-format
+  change was needed (frame-scoped key derivation is element-local; frame 0
+  stays CLI-decodable with the raw key). (2) `stegoaudio`: new in-place
+  `BaseTransform` over
+  interleaved S16LE PCM (`AudioSpatialLsb` / `KeyedAudioSpatialLsb`);
+  verified by `gst-launch-1.0 audiotestsrc ! … ! stegoaudio packet-hex=…
+  bits-per-unit=2 ! filesink` followed by
+  `decode --stego-type lsb_audio --input-format raw_s16le --bits 2`
+  recovering the exact payload (buffer-scoped decode check in
+  `tests/gst_roundtrip.rs`). (3) cdylib packaging: `crate-type =
+  ["cdylib", "rlib"]` + `gstreamer::plugin_define!` named `steganographer_gst`
+  (must equal the dylib file stem — the loader derives
+  `gst_plugin_<file-stem>_get_desc` from it); `gst-inspect-1.0 stegovideo`
+  and `gst-inspect-1.0 stegoaudio` both list properties from the built dylib.
+  Elements carry metadata + any-caps pad templates (missing templates made
+  the registry refuse the factories). Also fixed in the same pass:
+  `clear-payload` was a no-op (empty-packet embed writes zero bits); gst
+  suite 7 → 15, workspace 472 → 480.
 - [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
   Acceptance: dashboard Video tab streams at ≥ 15 fps 720p over `whep`/whip-style signaling with end-to-end latency < 500 ms on localhost; verification round-trip still passes on the rendered frames; fallback to WebSocket retained behind a config flag. Owner intent needed: target browsers and signaling stack.
 - [ ] **Learned watermarking encoder** — neural network-based watermarking resistant to re-encoding/cropping.
@@ -44,6 +71,8 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 ---
 
 ## 🔧 Agent-Ergonomics Pass (2026-08-31)
+
+---
 
 Findings from the 2026-08-31 cold-start documentation audit (agent-erg fleet). All Minor and Medium items were fixed in the same pass; Majors are deferred with reasons.
 
@@ -68,3 +97,71 @@ Findings from the 2026-08-31 cold-start documentation audit (agent-erg fleet). A
 - [x] **Automate test-count provenance** (Major, from Round 1) — `scripts/status.sh --check`.
 - [x] **Executable status command** (Major, from Round 1) — `./scripts/status.sh`.
 - [x] **Long-Term Backlog re-scoped** — acceptance lines added to all three items; owner-intent flags noted.
+
+---
+
+## 🔁 2026-09-02 Improvement Round — Native GStreamer plugin acceptance closed
+
+Executed the only owner-independent Long-Term Backlog item (Native GStreamer
+plugin). Toolchain check: `gst-launch-1.0`, `gst-inspect-1.0`, and
+`pkg-config gstreamer-1.0` (= 1.28.6) all present, so the item was
+executable. All changes uncommitted, left in the working tree for owner
+review. Docs-count changes were gated by `./scripts/status.sh --check`
+(ran first at canonical 472 → confirmed MISMATCH exit 1 → counts updated →
+re-run clean).
+
+### Landed
+
+- [x] cdylib plugin packaging: `crate-type = ["cdylib", "rlib"]`,
+  `gstreamer::plugin_define!` as `steganographer_gst` (= dylib file stem;
+  the loader derives `gst_plugin_<file-stem>_get_desc` from the file name —
+  naming the plugin `steganographer` made `gst-inspect-1.0` report "Could
+  not find plugin entry point"). Origin inherited via
+  `repository.workspace = true`. `status.sh --check` clean after count sync.
+- [x] `stegoaudio` element (new `src/audio_element.rs`): interleaved S16LE
+  PCM in-place transform over `AudioSpatialLsb` (sequential) /
+  `KeyedAudioSpatialLsb` (`key-hex` set); per-buffer independent embedding;
+  sequential `clear-payload` zeroes the exact slot footprint.
+- [x] `stegovideo` keyed placement: non-empty `key-hex` switches embedding
+  to `KeyedSpatialLsb` (key-driven per-frame slot selection via the core
+  keyed carrier). Interpretation deviation recorded above on the
+  "different indices" acceptance phrasing.
+- [x] Both elements: `metadata()` + any-caps `pad_templates()` (absent
+  templates caused `gst_base_transform_init: assertion 'pad_template !=
+  NULL'` and the registry listed no features), `register_elements` moved to
+  the gstreamer-rs 0.23 `Option<&Plugin>` signature, state mutexes migrated
+  to `parking_lot` (repo rule), author metadata literal (crate has no
+  `CARGO_PKG_AUTHORS`).
+- [x] Acceptance evidence (GStreamer 1.28.6, macOS): `gst-inspect-1.0`
+  lists `stegovideo` + `stegoaudio` from the built dylib (rc 0);
+  `gst-launch-1.0 audiotestsrc ! capsfilter(S16LE) ! stegoaudio
+  packet-hex=<166-byte packet> bits-per-unit=2 ! filesink` (rc 0, 32 KiB
+  raw PCM) and `decode --stego-type lsb_audio --input-format raw_s16le
+  --bits 2` recovers `"stegoaudio gst-launch acceptance"` byte-exact.
+  `tests/gst_roundtrip.rs` pins the wire-format decode check.
+
+### Fixed (same round)
+
+- [x] `stegovideo`/`stegoaudio` `clear-payload` no-op (empty-packet embed
+  writes nothing); sequential mode now zeroes the packet slot footprint,
+  keyed mode warns once and keeps re-embedding (scattered slots are not
+  clearable without the key schedule).
+- [x] Docs drift: README Tests table said "Total 474" vs canonical 472;
+  `docs/gstreamer.md` "Remaining plugin work" was stale after this round
+  and its `packet extract` naming predates the `decode` subcommand.
+  Counts refreshed everywhere from the canonical AGENTS.md Tests line
+  (480 as of 2026-09-02; `./scripts/status.sh --check` exit 0).
+
+### Implemented (2026-09-04 comprehensive pass)
+
+- [x] Literal frame-index-divergent keyed placement — implemented without a
+      core wire-format change: elements derive a frame-scoped embedding key
+      (`kdf::derive_frame_embedding_key`, frame 0 = raw key) and embed each
+      frame under its derived key. Unit tests: `kdf` frame-key derivation,
+      `keyed_frames_diverge_by_frame_index` (video),
+      `keyed_buffers_diverge_by_frame_index` (audio); every frame decodes
+      through the same derivation with its index, frame 0 stays
+      CLI-decodable with the raw key. Workspace 480 → 484 tests; `./scripts/status.sh --check` verified clean at 484 == 484.
+- [ ] WebRTC streaming and learned watermarking encoder: owner intent
+      required per backlog (unchanged).
+
