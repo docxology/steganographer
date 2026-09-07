@@ -866,6 +866,19 @@ fn main() -> anyhow::Result<()> {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
 
+            // The ICE list is consumed by the WebRTC media path; without
+            // that feature the flag is parsed but has no effect. Say so
+            // instead of failing the default clippy gate on an unused
+            // binding.
+            #[cfg(not(feature = "webrtc"))]
+            if !ice_server.is_empty() {
+                log::warn!(
+                    "--ice-server requires building with --features webrtc; \
+                    ignoring {} server(s)",
+                    ice_server.len()
+                );
+            }
+
             if host == "0.0.0.0" && auth_token.is_none() {
                 log::warn!(
                     "Dashboard binding to 0.0.0.0 without --auth-token: \
