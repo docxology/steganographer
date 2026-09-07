@@ -67,10 +67,10 @@ cargo build --workspace --release
 ## Run Tests
 
 ```bash
-# All workspace tests (457 tests)
+# All workspace tests (484 tests)
 cargo test --workspace
 
-# Core only (395 tests)
+# Core only (407 tests)
 cargo test -p steganographer-core
 
 # Dashboard only (23 tests)
