@@ -80,7 +80,9 @@ pub fn derive_frame_embedding_key(embedding_key: &[u8; 32], frame_index: u64) ->
     }
     blake3::derive_key(
         "steganographer-frame-placement-v1",
-        [embedding_key.as_slice(), &frame_index.to_le_bytes()].concat().as_slice(),
+        [embedding_key.as_slice(), &frame_index.to_le_bytes()]
+            .concat()
+            .as_slice(),
     )
 }
 
@@ -135,6 +137,7 @@ mod frame_key_tests {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
