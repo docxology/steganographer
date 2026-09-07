@@ -52,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once-only warning. Tests: property round-trip, hex decoding, format
   allowlist guard, and an end-to-end packet round-trip through the core
   extractor (gst suite now 6 tests).
+- **Stale-count provenance gate in `status.sh --check` (2026-09-07 round).**
+  Beyond pinning the canonical AGENTS.md total, `--check` now sweeps every
+  Git-tracked Markdown file and fails on any `<N> tests` / `<N> passing` /
+  `tests-<N>` integer that cargo does not report (workspace total, a
+  per-target count, a per-crate sum, or a split integer from the canonical
+  Tests line). Closes the gap that let per-doc counts drift three times
+  (457/467/405/288-era strings survived earlier "counts refreshed"
+  passes); URL-encoded badge fragments are not matched.
+
 
 ### Changed
 
@@ -61,6 +70,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Test module compiled into release builds.**
+  `steganographer-core/src/kdf.rs`'s `mod tests` lacked `#[cfg(test)]` —
+  the only unguarded test module in the workspace, so the 9 kdf unit tests
+  and their imports were compiled into the release lib (the sole warning
+  on a plain `cargo build -p steganographer-core`: unused import of
+  `super::*`). Gated now; the kdf tests still run under
+  `cargo test --workspace` (484 total, unchanged).
+- **2026-09-06 commit landed unformatted.** `cargo fmt --check` failed on
+  `steganographer-core/src/kdf.rs`, `steganographer-gst/src/audio_element.rs`,
+  and `steganographer-gst/src/lib.rs` (module-list ordering); reformatted,
+  no behavior change.
+- **Per-doc test-count drift (288/405/457/467-era strings).** `README.md`
+  (288→290, 405→407), `docs/README.md` (288→290, gst 2→17, total
+  467→484), `docs/contributing.md` (457→484 twice, 395/282+113→
+  407/290+117), `docs/getting-started.md` (457→484, 395→407),
+  `steganographer-core/AGENTS.md` (288→290, 405→407), and
+  `steganographer-core/README.md` (405→407 badge and totals) now carry
+  cargo-verified counts (484 = 290 core unit + 117 core integration +
+  37 CLI + 23 dashboard + 17 gst).
 - **`stegovideo` clear-payload no-op.** The post-first-frame clear path
   called `embed_packet(frame, &[], config)`, which writes nothing; frames
   advertised as cleared kept their prior LSB content. The element now zeroes
