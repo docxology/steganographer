@@ -367,6 +367,12 @@ enum Commands {
         /// per-session via ?transport= and the settings toggle.
         #[arg(long, default_value = "auto")]
         transport: String,
+        /// ICE server URL for WebRTC (repeatable), e.g.
+        /// "stun:stun.l.google.com:19302" or "turn:user:cred@host:port".
+        /// Empty by default (loopback host candidates only). Unsupported
+        /// schemes and TURN without credentials are warned and skipped.
+        #[arg(long = "ice-server")]
+        ice_server: Vec<String>,
     },
 
     /// Revoke a signing key (add to revoked-keys list)
@@ -855,9 +861,23 @@ fn main() -> anyhow::Result<()> {
             host,
             auth_token,
             transport,
+            ice_server,
         } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
+
+            // The ICE list is consumed by the WebRTC media path; without
+            // that feature the flag is parsed but has no effect. Say so
+            // instead of failing the default clippy gate on an unused
+            // binding.
+            #[cfg(not(feature = "webrtc"))]
+            if !ice_server.is_empty() {
+                log::warn!(
+                    "--ice-server requires building with --features webrtc; \
+                    ignoring {} server(s)",
+                    ice_server.len()
+                );
+            }
 
             if host == "0.0.0.0" && auth_token.is_none() {
                 log::warn!(
@@ -908,6 +928,10 @@ fn main() -> anyhow::Result<()> {
                 ots_client,
                 #[cfg(feature = "webrtc")]
                 webrtc_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+                #[cfg(feature = "webrtc")]
+                ice_servers: ice_server,
+                #[cfg(feature = "webrtc")]
+                media_publishers: std::sync::Mutex::new(std::collections::HashMap::new()),
             });
 
             log::info!(

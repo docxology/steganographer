@@ -451,9 +451,7 @@ const WEBRTC_CHUNK_HEADER_BYTES = 20;           // u32 magic + u64 msg_id + u32 
 const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
 const TRANSPORT_STORAGE_KEY = 'stego-transport';
 const WEBRTC_ANSWER_TIMEOUT_MS = 5000;
-
-// Active transport handle. null until the first connection succeeds.
-let transport = null;
+const WEBRTC_MEDIA_TRACK_TIMEOUT_MS = 5000;
 // Once WebRTC fails, fall back to WebSocket permanently for this session.
 let transportFallback = false;
 let webrtcPc = null;
@@ -462,6 +460,10 @@ let webrtcPollTimer = null;
 let webrtcMsgId = 0;
 // Partial inbound binary messages keyed by msg_id (chunk reassembly).
 const webrtcPartial = new Map();
+// WebRTC media (H.264 RTP track) state. The media preview is an enhancement
+// view: the DataChannel canvas path remains the primary rendering surface.
+let mediaFpsActive = false;
+let mediaTrackTimer = null;
 
 function resolveTransportPreference() {
     const q = new URL(location.href).searchParams.get('transport');
@@ -508,24 +510,61 @@ function teardownWebRtcTransport() {
     if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
     if (webrtcPc) { try { webrtcPc.close(); } catch (e) { } webrtcPc = null; }
     webrtcPartial.clear();
+    resetMediaPreview();
 }
 
 async function connectWebRtcTransport() {
     try {
-        const pc = new RTCPeerConnection({ iceServers: [] }); // localhost host candidates only
+        // Probe the server's WebRTC capabilities: mirror its ICE server list
+        // and learn whether the H.264 media track is published.
+        let mediaEnabled = false;
+        let iceServers = [];
+        try {
+            const cfgResp = await fetch('/api/webrtc/config');
+            if (cfgResp.ok) {
+                const cfg = await cfgResp.json();
+                mediaEnabled = !!cfg.media;
+                iceServers = parseIceServersForBrowser(cfg.ice_servers || []);
+            }
+        } catch (err) {
+            // Config endpoint unavailable -> DataChannel-only session.
+        }
+
+        const pc = new RTCPeerConnection({ iceServers });
         webrtcPc = pc;
         const dc = pc.createDataChannel('frames', { ordered: true });
         webrtcDc = dc;
 
-        const opened = new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error('DataChannel open timeout')), WEBRTC_ANSWER_TIMEOUT_MS);
-            dc.onopen = () => { clearTimeout(timer); resolve(); };
-            dc.onerror = (e) => { clearTimeout(timer); reject(e); };
-            dc.onclose = () => { clearTimeout(timer); reject(new Error('DataChannel closed')); };
-        });
+        // Media: recvonly video transceiver must be added BEFORE createOffer
+        // so the server answers with a sendonly H.264 track. A 5s guard keeps
+        // the DataChannel canvas path as the default when no track arrives.
+        if (mediaEnabled) {
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            mediaTrackTimer = setTimeout(() => {
+                console.log('[media] no WebRTC track within 5s; keeping DataChannel canvas path');
+            }, WEBRTC_MEDIA_TRACK_TIMEOUT_MS);
+            pc.ontrack = (ev) => {
+                if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
+                if (ev.streams && ev.streams[0]) {
+                    showMediaPreview(ev.streams[0]);
+                }
+            };
+        }
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        // Non-trickle server: it consumes candidates from the SDP only, so
+        // wait for gathering (capped at 1s — host candidates appear fast).
+        // Without this the offer carries no candidates and the server-side
+        // ICE agent has no candidate pairs to check.
+        if (pc.iceGatheringState !== 'complete') {
+            await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 1000);
+                pc.addEventListener('icegatheringstatechange', () => {
+                    if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+                });
+            });
+        }
         const resp = await fetch('/api/webrtc/offer', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -536,7 +575,13 @@ async function connectWebRtcTransport() {
         const answer = await resp.json();
         await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
 
-        await opened;
+        // The media restructure dropped the old `opened` promise; restore
+        // the wait as a timeout race so a pre-open DataChannel failure
+        // falls back to WebSocket instead of hanging forever.
+        await Promise.race([
+            new Promise((resolve) => { dc.onopen = resolve; }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('DataChannel open timeout')), WEBRTC_ANSWER_TIMEOUT_MS)),
+        ]);
         console.log('[transport] WebRTC DataChannel open (session', answer.session_id + ')');
 
         dc.onmessage = (e) => handleWebRtcMessage(e.data);
@@ -555,6 +600,87 @@ async function connectWebRtcTransport() {
     } catch (err) {
         fallbackToWs(err);
     }
+}
+
+// Convert the server's ICE server URL list into browser RTCIceServer
+/// entries. Inline TURN credentials (`turn:user:cred@host:port`) are hoisted
+/// into username/credential; unsupported or incomplete entries are skipped.
+function parseIceServersForBrowser(urls) {
+    return urls.map((raw) => {
+        const m = /^(stuns?|turns?):(.+)$/i.exec(String(raw).trim());
+        if (!m) return null;
+        const scheme = m[1].toLowerCase();
+        let rest = m[2];
+        let username = '';
+        let credential = '';
+        const at = rest.lastIndexOf('@');
+        if (at >= 0) {
+            const userinfo = rest.slice(0, at);
+            rest = rest.slice(at + 1);
+            const sep = userinfo.indexOf(':');
+            username = sep >= 0 ? userinfo.slice(0, sep) : userinfo;
+            credential = sep >= 0 ? userinfo.slice(sep + 1) : '';
+        }
+        if ((scheme === 'turn' || scheme === 'turns') && (!username || !credential)) return null;
+        return { urls: [scheme + ':' + rest], username, credential };
+    }).filter(Boolean);
+}
+
+// Attach the remote media stream to the preview <video> and start the fps
+// counter (requestVideoFrameCallback when available, rAF otherwise).
+function showMediaPreview(stream) {
+    const video = document.getElementById('media-preview');
+    const wrap = document.getElementById('media-preview-container');
+    if (!video || !wrap) return;
+    if (video.srcObject !== stream) {
+        video.srcObject = stream;
+        wrap.classList.remove('hidden');
+    }
+    startMediaFpsCounter(video);
+}
+
+function startMediaFpsCounter(video) {
+    if (mediaFpsActive) return;
+    mediaFpsActive = true;
+    const el = document.getElementById('footer-media-fps-value');
+    let frames = 0;
+    let windowStart = performance.now();
+    const update = () => {
+        const now = performance.now();
+        if (now - windowStart >= 1000) {
+            if (el) el.textContent = (frames * 1000 / (now - windowStart)).toFixed(1);
+            frames = 0;
+            windowStart = now;
+        }
+    };
+    if (typeof video.requestVideoFrameCallback === 'function') {
+        const loop = () => {
+            if (!mediaFpsActive) return;
+            frames += 1;
+            update();
+            video.requestVideoFrameCallback(loop);
+        };
+        video.requestVideoFrameCallback(loop);
+    } else {
+        const loop = () => {
+            if (!mediaFpsActive) return;
+            frames += 1;
+            update();
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+    }
+}
+
+function resetMediaPreview() {
+    mediaFpsActive = false;
+    if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
+    const video = document.getElementById('media-preview');
+    if (video) video.srcObject = null;
+    const wrap = document.getElementById('media-preview-container');
+    if (wrap) wrap.classList.add('hidden');
+    const fpsEl = document.getElementById('footer-media-fps-value');
+    if (fpsEl) fpsEl.textContent = '—';
 }
 
 function handleWebRtcMessage(data) {

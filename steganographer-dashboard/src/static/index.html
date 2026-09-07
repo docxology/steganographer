@@ -110,6 +110,12 @@
                     <option value="">Default Camera</option>
                 </select>
             </div>
+            <!-- WebRTC H.264 media preview (enhancement view; shown only
+                 when the server publishes the RTP video track) -->
+            <div class="media-preview-container hidden" id="media-preview-container">
+                <span class="media-preview-label">📡 Media preview (H.264 RTP)</span>
+                <video id="media-preview" autoplay playsinline muted class="media-preview"></video>
+            </div>
             <div class="panel-stats" id="encode-stats">
                 <div class="stat" id="stat-frames"
                     title="Total number of video frames cryptographically signed since session start">
@@ -671,6 +677,10 @@
         <div class="footer-section" id="footer-resolution">
             <span class="footer-label">Resolution:</span>
             <span class="footer-value" id="footer-resolution-value">—</span>
+        </div>
+        <div class="footer-section" id="footer-media-fps" title="WebRTC H.264 media preview frame rate">
+            <span class="footer-label">Media fps:</span>
+            <span class="footer-value" id="footer-media-fps-value">—</span>
         </div>
         <div class="footer-section" id="footer-payload">
             <span class="footer-label">Payload:</span>

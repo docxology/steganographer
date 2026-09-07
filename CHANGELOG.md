@@ -32,6 +32,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a real headless Chrome (signaling, DataChannel open, app-path encode
   round-trip, 501→WS fallback). Feature-gated tests: 5 interop + 4 framing
   unit tests; default-feature count unchanged.
+- **WebRTC H.264 media track (completes the `webrtc` feature, 2026-09-07
+  round).** The dashboard now publishes a real video MediaStreamTrack: the
+  stego'd pixels (already buffered pre-JPEG in `last_encoded_frame` — zero
+  extra decode) are RGB→I420-converted and H.264-encoded with openh264
+  (2.5 Mbps, 30-frame IDR interval; encoder recreated transparently on
+  resolution change), packetized to Annex-B and published via
+  `TrackLocalStaticSample::write_sample` over a Sendonly transceiver
+  negotiated against the browser's recvonly video m-line (H.264
+  42e01f/packetization-mode=1). `GET /api/webrtc/config` mirrors the
+  server's `--ice-server` list (stun/turn/stuns/turns forms; unsupported
+  entries warned and skipped) so the browser and server share one ICE
+  configuration. Browser: `ontrack` renders the track in a media-preview
+  `<video>` with a Media-fps stat; the DataChannel canvas path remains the
+  default rendering view. Measured (release profile): DataChannel loop
+  18.1 fps / p95 22 ms; media loopback 272 RTP packets, negotiated PT 125,
+  13.6 fps (floor ≥12 enforced in release; debug builds assert a stall
+  guard only — both fps floors are profile-gated after the debug-profile
+  throughput assertion flaked twice under load). Real-browser verification:
+  "Connected (WebRTC)" + media preview rendering the stego'd frames
+  (640×480) while the same frames pass signature verification. Known
+  limits: PLI→keyframe is not reachable through the event-handler API
+  (keyframe recovery rides the IDR interval — documented); headless
+  rVFC counting is throttled, so rendered-fps numbers come from the
+  server-side loopback tests. Default-feature count unchanged.
 - **Learned watermarking module (opt-in `learned` feature, 2026-09-07
   round).** `steganographer-core::learned` embeds a 64-bit payload into
   8×8-block DCT mid-frequency coefficients (BLAKE3-derived keyed chip
