@@ -63,7 +63,16 @@ jobs:
 
       - name: Install GStreamer (macOS)
         if: runner.os == 'macOS'
-        run: brew install gstreamer
+        run: |
+          brew install gstreamer
+          # The cached target/ tree can carry stale -L search paths from a
+          # previous brew Cellar layout (paths are version-pinned, e.g.
+          # glib/2.88.2), which fails the gstreamer-sys link after a runner
+          # brew bump. Force the sys-crate build scripts to re-run so the
+          # link paths re-resolve against the live brew install.
+          cargo clean -p glib-sys -p gobject-sys -p gio-sys \
+            -p gstreamer-sys -p gstreamer-base-sys -p gstreamer-app-sys \
+            -p gstreamer-audio-sys -p gstreamer-video-sys || true
 
       - name: Build workspace
         run: cargo build --workspace --locked
