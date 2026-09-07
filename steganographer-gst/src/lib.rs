@@ -16,8 +16,8 @@
 //! frames via `AppSrc` to a GStreamer sink. This avoids needing to compile and
 //! install a GStreamer plugin.
 
-pub mod audio_filter;
 pub mod audio_element;
+pub mod audio_filter;
 pub mod elements;
 pub mod plugin;
 pub mod video_filter;
