@@ -4030,8 +4030,10 @@ name = "steganographer-dashboard"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
+ "bytes",
  "env_logger",
  "http-body-util",
  "image",

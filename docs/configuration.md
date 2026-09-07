@@ -315,6 +315,26 @@ The web dashboard (`./run.sh` → `d`) provides real-time configuration controls
 | **QR Scale** | 5% – 100% | 10% | — |
 | **Resolution** | 320×240 – 1920×1080 | 640×480 | — |
 
+### Transport Policy
+
+The dashboard frame pipeline can run over a WebRTC DataChannel (requires the
+dashboard built with `--features webrtc`) or over WebSocket. The transport is
+selected by, in order of precedence:
+
+1. **URL query** — `?transport=webrtc|websocket|auto` on the dashboard URL.
+2. **Persisted choice** — the `stego-transport` localStorage key (set by the
+   *Transport* control in the dashboard settings, or automatically when the
+   client falls back).
+3. **Server default** — the `--transport` CLI flag (`auto` by default), which
+   populates `DashboardState::transport`.
+
+`TransportPolicy::Auto` tries the WebRTC DataChannel first; on any failure
+(501 from `/api/webrtc/offer` when the feature is not built in, SDP/ICE
+failure, DataChannel error or close, 5 s answer timeout) the client falls back
+to WebSocket permanently for the session and persists the resolved mode to
+localStorage so reloads skip the retry. `Websocket` and `WebRtc` pin the
+transport.
+
 ### QR Data Matrix Overlay
 
 The dashboard renders a QR-style data matrix on every video frame containing:

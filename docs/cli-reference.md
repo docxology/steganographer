@@ -328,6 +328,7 @@ steganographer dashboard [OPTIONS]
 | ------ | ----- | ------- | ----------- |
 | `--port <PORT>` | `-p` | `8080` | Port to serve the dashboard on |
 | `--backend <BACKEND>` | — | `ed25519` | Signing backend: `ed25519` or `ethereum` |
+| `--transport <TRANSPORT>` | — | `auto` | Frame transport: `auto`, `websocket`, or `webrtc` |
 
 **Examples**:
 
@@ -337,6 +338,9 @@ steganographer dashboard
 
 # Ethereum backend on custom port
 steganographer dashboard --port 3000 --backend ethereum
+
+# Pin the WebRTC DataChannel transport (built with --features webrtc)
+steganographer dashboard --transport webrtc
 
 # Via run.sh (press 'd' for dashboard, 'a' for run-all)
 ./run.sh

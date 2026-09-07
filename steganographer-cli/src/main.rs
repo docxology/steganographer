@@ -361,6 +361,12 @@ enum Commands {
         /// If set, clients must send `Authorization: Bearer <token>`. If omitted, auth is disabled.
         #[arg(long)]
         auth_token: Option<String>,
+        /// Transport policy for the dashboard client: "auto" (try WebRTC,
+        /// fall back to WebSocket on failure), "websocket", or "webrtc".
+        /// The server advertises this default; the browser can still override
+        /// per-session via ?transport= and the settings toggle.
+        #[arg(long, default_value = "auto")]
+        transport: String,
     },
 
     /// Revoke a signing key (add to revoked-keys list)
@@ -848,6 +854,7 @@ fn main() -> anyhow::Result<()> {
             backend,
             host,
             auth_token,
+            transport,
         } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
@@ -896,8 +903,11 @@ fn main() -> anyhow::Result<()> {
                 live_config: std::sync::Mutex::new(steganographer_dashboard::LiveConfig::default()),
                 session_start: std::time::Instant::now(),
                 auth_token,
+                transport: steganographer_dashboard::TransportPolicy::from(transport.as_str()),
                 ots_config,
                 ots_client,
+                #[cfg(feature = "webrtc")]
+                webrtc_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
             });
 
             log::info!(
