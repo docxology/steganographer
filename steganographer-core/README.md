@@ -20,7 +20,7 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 | `lsb_audio` | `src/lsb_audio.rs` | `LsbAudio` — keyed PRNG index permutation LSB audio embed/extract |
 | `overlay` | `src/overlay.rs` | `TextOverlay` — 8×8 bitmap font renderer, template expansion (`{timestamp}`, `{frame_index}`) |
 | `info_bar` | `src/info_bar.rs` | `InfoBar` — exoteric visible watermark with toggleable timestamps, barcodes, QR |
-| `metrics` | `src/metrics.rs` | `StegoMetrics` — thread-safe atomic counters for latency/frame tracking |
+| `learned` | `src/learned/mod.rs` | `LearnedWatermarker` — 8×8 DCT chip embedding with trained MLP decoder (opt-in `learned` feature, committed weights) |
 
 ## Tests
 

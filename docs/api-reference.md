@@ -633,6 +633,9 @@ pub struct DashboardState {
     pub live_config: Mutex<LiveConfig>,
     pub session_start: std::time::Instant,
     pub auth_token: Option<String>,
+    pub transport: TransportPolicy,          // Auto (default) | Websocket | WebRtc
+    #[cfg(feature = "webrtc")]
+    pub webrtc_sessions: Mutex<HashMap<String, WebrtcSession>>, // live DataChannel sessions
 }
 ```
 
@@ -650,6 +653,43 @@ pub struct DashboardState {
 > `DashboardState`. If `auth_token` is `None` (local-only mode), auth is
 > disabled. The dashboard defaults to binding `127.0.0.1`; use `--host 0.0.0.0`
 > for network access (requires `--auth-token` for safety).
+
+#### `POST /api/webrtc/offer` — WHEP-style SDP signaling (WebRTC transport)
+
+The route is registered **unconditionally** so the browser client can probe for
+support. Behavior depends on the `webrtc` cargo feature:
+
+- **Feature enabled** — consumes the client SDP offer and returns the server answer:
+
+  Request: `{"sdp": "<SDP offer text>", "type": "offer"}`
+
+  Response `200 OK`: `{"sdp": "<SDP answer text>", "type": "answer", "session_id": "<hex>"}`
+
+- **Feature disabled** — returns `501 Not Implemented` with
+  `{"error": "webrtc feature disabled; using websocket fallback"}`; clients fall
+  back to the WebSocket routes.
+
+Session lifecycle: each successful offer registers a session in
+`DashboardState::webrtc_sessions`. The session's `frames` DataChannel is
+ordered + reliable; the session is removed when its DataChannel closes or after
+60 s of inactivity.
+
+**Binary chunk framing.** Messages larger than the 16 KiB SCTP message limit
+are split into chunks of at most 16 KiB with a 20-byte header:
+
+| Offset | Size | Field |
+| ------ | ---- | ----- |
+| 0 | 4 | Magic `0x5354474F` (`STGO`), big-endian |
+| 4 | 8 | `msg_id` (u64, big-endian) |
+| 12 | 4 | `chunk_index` (u32, big-endian) |
+| 16 | 4 | `chunk_count` (u32, big-endian) |
+| 20 | ≤16364 | payload bytes |
+
+The receiver reassembles chunks by `msg_id` before dispatch. For latency
+measurement, requests are wrapped as `{"kind": "encode"|"ping"|"decode_poll",
+"msg_id": N, "sent_unix_ms": T, ...}`; every reply echoes `msg_id` plus
+`received_unix_ms` (server receive time). Large replies are chunked with the
+same framing using `msg_id | (1 << 63)`.
 
 | Method | Path | Handler | Description |
 | ------ | ---- | ------- | ----------- |

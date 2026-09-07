@@ -9,7 +9,10 @@
 //!
 //! Uses Axum + WebSocket + HTML5 Canvas for low-latency frame streaming.
 
+pub mod webrtc;
 pub mod ws_handler;
+#[cfg(feature = "webrtc")]
+use std::collections::HashMap;
 
 use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -104,6 +107,42 @@ impl Default for LiveConfig {
     }
 }
 
+/// Transport policy for the dashboard frame pipeline.
+///
+/// `Auto` tries WebRTC first (when the feature is built in) and falls back
+/// to WebSocket; `Websocket` and `WebRtc` pin the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TransportPolicy {
+    /// Try WebRTC DataChannel, fall back to WebSocket.
+    #[default]
+    Auto,
+    /// Always use the WebSocket transport.
+    Websocket,
+    /// Always use the WebRTC DataChannel transport.
+    WebRtc,
+}
+
+impl TransportPolicy {
+    /// Canonical lowercase CLI/URL name for this policy.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TransportPolicy::Auto => "auto",
+            TransportPolicy::Websocket => "websocket",
+            TransportPolicy::WebRtc => "webrtc",
+        }
+    }
+}
+
+impl From<&str> for TransportPolicy {
+    fn from(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "webrtc" => TransportPolicy::WebRtc,
+            "websocket" | "ws" => TransportPolicy::Websocket,
+            _ => TransportPolicy::Auto,
+        }
+    }
+}
+
 /// Shared dashboard state accessible by all handlers.
 pub struct DashboardState {
     /// Pipeline metrics collector.
@@ -130,6 +169,12 @@ pub struct DashboardState {
     pub ots_config: OtsConfig,
     /// OTS client, present only when OTS is enabled in the config.
     pub ots_client: Option<Arc<OTSClient>>,
+    /// Transport policy for the dashboard client (resolved from CLI or config).
+    pub transport: TransportPolicy,
+    /// Live WebRTC DataChannel sessions, keyed by session id.
+    /// Present only when the `webrtc` cargo feature is enabled.
+    #[cfg(feature = "webrtc")]
+    pub webrtc_sessions: Mutex<HashMap<String, webrtc::WebrtcSession>>,
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -206,6 +251,10 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/ws/decode", get(ws_handler::ws_decode_handler))
         .route("/ws/audio/encode", get(ws_handler::ws_audio_encode_handler))
         .route("/ws/audio/decode", get(ws_handler::ws_audio_decode_handler))
+        .route(
+            "/api/webrtc/offer",
+            axum::routing::post(webrtc::api_webrtc_offer),
+        )
         .route("/api/metrics", get(api_metrics))
         .route("/api/metrics/reset", axum::routing::post(api_metrics_reset))
         .route("/api/config", get(api_config_get).post(api_config_post))
