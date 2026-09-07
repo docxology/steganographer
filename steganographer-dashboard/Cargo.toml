@@ -20,7 +20,11 @@ anyhow = { workspace = true }
 base64 = "0.22"
 rand = { workspace = true }
 subtle = { workspace = true }
+webrtc = { version = "0.20.5", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+[features]
+webrtc = ["dep:webrtc"]
