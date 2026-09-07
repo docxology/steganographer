@@ -162,6 +162,59 @@ re-run clean).
       `keyed_buffers_diverge_by_frame_index` (audio); every frame decodes
       through the same derivation with its index, frame 0 stays
       CLI-decodable with the raw key. Workspace 480 → 484 tests; `./scripts/status.sh --check` verified clean at 484 == 484.
-- [ ] WebRTC streaming and learned watermarking encoder: owner intent
-      required per backlog (unchanged).
+Still open at the end of this pass: WebRTC streaming and the learned
+watermarking encoder (owner intent required per the Long-Term Backlog;
+unchanged). Tracked there — intentionally not duplicated as a checkbox
+here, so the open-item count stays accurate.
+
+---
+
+## 🧹 2026-09-07 Improvement Round — hygiene audit, count-drift gate
+
+Cold-start audit round. No functional code changes; every claim below
+verified against the tree (`cargo test --workspace` 484/0 failures,
+`./scripts/status.sh --check` exit 0 after the fixes).
+
+### Fixed
+
+- [x] `steganographer-core/src/kdf.rs` `mod tests` was compiled into
+      release builds (missing `#[cfg(test)]`) — the only unguarded test
+      module in the workspace, and the sole warning on a plain
+      `cargo build -p steganographer-core` (unused import of `super::*`
+      because all its users were dead code in the non-test build). The
+      9 kdf unit tests still run under `cargo test`; release libs no
+      longer carry them; clippy is warning-free.
+- [x] `cargo fmt` drift in `steganographer-core/src/kdf.rs`,
+      `steganographer-gst/src/audio_element.rs`, and
+      `steganographer-gst/src/lib.rs` (landed unformatted in
+      the 2026-09-06 commit). `cargo fmt --check` exits 0 again.
+- [x] Test-count drift corrected from cargo-verified counts
+      (484 total = 290 core unit + 117 core integration (80 + 37) +
+      37 CLI (6 + 31) + 23 dashboard + 17 gst (14 + 2 + 1 doctest)):
+      `README.md` (288→290, 405→407), `docs/README.md` (288→290,
+      gst 2→17, total 467→484), `docs/contributing.md` (457→484 twice,
+      395/282+113→407/290+117), `docs/getting-started.md` (457→484,
+      395→407), `steganographer-core/AGENTS.md` (288→290, 405→407), and
+      `steganographer-core/README.md` (405→407 badge and totals). The
+      earlier "counts refreshed everywhere" claims had not
+      reached these files — the numbers predated the gst element work.
+
+### Added
+
+- [x] `scripts/status.sh --check` now sweeps every tracked Markdown file
+      and fails on any `<N> tests` / `<N> passing` / `tests-<N>` integer
+      that is not a cargo-reported count (workspace total, per-target
+      count, per-crate sum, or a split integer from the canonical
+      Tests line). This closes the gap that let per-doc counts drift three
+      times while the canonical AGENTS.md total was pinned; historical
+      round notes with pre-gst totals stay truthful because only
+      count-bearing phrases are matched.
+
+### Open (unchanged, owner-intent required)
+
+- WebRTC streaming and the learned watermarking encoder remain the only
+  open backlog items (both 🔴 Major, both owner-intent-gated). Verified
+  this round: no implementation code exists for either; docs mention
+  them only as plans (`docs/algorithms.md` Video Seal wrap,
+  `docs/plans/steganography-platform/06-delivery-and-migration.md`).
 
