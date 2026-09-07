@@ -27,9 +27,9 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 | `src/error_correction.rs` | `encode()`, `decode()`, `correction_capability()` | — | 546 |
 | `src/multi_frame.rs` | `SignatureShard`, `GenericPayloadShard`, `split()`, `reconstruct()`, `split_payload_bytes()`, `reconstruct_payload_bytes()` | — | 461 |
 | `src/wasm_inspector.rs` | `inspect_bytes()`, `extract_packet_rgb8()`, `capacity_rgb8()`, `WasmInspectionReport` | — | 119 |
+| `src/learned/mod.rs`* | `LearnedConfig`, `LearnedWatermarker`, `LearnedModel`, `built_in()`, `embed()`, `extract()`, `majority_extract()` | — | ~860 |
 | `tests/integration_tests.rs` | — | — | ~1900 |
 
-\* Feature-gated behind `ethereum`
 
 ## Key Constants
 
@@ -46,6 +46,9 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519 + Ethere
 | Feature | Dependencies | Purpose |
 | --------- | ------------- | --------- |
 | `ethereum` | `k256`, `sha3` | secp256k1 + EIP-191 signing backend |
+| `learned` | `ndarray` | trained-MLP decoder for DCT-chip watermarking |
+
+\* Feature-gated behind `learned`.
 
 ## Test Coverage
 

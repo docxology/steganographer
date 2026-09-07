@@ -9,6 +9,7 @@ license.workspace = true
 [features]
 default = []
 ethereum = ["k256"]
+learned = ["dep:ndarray"]
 
 [dependencies]
 serde = { workspace = true }
@@ -31,6 +32,7 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc", "pass
 flate2 = "1"
 # Async HTTP client for the OpenTimestamps attestation REST API.
 reqwest = { workspace = true }
+ndarray = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
@@ -40,3 +42,7 @@ tokio = { workspace = true }
 [[bench]]
 name = "core_benchmarks"
 harness = false
+
+[[example]]
+name = "train_learned"
+required-features = ["learned"]

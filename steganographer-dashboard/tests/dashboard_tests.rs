@@ -86,6 +86,9 @@ fn test_dashboard_state_construction() {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
     };
     assert_eq!(state.signing_backend, "ed25519");
     assert_eq!(state.width, 1280);
@@ -146,6 +149,9 @@ async fn test_router_creation() {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
     });
     let _router = steganographer_dashboard::create_router(state);
 }
@@ -168,6 +174,9 @@ fn test_dashboard_state_session_start() {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
     };
     let after = std::time::Instant::now();
     // session_start should be between before and after
@@ -230,6 +239,9 @@ fn test_app() -> (axum::Router, Arc<DashboardState>) {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
     });
     let router = steganographer_dashboard::create_router(state.clone());
     (router, state)

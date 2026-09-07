@@ -404,9 +404,9 @@ function sendFrameForSigning() {
 
     el.signIndicator.classList.remove('hidden');
     c.toBlob((blob) => {
-        if (blob && encodeWs && encodeWs.readyState === WebSocket.OPEN) {
+        if (blob && transportIsConnected()) {
             awaitingSignResponse = true;
-            blob.arrayBuffer().then(buf => encodeWs.send(buf));
+            blob.arrayBuffer().then(buf => sendFrameBytes(buf));
         }
     }, 'image/jpeg', JPEG_QUALITY);
 }
@@ -420,7 +420,7 @@ function connectEncodeWs() {
     let heartbeatId = null;
     encodeWs.onopen = () => {
         console.log('[encode] WS connected');
-        updateConnectionStatus(true);
+        updateConnectionStatus(true, 'Connected (WS)');
         heartbeatId = setInterval(() => {
             if (encodeWs?.readyState === WebSocket.OPEN) encodeWs.send('ping');
         }, WS_HEARTBEAT_INTERVAL_MS);
@@ -441,6 +441,198 @@ function connectDecodeWs() {
     decodeWs.onmessage = (e) => { try { handleDecodeMessage(JSON.parse(e.data)); } catch (err) { } };
     decodeWs.onclose = () => { clearInterval(decodePollInterval); setTimeout(connectDecodeWs, WS_RECONNECT_DELAY_MS); };
     decodeWs.onerror = () => decodeWs.close();
+}
+
+
+// ─── Transport: WebRTC DataChannel with WebSocket fallback ────────────────────
+
+const WEBRTC_CHUNK_MAGIC = 0x5354474f;          // "STGO"
+const WEBRTC_CHUNK_HEADER_BYTES = 20;           // u32 magic + u64 msg_id + u32 idx + u32 count
+const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
+const TRANSPORT_STORAGE_KEY = 'stego-transport';
+const WEBRTC_ANSWER_TIMEOUT_MS = 5000;
+
+// Active transport handle. null until the first connection succeeds.
+let transport = null;
+// Once WebRTC fails, fall back to WebSocket permanently for this session.
+let transportFallback = false;
+let webrtcPc = null;
+let webrtcDc = null;
+let webrtcPollTimer = null;
+let webrtcMsgId = 0;
+// Partial inbound binary messages keyed by msg_id (chunk reassembly).
+const webrtcPartial = new Map();
+
+function resolveTransportPreference() {
+    const q = new URL(location.href).searchParams.get('transport');
+    if (q === 'webrtc' || q === 'websocket' || q === 'auto') return q;
+    const saved = localStorage.getItem(TRANSPORT_STORAGE_KEY);
+    if (saved === 'webrtc' || saved === 'websocket') return saved;
+    return 'auto';
+}
+
+function transportIsConnected() {
+    if (transport && transport.mode === 'webrtc') {
+        return webrtcDc && webrtcDc.readyState === 'open';
+    }
+    return !!(encodeWs && encodeWs.readyState === WebSocket.OPEN);
+}
+
+function connectTransport() {
+    const pref = resolveTransportPreference();
+    console.log('[transport] preference:', pref, 'fallback:', transportFallback);
+    if (pref === 'webrtc' || (pref === 'auto' && !transportFallback)) {
+        connectWebRtcTransport();
+    } else {
+        connectWsTransport();
+    }
+}
+
+function connectWsTransport() {
+    transport = { mode: 'ws' };
+    connectEncodeWs();
+    connectDecodeWs();
+}
+
+function fallbackToWs(reason) {
+    console.warn('[transport] WebRTC failed, falling back to WebSocket:', reason);
+    transportFallback = true;
+    // Persist so reloads skip the failed WebRTC attempt.
+    try { localStorage.setItem(TRANSPORT_STORAGE_KEY, 'websocket'); } catch (e) { }
+    teardownWebRtcTransport();
+    if (!transport || transport.mode !== 'ws') connectWsTransport();
+}
+
+function teardownWebRtcTransport() {
+    if (webrtcPollTimer) { clearInterval(webrtcPollTimer); webrtcPollTimer = null; }
+    if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
+    if (webrtcPc) { try { webrtcPc.close(); } catch (e) { } webrtcPc = null; }
+    webrtcPartial.clear();
+}
+
+async function connectWebRtcTransport() {
+    try {
+        const pc = new RTCPeerConnection({ iceServers: [] }); // localhost host candidates only
+        webrtcPc = pc;
+        const dc = pc.createDataChannel('frames', { ordered: true });
+        webrtcDc = dc;
+
+        const opened = new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('DataChannel open timeout')), WEBRTC_ANSWER_TIMEOUT_MS);
+            dc.onopen = () => { clearTimeout(timer); resolve(); };
+            dc.onerror = (e) => { clearTimeout(timer); reject(e); };
+            dc.onclose = () => { clearTimeout(timer); reject(new Error('DataChannel closed')); };
+        });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const resp = await fetch('/api/webrtc/offer', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer' }),
+        });
+        if (resp.status === 501) throw new Error('webrtc feature disabled; using websocket fallback');
+        if (!resp.ok) throw new Error(`offer endpoint returned ${resp.status}`);
+        const answer = await resp.json();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+
+        await opened;
+        console.log('[transport] WebRTC DataChannel open (session', answer.session_id + ')');
+
+        dc.onmessage = (e) => handleWebRtcMessage(e.data);
+        dc.onclose = () => { updateConnectionStatus(false); fallbackToWs('DataChannel closed'); };
+        dc.onerror = () => fallbackToWs('DataChannel error');
+
+        transport = { mode: 'webrtc' };
+        updateConnectionStatus(true, 'Connected (WebRTC)');
+
+        // Decode poll semantics over the DataChannel.
+        webrtcPollTimer = setInterval(() => {
+            if (webrtcDc && webrtcDc.readyState === 'open') {
+                webrtcDc.send(JSON.stringify({ kind: 'decode_poll', msg_id: ++webrtcMsgId }));
+            }
+        }, DECODE_POLL_INTERVAL_MS);
+    } catch (err) {
+        fallbackToWs(err);
+    }
+}
+
+function handleWebRtcMessage(data) {
+    let payload;
+    if (typeof data === 'string') {
+        payload = data;
+    } else {
+        // Binary chunk: reassemble with the framing header.
+        const buf = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+        if (buf.length < WEBRTC_CHUNK_HEADER_BYTES) return;
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const magic = dv.getUint32(0);
+        if (magic !== WEBRTC_CHUNK_MAGIC) return;
+        const msgId = dv.getBigUint64(4);
+        const idx = dv.getUint32(12);
+        const count = dv.getUint32(16);
+        const partial = webrtcPartial.get(msgId) || { chunks: new Array(count), received: 0 };
+        if (partial.chunks.length !== count) { webrtcPartial.delete(msgId); return; }
+        if (partial.chunks[idx] === undefined) {
+            partial.chunks[idx] = buf.slice(WEBRTC_CHUNK_HEADER_BYTES);
+            partial.received += 1;
+        }
+        if (partial.received < count) { webrtcPartial.set(msgId, partial); return; }
+        webrtcPartial.delete(msgId);
+        const total = partial.chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (const c of partial.chunks) { out.set(c, off); off += c.length; }
+        payload = new TextDecoder().decode(out);
+    }
+    try {
+        const msg = JSON.parse(payload);
+        if (msg.type === 'encoded_frame' || msg.type === 'metrics') handleEncodeMessage(msg);
+        else if (msg.type === 'decoded_frame' || msg.type === 'verify_status') handleDecodeMessage(msg);
+    } catch (err) { }
+}
+
+function webRtcSendChunked(msgId, payloadBytes) {
+    const count = Math.max(1, Math.ceil(payloadBytes.length / WEBRTC_CHUNK_PAYLOAD_MAX));
+    const header = new ArrayBuffer(WEBRTC_CHUNK_HEADER_BYTES);
+    for (let i = 0; i < count; i++) {
+        const slice = payloadBytes.subarray(i * WEBRTC_CHUNK_PAYLOAD_MAX, (i + 1) * WEBRTC_CHUNK_PAYLOAD_MAX);
+        const chunk = new Uint8Array(WEBRTC_CHUNK_HEADER_BYTES + slice.length);
+        const dv = new DataView(chunk.buffer);
+        dv.setUint32(0, WEBRTC_CHUNK_MAGIC);
+        // msg_id fits in 32 bits in practice; write low word into u64 field.
+        dv.setUint32(4, 0); dv.setUint32(8, msgId);
+        dv.setUint32(12, i);
+        dv.setUint32(16, count);
+        chunk.set(slice, WEBRTC_CHUNK_HEADER_BYTES);
+        webrtcDc.send(chunk);
+    }
+}
+
+function sendFrameBytes(buf) {
+    if (transport && transport.mode === 'webrtc') {
+        if (!webrtcDc || webrtcDc.readyState !== 'open') return;
+        const msgId = ++webrtcMsgId;
+        const bytes = new Uint8Array(buf);
+        const b64 = btoa(bytesToChunks(bytes));
+        const request = JSON.stringify({
+            kind: 'encode', msg_id: msgId,
+            sent_unix_ms: Date.now(), jpeg_b64: b64,
+        });
+        webRtcSendChunked(msgId, new TextEncoder().encode(request));
+    } else if (encodeWs && encodeWs.readyState === WebSocket.OPEN) {
+        encodeWs.send(buf);
+    }
+}
+
+function bytesToChunks(bytes) {
+    // Feed base64 conversion in safe slices (avoid call-stack overflow).
+    let s = '';
+    const STEP = 0x8000;
+    for (let i = 0; i < bytes.length; i += STEP) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
+    }
+    return s;
 }
 
 // ─── Message Handlers ─────────────────────────────────────────────────────────
@@ -703,10 +895,15 @@ async function fetchConfig() {
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function updateConnectionStatus(connected) {
+function updateConnectionStatus(connected, label) {
     el.statusDot.classList.toggle('connected', connected);
     el.statusDot.classList.toggle('disconnected', !connected);
-    el.statusText.textContent = connected ? 'Connected' : 'Reconnecting...';
+    if (!connected) {
+        el.statusText.textContent = 'Reconnecting...';
+    } else {
+        const mode = transport && transport.mode === 'webrtc' ? 'Connected (WebRTC)' : 'Connected (WS)';
+        el.statusText.textContent = label || mode;
+    }
 }
 
 function fmtNum(n) {
@@ -1142,17 +1339,29 @@ function setupCameraSelector() {
     }
 }
 
+function setupTransportToggle() {
+    const sel = document.getElementById('cfg-transport');
+    if (!sel) return;
+    sel.value = resolveTransportPreference();
+    sel.addEventListener('change', () => {
+        try { localStorage.setItem(TRANSPORT_STORAGE_KEY, sel.value); } catch (e) { }
+        // Simplest acceptable behavior: reload so both connections come up on
+        // the newly selected transport.
+        location.reload();
+    });
+}
+
 function init() {
     console.log('Steganographer Dashboard initializing...');
     initThemeToggle();
     fetchConfig();
-    connectEncodeWs();
-    connectDecodeWs();
+    connectTransport();
     detectMetaMask();
     setupConfigControls();
     setupDiffViewer();
     setupPerformancePanel();
     setupCameraSelector();
+    setupTransportToggle();
     startMetricsPolling();
     el.startCameraBtn.addEventListener('click', startCamera);
     el.metamaskBtn.addEventListener('click', () => metamaskAccount ? disconnectMetaMask() : connectMetaMask());

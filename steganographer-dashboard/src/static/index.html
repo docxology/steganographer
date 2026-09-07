@@ -261,6 +261,22 @@
                             </select>
                         </div>
                     </div>
+                    <!-- Transport (WebRTC / WebSocket) -->
+                    <div class="config-row">
+                        <span class="config-label">Transport
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Auto</strong> tries the
+                                    WebRTC DataChannel first and falls back to WebSocket.
+                                    <strong>WebSocket</strong> and <strong>WebRTC</strong> pin the transport.
+                                    Changing this reloads the page.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="cfg-transport" aria-label="Transport">
+                                <option value="auto" selected>Auto</option>
+                                <option value="websocket">WebSocket</option>
+                                <option value="webrtc">WebRTC</option>
+                            </select>
+                        </div>
+                    </div>
                     <!-- Overlay Text -->
                     <div class="config-row">
                         <span class="config-label">Overlay Text
