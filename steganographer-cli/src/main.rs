@@ -367,6 +367,12 @@ enum Commands {
         /// per-session via ?transport= and the settings toggle.
         #[arg(long, default_value = "auto")]
         transport: String,
+        /// ICE server URL for WebRTC (repeatable), e.g.
+        /// "stun:stun.l.google.com:19302" or "turn:user:cred@host:port".
+        /// Empty by default (loopback host candidates only). Unsupported
+        /// schemes and TURN without credentials are warned and skipped.
+        #[arg(long = "ice-server")]
+        ice_server: Vec<String>,
     },
 
     /// Revoke a signing key (add to revoked-keys list)
@@ -855,6 +861,7 @@ fn main() -> anyhow::Result<()> {
             host,
             auth_token,
             transport,
+            ice_server,
         } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
@@ -908,6 +915,10 @@ fn main() -> anyhow::Result<()> {
                 ots_client,
                 #[cfg(feature = "webrtc")]
                 webrtc_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+                #[cfg(feature = "webrtc")]
+                ice_servers: ice_server,
+                #[cfg(feature = "webrtc")]
+                media_publishers: std::sync::Mutex::new(std::collections::HashMap::new()),
             });
 
             log::info!(

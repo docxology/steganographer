@@ -175,6 +175,17 @@ pub struct DashboardState {
     /// Present only when the `webrtc` cargo feature is enabled.
     #[cfg(feature = "webrtc")]
     pub webrtc_sessions: Mutex<HashMap<String, webrtc::WebrtcSession>>,
+    /// STUN/TURN server URLs (e.g. `stun:stun.l.google.com:19302`,
+    /// `turn:user:cred@host:port`) offered to WebRTC peer connections.
+    /// Empty by default: the dashboard is a local-only tool and needs no
+    /// external ICE infrastructure.
+    #[cfg(feature = "webrtc")]
+    pub ice_servers: Vec<String>,
+    /// Per-session H.264 media publishers keyed by session id. Each publisher
+    /// owns the `TrackLocalStaticSample` that carries the stego'd frames as an
+    /// RTP video track back to the browser.
+    #[cfg(feature = "webrtc")]
+    pub media_publishers: Mutex<HashMap<String, std::sync::Arc<webrtc::MediaPublisher>>>,
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -255,6 +266,7 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
             "/api/webrtc/offer",
             axum::routing::post(webrtc::api_webrtc_offer),
         )
+        .route("/api/webrtc/config", get(webrtc::api_webrtc_config))
         .route("/api/metrics", get(api_metrics))
         .route("/api/metrics/reset", axum::routing::post(api_metrics_reset))
         .route("/api/config", get(api_config_get).post(api_config_post))
