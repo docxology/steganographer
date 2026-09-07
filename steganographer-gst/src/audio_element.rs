@@ -283,12 +283,9 @@ mod imp {
                 // Frame-scoped keyed placement (see stegovideo): frame 0
                 // keeps the raw key, later frames mix the buffer counter in.
                 Some(embedding_key) => {
-                    let frame_key = derive_frame_embedding_key(
-                        &embedding_key,
-                        *self.embedded_buffers.lock(),
-                    );
-                    KeyedAudioSpatialLsb::new(frame_key)
-                        .embed_packet(data, &packet_bytes, &config)
+                    let frame_key =
+                        derive_frame_embedding_key(&embedding_key, *self.embedded_buffers.lock());
+                    KeyedAudioSpatialLsb::new(frame_key).embed_packet(data, &packet_bytes, &config)
                 }
                 None => AudioSpatialLsb.embed_packet(data, &packet_bytes, &config),
             };

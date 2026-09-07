@@ -99,12 +99,12 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   288 tests (packet/carrier incl. PCM S16 LSB, keyed placement, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics, OTS)
+steganographer-core (unit):   290 tests (packet/carrier incl. PCM S16 LSB, keyed placement, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics, OTS)
 steganographer-core (integ):  117 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC, OTS)
 steganographer-cli (unit):      6 tests (media descriptors/I/O and canonical carrier binding)
 steganographer-cli (integ):    31 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan)
 steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
-steganographer-gst:            2 tests (plugin skeleton and doctest)
+steganographer-gst:           17 tests (stegovideo/stegoaudio elements, plugin metadata, keyed placement divergence, wire-format round trip, doctest)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        467 tests, 0 failures
+Total:                        484 tests, 0 failures
 ```

@@ -244,7 +244,7 @@ bits = 1
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 288 | `steganographer-core/src/*.rs` |
+| Core unit tests | 290 | `steganographer-core/src/*.rs` |
 | Core integration tests | 117 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
 | CLI unit + integration tests | 37 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
 | Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
@@ -253,7 +253,7 @@ bits = 1
 
 ```bash
 cargo test --workspace                # All 484 tests
-cargo test -p steganographer-core     # Core only (405 tests)
+cargo test -p steganographer-core     # Core only (407 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 
