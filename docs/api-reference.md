@@ -710,6 +710,57 @@ same framing using `msg_id | (1 << 63)`.
 | GET | `/api/session` | `api_session` | Session stats: uptime, config, metrics, backend, identity |
 | GET | `/api/docs` | `api_docs_list` | List available documentation files |
 | GET | `/api/docs/{name}` | `api_docs_content` | Return raw markdown content of a doc file |
+| GET | `/api/webrtc/config` | `api_webrtc_config` | WebRTC capabilities: ICE servers + media availability |
+
+#### `GET /api/webrtc/config` — WebRTC capabilities
+
+Registered unconditionally. Mirrors the server's WebRTC capabilities so the
+browser can construct a matching peer connection:
+
+```json
+{
+  "ice_servers": ["stun:stun.l.google.com:19302", "turn:user:cred@turn.example.com:3478"],
+  "media": true
+}
+```
+
+- `ice_servers` — the configured STUN/TURN URL list (empty by default;
+  loopback host candidates only). The browser uses the same list in
+  `RTCPeerConnection({iceServers})`, with inline `turn:user:cred@host`
+  credentials hoisted into `username`/`credential` fields.
+- `media` — `true` only when the `webrtc` feature is built in **and** the
+  transport policy allows WebRTC (`auto` or `webrtc`).
+
+#### Media negotiation (H.264 RTP video track)
+
+When the browser's offer contains a video m-line and media is enabled, the
+server answers with a **sendonly** H.264 track:
+
+- The client must add `pc.addTransceiver('video', {direction: 'recvonly'})`
+  **before** `createOffer()`.
+- Server codec: `video/H264`, clock rate 90000, fmtp
+  `level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f`,
+  RTCP feedback `nack pli`, `ccm fir`, `nack`. The negotiated payload type is
+  discovered from the answer's send parameters (the default media engine
+  assigns the offer's matching PT — e.g. 125 for the codec above).
+- Frames: the stego'd pipeline output (RGB pixels, pre-JPEG) is converted to
+  I420 (BT.601 limited range), encoded with OpenH264 (2.5 Mbps target, 30 fps
+  cap, IDR every 30 frames), and packetized as Annex-B into RTP via a
+  `TrackLocalStaticSample`. RTP timestamp advance is the measured inter-frame
+  delta clamped to [1/60 s, 1/10 s].
+- PLI/FIR handling: the `webrtc` crate's event handler surface does not
+  expose RTCP PLI/FIR receiver events to the application, so keyframe
+  recovery relies on the periodic IDR interval (`force_intra_frame` exists on
+  the encoder for future wiring).
+- Resolution changes are handled by transparently recreating the encoder.
+- Transport policy `websocket` answers an offer containing video **without**
+  attaching a track — the answer's video m-line carries no media and the
+  DataChannel canvas view remains the only rendering surface.
+- The browser renders the track in a `<video autoplay playsinline muted>`
+  preview below the encode canvas (with a per-second fps counter in the
+  footer). If no track arrives within 5 s of connecting, the DataChannel
+  canvas path continues unchanged — media is an enhancement view, never a
+  replacement.
 
 #### Audio WebSocket Protocol
 
