@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **WebRTC DataChannel transport with WHEP-style signaling (opt-in `webrtc`
+  feature, 2026-09-07 round).** The dashboard's Video/Audio frame transport
+  is no longer WebSocket-only. `POST /api/webrtc/offer` performs a
+  WHEP-shaped HTTP SDP exchange (browser offer → server answer, session id
+  returned); frames flow over an ordered+reliable `frames` DataChannel using
+  the SAME per-frame pipeline as the WebSocket handlers (extracted into
+  `process_encode_frame`/`process_decode_poll` — both transports share one
+  code path). 16 KiB binary chunk framing (`STGO` magic, u64 msg id, chunk
+  index/count) with out-of-order-safe reassembly, backpressure
+  (`buffered_amount_low_threshold` + pacing), and a latency-echo protocol;
+  sessions idle-swept after 60 s. Interpretation note vs the backlog
+  acceptance: media rides the DataChannel (SCTP/DTLS), not RTP media
+  streams — no mandatory media-encoder dependency, keeping the
+  no-new-mandatory-deps rule; the signaling shape is WHEP. Fallback:
+  `--transport {auto,websocket,webrtc}` (default auto) + browser
+  resolution (URL param > localStorage > auto), auto tries WebRTC and falls
+  back permanently to WebSocket on any failure (501 / answer timeout /
+  ICE or DataChannel errors), persisted to localStorage. With the feature
+  off the endpoint returns 501 and the client falls back. Measured:
+  18.1 fps at true 720p (175 KB JPEG, release profile), p95 one-way 54 ms
+  (13 ms at the dashboard's default 44.5 KB payload); verified end-to-end
+  from a real headless Chrome (signaling, DataChannel open, app-path encode
+  round-trip, 501→WS fallback). Feature-gated tests: 5 interop + 4 framing
+  unit tests; default-feature count unchanged.
+- **Learned watermarking module (opt-in `learned` feature, 2026-09-07
+  round).** `steganographer-core::learned` embeds a 64-bit payload into
+  8×8-block DCT mid-frequency coefficients (BLAKE3-derived keyed chip
+  schedule, 32 redundant slots/bit, Fisher–Yates block assignment) and
+  decodes with a small trained MLP (128→32→1, 4161 parameters) plus a
+  block-aligned shift search; majority-vote baseline included. Shipped
+  weights are committed (`weights.bin`, blake3-checked header, 16689 B)
+  and retrainable byte-identically (`examples/train_learned.rs`, fixed
+  seed, synthetic covers only). Measured (256-patch eval): clean/gaussian
+  σ4/simulated-CRF28-quantization/block-aligned-shift BER all 0.0%; PSNR
+  42.8 dB @640×480 (47.6 @720p); embed+extract 640×480 ≈ 7+14 ms release.
+  **Honest gap:** real single-frame libx264 CRF 28 re-encode measures
+  BER 48.4% (strength frontier 43.8–50% at 24–32) — the simulator is
+  necessary-but-not-sufficient (RGB green-channel embedding vs libx264
+  luma/chroma integer transforms + limited-range YUV clamp). Closing it
+  needs luma-domain embedding or codec-in-the-loop training — owner-gated
+  (dataset licensing + model budget). Table + diagnosis in
+  `docs/algorithms.md`.
 
 - **Native GStreamer plugin packaging + `stegoaudio` element + keyed placement
   (2026-09-02 round).** `steganographer-gst` now builds as a loadable plugin:

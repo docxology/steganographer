@@ -389,6 +389,59 @@ DCT embedding survives JPEG compression because the data lives in the same frequ
 
 ---
 
+## Learned Watermarking (opt-in `learned` feature)
+
+A DCT-domain chip embedder whose decoder is a tiny trained neural network instead of a hard threshold. Everything except the 4161 MLP parameters is fixed algorithm code; the trained weights are committed at `steganographer-core/src/learned/weights.bin` and are the shipped artifact — tests pass without retraining.
+
+### Architecture
+
+1. **Carrier**: 8×8 block DCT of the green channel (same machinery as DCT-Domain Video Steganography above; no FFT/DCT dependencies).
+2. **Schedule (fixed, keyed)**: `bits × redundancy` slots (64 × 32 = 2048 by default) are assigned to distinct blocks via a seeded Fisher–Yates shuffle; each slot spreads one bit over 6 mid-frequency coefficients (zigzag 8–40 pool) with ±`strength` chips. Coefficient choice and chip signs derive from BLAKE3 of `(seed, bit, copy)`.
+3. **Decoder (trained)**: per bit, the 32 slots' chip responses are reduced to a 128-dimensional feature vector (per slot: raw response, response/RMS, mean |coefficient|, max |coefficient|), fed through a 128→32→1 tanh MLP; the bit is the sign of the output logit. A 9-candidate block-aligned shift search (multiples of 8 up to 16 px), scored by per-bit vote consistency, makes extraction robust to block-aligned content shifts (circular by scope).
+4. **Baseline**: a plain majority vote over the slots' response signs is provided (`majority_extract`) for comparison.
+
+### What is trained vs fixed
+
+- **Trained** (in `weights.bin`): MLP parameters `W1[128×32]`, `b1[32]`, `W2[32]`, `b2[1]` — 4161 f32 values.
+- **Fixed**: carrier, chip schedule, feature definition, alignment search, pooling.
+
+### Weights format
+
+`[magic 'LWM1' 4][version u8 = 1][payload len u64 LE][weights bytes (little-endian f32)][blake3(payload) 32]`. `built_in()` validates magic, version, length, and checksum.
+
+### Training
+
+`cargo run --release -p steganographer-core --features learned --example train_learned`. Fully deterministic: master seed `0x4C45_4152_4E45_4400` ("LEARNED\0", init salt `0x0B7E_11E8_53D4_F1A5`) drives synthetic covers (gradients + curves + smoothed value noise; no downloads, no external datasets), embedding, augmentations (gaussian σ {2,4,8}; 1% salt-and-pepper; simulated CRF28 DCT quantization; 2× downscale/upscale blur + block-aligned shift), and the hand-rolled Adam optimizer (25 epochs × 192 views × 64 bits). Re-running reproduces `weights.bin` byte-for-byte (verified: consecutive runs yield identical SHA-256).
+
+The simulated CRF28 quantization step is `step(u,v) = round(16 · (1 + (u+v)/12))` for 2D frequency `(u,v)` — i.e. 16 for DC/low frequencies growing to ≈27 at mid frequencies — consistent with libx264 CRF 28 quantization of mid-frequency transform coefficients on 640×480 I-frames at default AQ. Crop/shift robustness is **block-aligned (multiples of 8, circular within the frame) by scope**.
+
+### Measured results (shipped weights, chip strength 16.0)
+
+Trainer eval: 256 fresh 384×384 synthetic patches per corruption:
+
+| Corruption | BER (MLP) | BER (majority) |
+| --- | --- | --- |
+| Clean | 0.00000 | 0.00000 |
+| Gaussian σ=2 | 0.00000 | 0.00000 |
+| Gaussian σ=4 | 0.00000 | 0.00000 |
+| Gaussian σ=8 | 0.00000 | 0.00000 |
+| Salt-and-pepper 1% | 0.00000 | 0.00000 |
+| Simulated CRF28 quantization | 0.00000 | 0.00000 |
+| Blur (2×) + block-aligned shift | 0.00000 | 0.00000 |
+
+Timing (release, RGB8): 640×480 embed ≈ 7–11 ms + extract ≈ 14–22 ms; 1280×720 embed ≈ 7–11 ms + extract ≈ 33–55 ms. Per-frame PSNR: 42.78 dB (640×480), 47.55 dB (1280×720) — above the 30 dB visibility gate.
+
+**Real H.264 (libx264 CRF 28, measured, not asserted)**: BER ≈ 0.44–0.50 at chip strength 16 (PSNR 42.9 dB), and still ≈ 0.44 at strength 32 (PSNR 36.9 dB). **Gap:** the shipped model does NOT survive a real H.264 encode/decode roundtrip. The failure is structural, not a strength frontier: RGB→YUV colorspace conversion (with limited-range clamping) and libx264's residual integer transform destroy the green-channel DCT coefficient grid that the fixed carrier depends on — the simulated CRF28 gate quantizes in the same RGB domain the embedder uses, so it is a necessary but not sufficient analog. Closing the gap requires either embedding in a luma-computed channel, 4:4:4 encode paths, or codec-in-the-loop training — out of scope here (dataset licensing + model budget are owner-gated). The in-repo acceptance gate (`sim_quantization_crf28` test, BER < 5%) passes deterministically without ffmpeg.
+
+### Honest limits
+
+- Tiny model (4161 parameters) trained on synthetic covers only; the eval set is same-distribution synthetic data, so the 0.0 BERs measure schedule robustness, not real-world generalization.
+- Real-codec robustness is NOT achieved (see measured gap above).
+- Crop/shift robustness is block-aligned and circular only; arbitrary crops, scaling, and rotation are out of scope.
+- API: `LearnedConfig`, `LearnedWatermarker::built_in()`, `embed(&mut VideoFrame, u64)`, `extract(&VideoFrame) -> Option<(u64, f32)>`; RGB8/BGRA8 only, pure CPU, deterministic given the weights.
+
+---
+
 ## Future Algorithms
 
 ### Video Seal Integration (Planned)

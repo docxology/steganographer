@@ -17,6 +17,8 @@ path = "src/main.rs"
 # encode/decode/verify/keygen/dashboard and the packet/OTS surfaces).
 default = ["gst"]
 ethereum = ["steganographer-core/ethereum"]
+webrtc = ["steganographer-dashboard/webrtc"]
+learned = ["steganographer-core/learned"]
 gst = ["dep:steganographer-gst", "dep:gstreamer"]
 
 [dependencies]

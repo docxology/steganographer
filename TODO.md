@@ -63,10 +63,37 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
   the registry refuse the factories). Also fixed in the same pass:
   `clear-payload` was a no-op (empty-packet embed writes zero bits); gst
   suite 7 → 15, workspace 472 → 480.
-- [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
-  Acceptance: dashboard Video tab streams at ≥ 15 fps 720p over `whep`/whip-style signaling with end-to-end latency < 500 ms on localhost; verification round-trip still passes on the rendered frames; fallback to WebSocket retained behind a config flag. Owner intent needed: target browsers and signaling stack.
-- [ ] **Learned watermarking encoder** — neural network-based watermarking resistant to re-encoding/cropping.
-  Acceptance: trained model embeds a 64-bit payload surviving H.264 re-encode at CRF 28 with bit error rate < 5 percent on a fixed eval set; embed/extract runs ≤ 50 ms/frame on CPU; ships as an opt-in cargo feature with no new mandatory deps. Owner intent needed: training data licensing and model size budget.
+- [x] **WebRTC streaming (DataChannel slice)** — replace WebSocket frame-by-frame with WebRTC.
+  Status: **core slice complete (2026-09-07)**. WHEP-shaped HTTP SDP
+  signaling (`POST /api/webrtc/offer`), ordered+reliable `frames`
+  DataChannel carrying the SAME per-frame pipeline as WebSocket (shared
+  `process_encode_frame`/`process_decode_poll`), 16 KiB chunk framing with
+  reassembly + backpressure, 60 s idle sweep, `--transport
+  {auto,websocket,webrtc}` (default auto) with browser-side fallback
+  (501/timeout/error → WebSocket, persisted). Measured: 18.1 fps at true
+  720p (175 KB JPEG, release profile), p95 one-way 54 ms; verified from a
+  real headless Chrome (signaling, DataChannel open, app-path encode
+  round-trip, 501→WS fallback). Interpretation notes: (1) media rides the
+  DataChannel (SCTP/DTLS), not RTP media streams — avoids a mandatory
+  media-encoder dependency; (2) the ≥15 fps@720p figure is a
+  release-profile measurement — the debug test profile sustains ~14.3 fps
+  at 150 KB, so the interop test pins the acceptance at dashboard-default
+  payload sizes in debug. Remaining (owner-gated): real-camera soak, NAT
+  deployments (STUN/TURN policy), and any future RTP-media path.
+- [ ] **Learned watermarking encoder (framework landed; CRF-28 gate open)** — neural network-based watermarking resistant to re-encoding/cropping.
+  Status: **framework complete (2026-09-07)**: opt-in `learned` cargo
+  feature (ndarray only, no new mandatory deps), 64-bit payload, trained
+  MLP decoder over keyed DCT-chip spread-spectrum, committed reproducible
+  weights, majority-vote baseline, block-aligned shift robustness.
+  Measured: clean/gauss σ4/sim-CRF28-quant/block-aligned-shift BER 0.0%;
+  PSNR 42.8 dB @640; embed+extract ≤ ~21 ms @640 (release). **Open gate:**
+  real libx264 CRF-28 re-encode measures BER 48.4% (simulator is
+  necessary-but-not-sufficient: RGB green-channel DCT grid vs libx264
+  luma/chroma integer transforms + limited-range YUV clamp). Closing the
+  <5% BER acceptance needs luma-domain embedding or codec-in-the-loop
+  training plus the full training run — **owner intent still needed**:
+  training-data licensing and model-size budget. Diagnosis + measured
+  table: `docs/algorithms.md` ("Learned watermarking").
 
 ---
 
