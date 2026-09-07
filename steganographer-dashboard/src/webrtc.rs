@@ -166,6 +166,13 @@ pub async fn remove_session(state: &DashboardState, session_id: &str) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(session_id);
+    // Drop the media publisher; the media pump observes the session removal
+    // and exits (it also removes its own entry as a belt-and-braces cleanup).
+    state
+        .media_publishers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
     match sess {
         Some(sess) => {
             let _ = sess.pc.close().await;
@@ -244,6 +251,35 @@ pub async fn api_webrtc_offer(
     }
 }
 
+/// `GET /api/webrtc/config` — advertised WebRTC capabilities.
+///
+/// Registered unconditionally so the browser can probe support. The response
+/// mirrors the server's ICE server list so the client peer connection can use
+/// the same STUN/TURN configuration, and whether the server publishes the
+/// H.264 video track (`media`). `media` is true only when the `webrtc`
+/// feature is built in AND the transport policy allows WebRTC.
+pub async fn api_webrtc_config(State(state): State<std::sync::Arc<DashboardState>>) -> Response {
+    #[cfg(feature = "webrtc")]
+    {
+        let ice_servers = state.ice_servers.clone();
+        let media = state.transport != crate::TransportPolicy::Websocket;
+        (axum::Json(json!({
+            "ice_servers": ice_servers,
+            "media": media,
+        })),)
+            .into_response()
+    }
+    #[cfg(not(feature = "webrtc"))]
+    {
+        let _ = state;
+        (axum::Json(json!({
+            "ice_servers": [],
+            "media": false,
+        })),)
+            .into_response()
+    }
+}
+
 /// Async event handler that forwards the remote-created DataChannel to the
 /// session's frame pump.
 #[cfg(feature = "webrtc")]
@@ -292,11 +328,35 @@ async fn handle_offer_with_webrtc(
     // Channel for the DataChannel created by the remote (browser) side.
     let (dc_tx, mut dc_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // No ICE servers: localhost host candidates only. This dashboard is a
-    // local-only tool — no STUN/TURN, no traffic beyond loopback.
+    // ICE servers come from the configured list (empty by default: localhost
+    // host candidates only, no traffic beyond loopback).
+    let rtc_config = webrtc::peer_connection::RTCConfigurationBuilder::new()
+        .with_ice_servers(parse_ice_servers(&state.ice_servers))
+        .build();
     let (gather_tx, mut gather_rx) = tokio::sync::mpsc::unbounded_channel();
-    let pc = match PeerConnectionBuilder::<String>::new()
-        .with_configuration(webrtc::peer_connection::RTCConfiguration::default())
+    // The default MediaEngine carries no codecs; without registration the
+    // video transceiver cannot be created. Only register when the offer
+    // carries video and policy allows media, keeping data-only answers
+    // byte-identical to the previous behavior.
+    let media_candidate = req.sdp.lines().any(|l| l.starts_with("m=video"))
+        && state.transport != crate::TransportPolicy::Websocket;
+    let base_builder = PeerConnectionBuilder::<String>::new().with_configuration(rtc_config);
+    let builder = if media_candidate {
+        let mut media_engine = webrtc::peer_connection::MediaEngine::default();
+        if let Err(e) = media_engine.register_default_codecs() {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({
+                    "error": format!("media engine setup failed: {}", e)
+                })),
+            )
+                .into_response();
+        }
+        base_builder.with_media_engine(media_engine)
+    } else {
+        base_builder
+    };
+    let pc = match builder
         .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
         .with_handler(std::sync::Arc::new(SessionEventHandler {
             dc_tx,
@@ -334,6 +394,30 @@ async fn handle_offer_with_webrtc(
             .into_response();
     }
 
+    // Media: when the offer carries a video m-line and the transport policy
+    // allows WebRTC, answer with a sendonly H.264 track. With transport ==
+    // Websocket the browser adds no video transceiver; if an offer still
+    // contains one we simply do not attach a track, so the answer's video
+    // m-line carries no media and the DataChannel canvas path stays the only
+    // rendering surface.
+    let publisher = if media_candidate {
+        match setup_media_sender(&pc).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let _ = pc.close().await;
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({
+                        "error": format!("media track setup failed: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let answer = match pc.create_answer(None).await {
         Ok(a) => a,
         Err(e) => {
@@ -354,6 +438,31 @@ async fn handle_offer_with_webrtc(
             .into_response();
     }
 
+    // Resolve the negotiated H.264 payload type now that the local answer is
+    // set; frames published before resolution are dropped by the publisher.
+    let media_ready = if let Some(publisher) = &publisher {
+        match discover_h264_payload_type(&pc).await {
+            Some(pt) => {
+                log::info!(
+                    "WebRTC media: negotiated H.264 payload type {} (ssrc {})",
+                    pt,
+                    publisher.ssrc()
+                );
+                publisher.set_payload_type(pt);
+                true
+            }
+            None => {
+                log::warn!(
+                    "WebRTC offer contained video but no H.264 packetization-mode=1 \
+                     codec was negotiated; media disabled for this session"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     // Wait (bounded) for ICE gathering so the answer carries loopback host
     // candidates. With no ICE servers this completes almost immediately.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), gather_rx.recv()).await;
@@ -371,6 +480,17 @@ async fn handle_offer_with_webrtc(
     };
 
     let session_id = register_session(&state, pc.clone());
+
+    if media_ready {
+        if let Some(publisher) = publisher {
+            state
+                .media_publishers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session_id.clone(), publisher.clone());
+            tokio::spawn(run_media_pump(state.clone(), session_id.clone(), publisher));
+        }
+    }
 
     // Spawn the frame pump once the DataChannel arrives.
     let pump_state = state.clone();
@@ -623,6 +743,523 @@ async fn run_frame_pump(
 
     let _ = dc.close().await;
     let _ = remove_session(&state, &session_id).await;
+}
+
+// ─── H.264 media publishing ───────────────────────────────────────────────────
+//
+// When the browser's offer contains a video m-line and the transport policy
+// allows WebRTC, the server answers with a sendonly H.264 track carrying the
+// stego'd frames as RTP. The browser renders the track in a <video> element;
+// the DataChannel canvas view remains the primary verification surface.
+
+/// H.264 fmtp line announced for the published video track: baseline
+/// constrained profile, packetization mode 1 — the profile browsers offer
+/// for RTP video and the bitstream shape OpenH264 produces.
+#[cfg(feature = "webrtc")]
+pub const H264_FMTP: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+
+/// Target OpenH264 bit rate.
+#[cfg(feature = "webrtc")]
+const MEDIA_TARGET_BITRATE_BPS: u32 = 2_500_000;
+/// OpenH264 frame rate ceiling.
+#[cfg(feature = "webrtc")]
+const MEDIA_MAX_FPS: f32 = 30.0;
+/// Periodic intra-frame interval in frames (~2 s of IDR cadence at 15 fps).
+#[cfg(feature = "webrtc")]
+const MEDIA_IDR_INTERVAL_FRAMES: u32 = 30;
+/// Default inter-frame duration for the first published frame (15 fps).
+#[cfg(feature = "webrtc")]
+const MEDIA_DEFAULT_FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(66);
+/// Clamp window for the RTP timestamp advance per frame.
+#[cfg(feature = "webrtc")]
+const MEDIA_MIN_FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(16);
+#[cfg(feature = "webrtc")]
+const MEDIA_MAX_FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often the media pump polls the shared pipeline for new stego'd frames.
+#[cfg(feature = "webrtc")]
+const MEDIA_PUMP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// Parse the configured ICE server URL list into crate `RTCIceServer`s.
+///
+/// Supported forms: `stun:host:port`, `stuns:host:port`, `turn:host:port`
+/// with inline `user:cred@` credentials, and `turns:host:port` likewise.
+/// TURN entries without credentials and URLs with unknown schemes are
+/// warned about and skipped (WebRTC-style inline credentials are hoisted
+/// into the `RTCIceServer` username/credential fields).
+#[cfg(feature = "webrtc")]
+pub fn parse_ice_servers(urls: &[String]) -> Vec<webrtc::peer_connection::RTCIceServer> {
+    let mut out = Vec::new();
+    for raw in urls {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((scheme, rest)) = trimmed.split_once(':') else {
+            log::warn!("ICE server {:?} skipped: missing scheme", trimmed);
+            continue;
+        };
+        let scheme = scheme.to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "stun" | "stuns" | "turn" | "turns") {
+            log::warn!("ICE server {:?} skipped: unsupported scheme", trimmed);
+            continue;
+        }
+        let (url, username, credential) = if let Some((userinfo, host)) = rest.rsplit_once('@') {
+            let (user, cred) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+            (
+                format!("{}:{}", scheme, host),
+                user.to_string(),
+                cred.to_string(),
+            )
+        } else {
+            (trimmed.to_string(), String::new(), String::new())
+        };
+        if matches!(scheme.as_str(), "turn" | "turns")
+            && (username.is_empty() || credential.is_empty())
+        {
+            log::warn!(
+                "ICE server {:?} skipped: TURN requires inline user:credential",
+                trimmed
+            );
+            continue;
+        }
+        out.push(webrtc::peer_connection::RTCIceServer {
+            urls: vec![url],
+            username,
+            credential,
+        });
+    }
+    out
+}
+
+/// Convert an RGB8 frame to planar I420 (BT.601 limited range) — the pixel
+/// format OpenH264 encodes from. Chroma is 2x2 subsampled with simple
+/// (unfiltered) decimation, which is visually fine for dashboard content.
+#[cfg(feature = "webrtc")]
+pub fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (w, h) = (width as usize, height as usize);
+    let uv_w = w.div_ceil(2);
+    let uv_h = h.div_ceil(2);
+    let mut y = vec![16u8; w * h];
+    let mut u = vec![128u8; uv_w * uv_h];
+    let mut v = vec![128u8; uv_w * uv_h];
+    for row in 0..h {
+        for col in 0..w {
+            let i = (row * w + col) * 3;
+            let (r, g, b) = (rgb[i] as i32, rgb[i + 1] as i32, rgb[i + 2] as i32);
+            y[row * w + col] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+            if row % 2 == 0 && col % 2 == 0 {
+                let p = (row / 2) * uv_w + (col / 2);
+                u[p] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                v[p] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            }
+        }
+    }
+    (y, u, v)
+}
+
+/// Planar I420 frame implementing [`openh264::formats::YUVSource`].
+#[cfg(feature = "webrtc")]
+struct I420Frame {
+    width: usize,
+    height: usize,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+#[cfg(feature = "webrtc")]
+impl openh264::formats::YUVSource for I420Frame {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+    fn strides(&self) -> (usize, usize, usize) {
+        let uv = self.width.div_ceil(2);
+        (self.width, uv, uv)
+    }
+    fn y(&self) -> &[u8] {
+        &self.y
+    }
+    fn u(&self) -> &[u8] {
+        &self.u
+    }
+    fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+/// Errors surfaced by [`MediaPublisher::publish_frame`].
+#[cfg(feature = "webrtc")]
+#[derive(Debug)]
+pub enum MediaPublishError {
+    /// The H.264 payload type has not been negotiated yet; the frame was
+    /// dropped and can be republished once signaling completes.
+    NotNegotiated,
+    /// OpenH264 encoding failed.
+    Encode(String),
+    /// RTP packetization or transport write failed.
+    Rtp(String),
+}
+
+#[cfg(feature = "webrtc")]
+impl std::fmt::Display for MediaPublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaPublishError::NotNegotiated => write!(f, "payload type not yet negotiated"),
+            MediaPublishError::Encode(e) => write!(f, "H.264 encode failed: {}", e),
+            MediaPublishError::Rtp(e) => write!(f, "RTP write failed: {}", e),
+        }
+    }
+}
+
+#[cfg(feature = "webrtc")]
+impl std::error::Error for MediaPublishError {}
+
+/// Lazily created encoder slot; recreated whenever the frame dimensions change.
+#[cfg(feature = "webrtc")]
+struct EncoderSlot {
+    dims: (u32, u32),
+    encoder: Option<openh264::encoder::Encoder>,
+}
+
+/// Publishes stego'd frames as the H.264 RTP video track of one WebRTC
+/// session.
+///
+/// `publish_frame` converts RGB pixels to I420, encodes them with a
+/// session-owned OpenH264 encoder, and hands the Annex-B bitstream to the
+/// crate's packetizer via the wrapped `TrackLocalStaticSample`. The payload
+/// type is discovered from the negotiated answer parameters after signaling
+/// completes; frames published before that are rejected with
+/// [`MediaPublishError::NotNegotiated`].
+#[cfg(feature = "webrtc")]
+pub struct MediaPublisher {
+    track: std::sync::Arc<webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample>,
+    ssrc: u32,
+    payload_type: std::sync::atomic::AtomicU8,
+    encoder: std::sync::Mutex<EncoderSlot>,
+    last_frame_at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+#[cfg(feature = "webrtc")]
+impl std::fmt::Debug for MediaPublisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaPublisher")
+            .field("ssrc", &self.ssrc)
+            .field(
+                "payload_type",
+                &self.payload_type.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "webrtc")]
+impl MediaPublisher {
+    fn new(
+        track: std::sync::Arc<
+            webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample,
+        >,
+        ssrc: u32,
+    ) -> Self {
+        Self {
+            track,
+            ssrc,
+            payload_type: std::sync::atomic::AtomicU8::new(0),
+            encoder: std::sync::Mutex::new(EncoderSlot {
+                dims: (0, 0),
+                encoder: None,
+            }),
+            last_frame_at: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The RTP SSRC of the published stream.
+    pub fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
+
+    /// The negotiated H.264 payload type; `0` until signaling completes.
+    pub fn payload_type(&self) -> u8 {
+        self.payload_type.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_payload_type(&self, pt: u8) {
+        self.payload_type
+            .store(pt, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Encode and publish one stego'd frame as RTP.
+    ///
+    /// `rgb` must be tightly packed RGB8 of the given dimensions. The RTP
+    /// timestamp advance is the measured inter-frame delta, clamped to
+    /// [1/60 s, 1/10 s]. A resolution change transparently recreates the
+    /// encoder (logged once per change).
+    pub async fn publish_frame(
+        &self,
+        width: u32,
+        height: u32,
+        rgb: &[u8],
+    ) -> Result<(), MediaPublishError> {
+        let pt = self.payload_type();
+        if pt == 0 {
+            return Err(MediaPublishError::NotNegotiated);
+        }
+        let expected = width as usize * height as usize * 3;
+        if rgb.len() < expected {
+            return Err(MediaPublishError::Encode(format!(
+                "RGB buffer {} bytes, expected {} for {}x{}",
+                rgb.len(),
+                expected,
+                width,
+                height
+            )));
+        }
+
+        let (y, u, v) = rgb_to_i420(rgb, width, height);
+        let frame = I420Frame {
+            width: width as usize,
+            height: height as usize,
+            y,
+            u,
+            v,
+        };
+
+        // Measured inter-frame delta drives the RTP timestamp clock.
+        let now = std::time::Instant::now();
+        let duration = {
+            let mut last = self.last_frame_at.lock().unwrap_or_else(|e| e.into_inner());
+            let d = match *last {
+                Some(t) => now.duration_since(t),
+                None => MEDIA_DEFAULT_FRAME_DURATION,
+            };
+            *last = Some(now);
+            d.clamp(MEDIA_MIN_FRAME_DURATION, MEDIA_MAX_FRAME_DURATION)
+        };
+
+        let annexb = {
+            let mut slot = self.encoder.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.encoder.is_none() || slot.dims != (width, height) {
+                if slot.encoder.is_some() {
+                    log::info!(
+                        "WebRTC media: resolution changed to {}x{}; recreating H.264 encoder",
+                        width,
+                        height
+                    );
+                }
+                let config = openh264::encoder::EncoderConfig::new()
+                    .bitrate(openh264::encoder::BitRate::from_bps(
+                        MEDIA_TARGET_BITRATE_BPS,
+                    ))
+                    .max_frame_rate(openh264::encoder::FrameRate::from_hz(MEDIA_MAX_FPS))
+                    .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
+                    .intra_frame_period(openh264::encoder::IntraFramePeriod::from_num_frames(
+                        MEDIA_IDR_INTERVAL_FRAMES,
+                    ));
+                slot.encoder = Some(
+                    openh264::encoder::Encoder::with_api_config(
+                        openh264::OpenH264API::from_source(),
+                        config,
+                    )
+                    .map_err(|e| MediaPublishError::Encode(e.to_string()))?,
+                );
+                slot.dims = (width, height);
+            }
+            let encoder = slot.encoder.as_mut().expect("encoder just created");
+            let bitstream = encoder
+                .encode(&frame)
+                .map_err(|e| MediaPublishError::Encode(e.to_string()))?;
+            annexb_from_bitstream(&bitstream)
+        };
+
+        let sample = rtc::media::Sample {
+            data: bytes::Bytes::from(annexb),
+            duration,
+            ..Default::default()
+        };
+        self.track
+            .write_sample(self.ssrc, pt, &sample, &[])
+            .await
+            .map_err(|e| MediaPublishError::Rtp(e.to_string()))
+    }
+}
+
+/// Flatten an OpenH264 `EncodedBitStream` into an Annex-B byte stream
+/// (each NAL unit prefixed with a 4-byte start code), the input format the
+/// crate's H.264 payloader expects. OpenH264 already emits start-code
+/// prefixed NAL units; the normalization is defensive so both 3- and 4-byte
+/// prefixes and bare NAL bodies produce valid output.
+#[cfg(feature = "webrtc")]
+fn annexb_from_bitstream(bs: &openh264::encoder::EncodedBitStream<'_>) -> Vec<u8> {
+    const START4: [u8; 4] = [0, 0, 0, 1];
+    let mut out = Vec::new();
+    for l in 0..bs.num_layers() {
+        let Some(layer) = bs.layer(l) else { continue };
+        for n in 0..layer.nal_count() {
+            let Some(nal) = layer.nal_unit(n) else {
+                continue;
+            };
+            if nal.starts_with(&START4) {
+                out.extend_from_slice(nal);
+            } else if nal.len() >= 3 && nal.starts_with(&[0, 0, 1]) {
+                out.push(0);
+                out.extend_from_slice(nal);
+            } else if !nal.is_empty() {
+                out.extend_from_slice(&START4);
+                out.extend_from_slice(nal);
+            }
+        }
+    }
+    out
+}
+
+/// Create the sendonly H.264 transceiver for a media-enabled session and
+/// wrap its track in a [`MediaPublisher`]. Must be called after
+/// `set_remote_description` and before `create_answer`.
+#[cfg(feature = "webrtc")]
+async fn setup_media_sender(
+    pc: &std::sync::Arc<dyn webrtc::peer_connection::PeerConnection>,
+) -> Result<std::sync::Arc<MediaPublisher>, String> {
+    use rand::RngCore;
+    use webrtc::media_stream::track_local::TrackLocal;
+    use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+
+    let mut ssrc_bytes = [0u8; 4];
+    rand::rngs::OsRng.fill_bytes(&mut ssrc_bytes);
+    let ssrc = u32::from_be_bytes(ssrc_bytes).max(1);
+
+    let codec = rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+        mime_type: "video/H264".to_string(),
+        clock_rate: 90_000,
+        channels: 0,
+        sdp_fmtp_line: H264_FMTP.to_string(),
+        rtcp_feedback: vec![
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "nack".to_string(),
+                parameter: "pli".to_string(),
+            },
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "ccm".to_string(),
+                parameter: "fir".to_string(),
+            },
+            rtc::rtp_transceiver::rtp_sender::RTCPFeedback {
+                typ: "nack".to_string(),
+                parameter: String::new(),
+            },
+        ],
+    };
+
+    let media_track = rtc::media_stream::MediaStreamTrack::new(
+        "stego".to_string(),
+        "steganographer".to_string(),
+        "steganographer".to_string(),
+        rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+        vec![rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters {
+            rtp_coding_parameters: rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec,
+            ..Default::default()
+        }],
+    );
+
+    let track = std::sync::Arc::new(
+        webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample::new(media_track)
+            .map_err(|e| format!("track creation failed: {}", e))?,
+    );
+    let transceiver = pc
+        .add_transceiver_from_track(
+            track.clone() as std::sync::Arc<dyn TrackLocal>,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                streams: vec!["stego".to_string()],
+                send_encodings: vec![],
+            }),
+        )
+        .await
+        .map_err(|e| format!("add_transceiver_from_track failed: {}", e))?;
+    let _ = transceiver;
+
+    Ok(std::sync::Arc::new(MediaPublisher::new(track, ssrc)))
+}
+
+/// Find the negotiated H.264 (packetization-mode 1) payload type across the
+/// peer connection's senders. Must be called after `set_local_description`
+/// so the answer's codec selection is reflected in the send parameters.
+#[cfg(feature = "webrtc")]
+async fn discover_h264_payload_type(
+    pc: &std::sync::Arc<dyn webrtc::peer_connection::PeerConnection>,
+) -> Option<u8> {
+    for sender in pc.get_senders().await {
+        let Ok(params) = sender.get_parameters().await else {
+            continue;
+        };
+        for codec in &params.rtp_parameters.codecs {
+            if codec.rtp_codec.mime_type.eq_ignore_ascii_case("video/H264")
+                && codec
+                    .rtp_codec
+                    .sdp_fmtp_line
+                    .contains("packetization-mode=1")
+            {
+                return Some(codec.payload_type);
+            }
+        }
+    }
+    None
+}
+
+/// Per-session media pump: polls the shared encode pipeline for newly stego'd
+/// frames and publishes them on the session's H.264 track.
+///
+/// The pipeline stores every encoded frame's raw stego'd pixels in
+/// `DashboardState::last_encoded_frame` (shared by the WebSocket and
+/// DataChannel transports), so the pump publishes with zero extra JPEG
+/// decoding. Exits once the session leaves `webrtc_sessions` and removes its
+/// publisher from `media_publishers`.
+#[cfg(feature = "webrtc")]
+async fn run_media_pump(
+    state: std::sync::Arc<DashboardState>,
+    session_id: String,
+    publisher: std::sync::Arc<MediaPublisher>,
+) {
+    let mut last_published: Option<u64> = None;
+    loop {
+        tokio::time::sleep(MEDIA_PUMP_POLL_INTERVAL).await;
+        let session_alive = state
+            .webrtc_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&session_id);
+        if !session_alive {
+            break;
+        }
+        let next = {
+            let guard = state
+                .last_encoded_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(f) if Some(f.frame_index) > last_published => {
+                    Some((f.frame_index, f.width, f.height, f.rgb_data.clone()))
+                }
+                _ => None,
+            }
+        };
+        let Some((frame_index, width, height, rgb)) = next else {
+            continue;
+        };
+        match publisher.publish_frame(width, height, &rgb).await {
+            Ok(()) => last_published = Some(frame_index),
+            Err(MediaPublishError::NotNegotiated) => {}
+            Err(e) => log::warn!("WebRTC session {}: media publish failed: {}", session_id, e),
+        }
+    }
+    state
+        .media_publishers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&session_id);
+    log::info!("WebRTC session {}: media pump stopped", session_id);
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

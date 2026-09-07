@@ -4079,6 +4079,7 @@ dependencies = [
  "log",
  "openh264",
  "rand 0.8.6",
+ "rtc",
  "serde",
  "serde_json",
  "steganographer-core",

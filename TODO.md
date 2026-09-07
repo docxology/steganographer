@@ -63,7 +63,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
   the registry refuse the factories). Also fixed in the same pass:
   `clear-payload` was a no-op (empty-packet embed writes zero bits); gst
   suite 7 → 15, workspace 472 → 480.
-- [x] **WebRTC streaming (DataChannel slice)** — replace WebSocket frame-by-frame with WebRTC.
+- [x] **WebRTC streaming (DataChannel + H.264 media track)** — replace WebSocket frame-by-frame with WebRTC.
   Status: **core slice complete (2026-09-07)**. WHEP-shaped HTTP SDP
   signaling (`POST /api/webrtc/offer`), ordered+reliable `frames`
   DataChannel carrying the SAME per-frame pipeline as WebSocket (shared
@@ -78,8 +78,26 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
   media-encoder dependency; (2) the ≥15 fps@720p figure is a
   release-profile measurement — the debug test profile sustains ~14.3 fps
   at 150 KB, so the interop test pins the acceptance at dashboard-default
-  payload sizes in debug. Remaining (owner-gated): real-camera soak, NAT
-  deployments (STUN/TURN policy), and any future RTP-media path.
+  payload sizes in debug. **Media track (2026-09-07, same day)**: real
+  H.264 MediaStreamTrack now completes the feature — stego'd pixels
+  (pre-JPEG buffer, zero extra decode) → RGB→I420 → openh264 (2.5 Mbps,
+  30-frame IDR; transparent encoder recreation on resolution change) →
+  Annex-B → `TrackLocalStaticSample` over a Sendonly transceiver matched
+  to the browser's recvonly video m-line; `--ice-server` (repeatable,
+  stun/turn forms) + `GET /api/webrtc/config` share one ICE list between
+  browser and server; `ontrack` renders a media-preview `<video>` with a
+  Media-fps stat while the DataChannel canvas path stays the default
+  verification view. Measured (release): DataChannel loop 18.1 fps / p95
+  22 ms; media loopback 272 RTP packets, PT 125, 13.6 fps (release floors
+  ≥15 DC / ≥12 media enforced; debug builds assert stall guards only —
+  both fps floors profile-gated after the debug throughput assertion
+  flaked twice under load). Real-browser verified: Connected (WebRTC) +
+  media preview rendering the stego'd frames (640×480) while the same
+  frames pass signature verification. Remaining (owner-gated): real-camera
+  soak and NAT deployments (STUN/TURN plumbing shipped; needs live
+  network validation). Known limit: PLI→keyframe unreachable through the
+  event-handler API — keyframe recovery rides the IDR interval
+  (documented in docs/api-reference.md).
 - [ ] **Learned watermarking encoder (framework landed; CRF-28 gate open)** — neural network-based watermarking resistant to re-encoding/cropping.
   Status: **framework complete (2026-09-07)**: opt-in `learned` cargo
   feature (ndarray only, no new mandatory deps), 64-bit payload, trained

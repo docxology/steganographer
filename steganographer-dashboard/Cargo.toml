@@ -24,6 +24,7 @@ bytes = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = "0.22"
 openh264 = { version = "0.9.8", optional = true }
+rtc = { version = "0.20.5", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -35,4 +36,4 @@ env_logger = { workspace = true }
 log = { workspace = true }
 
 [features]
-webrtc = ["dep:webrtc", "dep:bytes", "dep:async-trait", "dep:openh264"]
+webrtc = ["dep:webrtc", "dep:rtc", "dep:bytes", "dep:async-trait", "dep:openh264"]
