@@ -31,14 +31,15 @@ use steganographer_core::{Signer, Verifier, VideoFormat, VideoFrame, VideoStegoM
 use super::DashboardState;
 
 /// Maximum decoded WebSocket message size (4 MiB) — bounds client-controlled
-/// allocation for JPEG frames / PCM chunks.
-const WS_MAX_MESSAGE_SIZE: usize = 1 << 22;
+/// allocation for JPEG frames / PCM chunks. Also reused as the data-channel
+/// message cap on the WebRTC transport.
+pub(crate) const WS_MAX_MESSAGE_SIZE: usize = 1 << 22;
 /// Maximum WebSocket frame size (1 MiB).
-const WS_MAX_FRAME_SIZE: usize = 1 << 20;
+pub(crate) const WS_MAX_FRAME_SIZE: usize = 1 << 20;
 /// Maximum image dimension accepted for client-supplied JPEG frames —
 /// guards against decompression bombs (a few MB of JPEG can decode to
 /// gigabytes of pixels without limits).
-const IMAGE_MAX_DIMENSION: u32 = 4096;
+pub(crate) const IMAGE_MAX_DIMENSION: u32 = 4096;
 /// Maximum audio chunk duration accepted from clients (seconds × sample rate
 /// × channels) — bounds the ~4× base64/PCM amplification per message.
 const AUDIO_MAX_DURATION_SECS: u64 = 10;
@@ -211,12 +212,329 @@ async fn ws_extract(req: axum::extract::Request) -> Result<WebSocketUpgrade, Res
 /// Build an OTS metrics JSON object for inclusion in WebSocket replies.
 /// Provides the explicit fields `ots_proofs_count`, `ots_last_timestamp`,
 /// and `ots_verified` for the dashboard UI.
-fn ots_metrics_json(state: &DashboardState) -> serde_json::Value {
+pub(crate) fn ots_metrics_json(state: &DashboardState) -> serde_json::Value {
     serde_json::json!({
         "ots_proofs_count": state.metrics.ots_proofs_generated(),
         "ots_last_timestamp": state.metrics.ots_last_timestamp(),
         "ots_verified": state.metrics.ots_last_verified(),
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SHARED VIDEO FRAME PIPELINE (used by both the WebSocket and WebRTC paths)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Per-stream video pipeline state: frame counter, LSB module and the LSB
+/// bit-depth it was built with. Both the WebSocket encode handler and the
+/// WebRTC data-channel handler run one `FramePipeline` per connection so the
+/// two transports feed an identical sign → LSB-embed → re-encode pipeline.
+pub(crate) struct FramePipeline {
+    frame_counter: u64,
+    lsb: LsbVideo,
+    current_lsb_bits: u8,
+}
+
+impl FramePipeline {
+    pub(crate) fn new() -> Self {
+        Self {
+            frame_counter: 0,
+            lsb: LsbVideo::new(1),
+            current_lsb_bits: 1,
+        }
+    }
+
+    /// Encode one client-supplied JPEG frame: decode (with decompression-bomb
+    /// guard), sign the pre-embed pixels, LSB-embed the payload, re-encode the
+    /// post-embed image as JPEG, and store the result in
+    /// `state.last_encoded_frame` for the decode/verify path.
+    ///
+    /// Returns the `encoded_frame` reply JSON (the same message shape as the
+    /// WebSocket path) on success, or an `error` reply JSON on failure.
+    pub(crate) fn encode_frame(
+        &mut self,
+        state: &DashboardState,
+        jpeg_bytes: &[u8],
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        let frame_idx = self.frame_counter;
+        self.frame_counter += 1;
+
+        // Decompression-bomb guard: reject frames that decode beyond the
+        // 4096×4096 limit instead of allocating unbounded pixels.
+        let mut reader = ImageReader::with_format(Cursor::new(jpeg_bytes), ImageFormat::Jpeg);
+        let mut limits = Limits::default();
+        limits.max_image_width = Some(IMAGE_MAX_DIMENSION);
+        limits.max_image_height = Some(IMAGE_MAX_DIMENSION);
+        reader.limits(limits);
+        let rgb_image = match reader.decode() {
+            Ok(img) => img.to_rgb8(),
+            Err(e) => {
+                log::warn!("Failed to decode JPEG frame: {}", e);
+                return Err(serde_json::json!({
+                    "type": "error",
+                    "message": format!("failed to decode JPEG frame: {e}"),
+                }));
+            }
+        };
+
+        let width = rgb_image.width();
+        let height = rgb_image.height();
+        let mut rgb_data = rgb_image.into_raw();
+        // Snapshot the pre-embed pixels: this is exactly what the signature
+        // is computed over (embedding modifies LSBs afterwards).
+        let signed_rgb = rgb_data.clone();
+
+        let sign_start = Instant::now();
+        let payload = state.signer.sign_frame(frame_idx, &rgb_data, None);
+        let sign_duration = sign_start.elapsed();
+        state.metrics.record_sign_duration(sign_duration);
+
+        // Update LSB bits from live config if changed. The API validates
+        // 1..=4, but clamp defensively so a stale/other-source config can
+        // never reach the panicking constructor.
+        {
+            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
+            let bits = cfg.lsb_bits.clamp(1, 4);
+            if bits != self.current_lsb_bits {
+                self.current_lsb_bits = bits;
+                self.lsb = LsbVideo::new(bits);
+                log::info!(
+                    "Video encode: LSB bits updated to {}",
+                    self.current_lsb_bits
+                );
+            }
+        }
+
+        let embed_start = Instant::now();
+        {
+            let mut frame = VideoFrame {
+                width,
+                height,
+                stride: width * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut rgb_data,
+                frame_index: frame_idx,
+            };
+            if let Err(e) = self.lsb.embed(&mut frame, Some(&payload)) {
+                log::warn!("LSB embed failed: {}", e);
+                return Err(serde_json::json!({
+                    "type": "error",
+                    "message": format!("LSB embed failed: {e}"),
+                }));
+            }
+        }
+        let embed_duration = embed_start.elapsed();
+        state.metrics.record_embed_duration(embed_duration);
+        state.metrics.record_frame();
+
+        let encoded_image = image::RgbImage::from_raw(width, height, rgb_data.clone())
+            .expect("invalid raw RGB dimensions");
+        let mut jpeg_out = Cursor::new(Vec::new());
+        if encoded_image
+            .write_to(&mut jpeg_out, ImageFormat::Jpeg)
+            .is_err()
+        {
+            log::warn!("Failed to re-encode JPEG");
+            return Err(serde_json::json!({
+                "type": "error",
+                "message": "failed to re-encode JPEG",
+            }));
+        }
+
+        let encoded_jpeg = jpeg_out.into_inner();
+        let b64_frame = base64_encode(&encoded_jpeg);
+
+        {
+            let mut last = state
+                .last_encoded_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *last = Some(EncodedFrame {
+                // Post-embed pixels: extraction source and displayed image.
+                rgb_data,
+                // Pre-embed pixels: exactly what the signature covers, kept
+                // so the decode handler can perform real verification (the
+                // post-embed pixels differ in their LSBs).
+                signed_rgb,
+                width,
+                height,
+                frame_index: frame_idx,
+            });
+        }
+
+        let metrics_json = state.metrics.to_json();
+        Ok(serde_json::json!({
+            "type": "encoded_frame",
+            "frame": b64_frame,
+            "width": width,
+            "height": height,
+            "frame_index": frame_idx,
+            "sign_us": sign_duration.as_micros() as u64,
+            "embed_us": embed_duration.as_micros() as u64,
+            "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
+            "backend": state.signing_backend,
+            "identity": state.identity,
+            "ots": ots_metrics_json(state),
+        }))
+    }
+}
+
+/// Per-stream verification state: LSB module used to extract payloads plus
+/// the bit-depth it was built with. Shared by the WebSocket decode handler
+/// and the WebRTC data-channel handler so both verify identically.
+pub(crate) struct FrameVerifier {
+    lsb: LsbVideo,
+    current_lsb_bits: u8,
+}
+
+impl FrameVerifier {
+    pub(crate) fn new() -> Self {
+        Self {
+            lsb: LsbVideo::new(1),
+            current_lsb_bits: 1,
+        }
+    }
+
+    /// Extract the LSB payload from the latest encoded frame, verify the
+    /// signature against the pre-embed pixels using the session-wide
+    /// keypair's public half, update verification metrics, and return the
+    /// `decoded_frame` reply JSON (same message shape as the WebSocket decode
+    /// path). When no frame has been encoded yet, returns a `verify_status`
+    /// waiting reply instead.
+    pub(crate) fn verify_latest(&mut self, state: &DashboardState) -> serde_json::Value {
+        let encoded = {
+            let last = state
+                .last_encoded_frame
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            last.clone()
+        };
+        let Some(ef) = encoded else {
+            let metrics_json = state.metrics.to_json();
+            return serde_json::json!({
+                "type": "verify_status",
+                "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
+                "backend": state.signing_backend,
+                "waiting": true,
+                "ots": ots_metrics_json(state),
+            });
+        };
+
+        let verify_start = Instant::now();
+        let mut data_copy = ef.rgb_data.clone();
+        let frame = VideoFrame {
+            width: ef.width,
+            height: ef.height,
+            stride: ef.width * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data_copy,
+            frame_index: ef.frame_index,
+        };
+
+        // Update LSB bits from live config if changed. Clamped so a
+        // stale config can never reach the panicking constructor.
+        {
+            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
+            let bits = cfg.lsb_bits.clamp(1, 4);
+            if bits != self.current_lsb_bits {
+                self.current_lsb_bits = bits;
+                self.lsb = LsbVideo::new(bits);
+                log::info!(
+                    "Video decode: LSB bits updated to {}",
+                    self.current_lsb_bits
+                );
+            }
+        }
+
+        let extracted = self.lsb.extract(&frame);
+
+        // Real signature verification: check the extracted payload
+        // against the pre-embed pixel data the signature covers, using
+        // the session-wide keypair's public half. Merely *finding* a
+        // payload is NOT proof of authenticity.
+        let (verified, payload_info) = match extracted {
+            Ok(Some(payload)) => {
+                let verified = verify_signature(&state.signer, &payload, &ef.signed_rgb);
+                if verified {
+                    state.metrics.record_verify_ok();
+                } else {
+                    state.metrics.record_verify_fail();
+                }
+                let hash_hex: String = payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
+                let sig_preview: String = payload
+                    .signature
+                    .to_bytes()
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                let sig_full: String = payload
+                    .signature
+                    .to_bytes()
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                (
+                    verified,
+                    serde_json::json!({
+                        "payload_found": true,
+                        "frame_index": payload.frame_index,
+                        "hash": hash_hex,
+                        "signature_preview": sig_preview,
+                        "signature_full": sig_full,
+                    }),
+                )
+            }
+            Ok(None) => {
+                state.metrics.record_verify_fail();
+                (
+                    false,
+                    serde_json::json!({"payload_found": false, "error": "no payload found"}),
+                )
+            }
+            Err(e) => {
+                state.metrics.record_verify_fail();
+                (
+                    false,
+                    serde_json::json!({"payload_found": false, "error": e.to_string()}),
+                )
+            }
+        };
+        let verify_duration = verify_start.elapsed();
+        state.metrics.record_verify_duration(verify_duration);
+
+        let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data.clone())
+            .expect("invalid raw RGB dimensions");
+        let mut jpeg_out = Cursor::new(Vec::new());
+        let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
+        let b64_frame = base64_encode(&jpeg_out.into_inner());
+
+        let metrics_json = state.metrics.to_json();
+        let now = {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = d.as_secs();
+            // Simple ISO 8601 UTC timestamp
+            let s = secs % 60;
+            let m = (secs / 60) % 60;
+            let h = (secs / 3600) % 24;
+            format!("{:02}:{:02}:{:02}.{:03}Z", h, m, s, d.subsec_millis())
+        };
+        serde_json::json!({
+            "type": "decoded_frame",
+            "frame": b64_frame,
+            "width": ef.width,
+            "height": ef.height,
+            "verified": verified,
+            "payload": payload_info,
+            "verify_us": verify_duration.as_micros() as u64,
+            "timestamp": now,
+            "lsb_bits": self.current_lsb_bits,
+            "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
+            "backend": state.signing_backend,
+            "ots": ots_metrics_json(state),
+        })
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -303,11 +621,9 @@ pub async fn ws_audio_decode_handler(
 async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     log::info!("Encode WebSocket client connected");
 
-    let frame_counter = AtomicU64::new(0);
     // Single session-wide keypair: what the encode side signs, the decode
     // side verifies against the same public half (state.signer).
-    let mut lsb = LsbVideo::new(1);
-    let mut current_lsb_bits: u8 = 1;
+    let mut pipeline = FramePipeline::new();
 
     loop {
         let msg = match socket.recv().await {
@@ -343,118 +659,10 @@ async fn handle_encode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
             continue;
         }
 
-        let frame_idx = frame_counter.fetch_add(1, Ordering::Relaxed);
-
-        // Decompression-bomb guard: reject frames that decode beyond the
-        // 4096×4096 limit instead of allocating unbounded pixels.
-        let mut reader = ImageReader::with_format(Cursor::new(&jpeg_bytes), ImageFormat::Jpeg);
-        let mut limits = Limits::default();
-        limits.max_image_width = Some(IMAGE_MAX_DIMENSION);
-        limits.max_image_height = Some(IMAGE_MAX_DIMENSION);
-        reader.limits(limits);
-        let rgb_image = match reader.decode() {
-            Ok(img) => img.to_rgb8(),
-            Err(e) => {
-                log::warn!("Failed to decode JPEG frame: {}", e);
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": format!("failed to decode JPEG frame: {e}"),
-                });
-                let _ = socket.send(Message::Text(err.to_string().into())).await;
-                continue;
-            }
+        let reply = match pipeline.encode_frame(&state, &jpeg_bytes) {
+            Ok(reply) => reply,
+            Err(reply) => reply,
         };
-
-        let width = rgb_image.width();
-        let height = rgb_image.height();
-        let mut rgb_data = rgb_image.into_raw();
-        // Snapshot the pre-embed pixels: this is exactly what the signature
-        // is computed over (embedding modifies LSBs afterwards).
-        let signed_rgb = rgb_data.clone();
-
-        let sign_start = Instant::now();
-        let payload = state.signer.sign_frame(frame_idx, &rgb_data, None);
-        let sign_duration = sign_start.elapsed();
-        state.metrics.record_sign_duration(sign_duration);
-
-        // Update LSB bits from live config if changed. The API validates
-        // 1..=4, but clamp defensively so a stale/other-source config can
-        // never reach the panicking constructor.
-        {
-            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
-            let bits = cfg.lsb_bits.clamp(1, 4);
-            if bits != current_lsb_bits {
-                current_lsb_bits = bits;
-                lsb = LsbVideo::new(bits);
-                log::info!("Video encode: LSB bits updated to {}", current_lsb_bits);
-            }
-        }
-
-        let embed_start = Instant::now();
-        {
-            let mut frame = VideoFrame {
-                width,
-                height,
-                stride: width * 3,
-                format: VideoFormat::Rgb8,
-                data: &mut rgb_data,
-                frame_index: frame_idx,
-            };
-            if let Err(e) = lsb.embed(&mut frame, Some(&payload)) {
-                log::warn!("LSB embed failed: {}", e);
-                continue;
-            }
-        }
-        let embed_duration = embed_start.elapsed();
-        state.metrics.record_embed_duration(embed_duration);
-        state.metrics.record_frame();
-
-        let encoded_image = image::RgbImage::from_raw(width, height, rgb_data.clone())
-            .expect("invalid raw RGB dimensions");
-        let mut jpeg_out = Cursor::new(Vec::new());
-        if encoded_image
-            .write_to(&mut jpeg_out, ImageFormat::Jpeg)
-            .is_err()
-        {
-            log::warn!("Failed to re-encode JPEG");
-            continue;
-        }
-
-        let encoded_jpeg = jpeg_out.into_inner();
-        let b64_frame = base64_encode(&encoded_jpeg);
-
-        {
-            let mut last = state
-                .last_encoded_frame
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *last = Some(EncodedFrame {
-                // Post-embed pixels: extraction source and displayed image.
-                rgb_data,
-                // Pre-embed pixels: exactly what the signature covers, kept
-                // so the decode handler can perform real verification (the
-                // post-embed pixels differ in their LSBs).
-                signed_rgb,
-                width,
-                height,
-                frame_index: frame_idx,
-            });
-        }
-
-        let metrics_json = state.metrics.to_json();
-        let reply = serde_json::json!({
-            "type": "encoded_frame",
-            "frame": b64_frame,
-            "width": width,
-            "height": height,
-            "frame_index": frame_idx,
-            "sign_us": sign_duration.as_micros() as u64,
-            "embed_us": embed_duration.as_micros() as u64,
-            "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-            "backend": state.signing_backend,
-            "identity": state.identity,
-            "ots": ots_metrics_json(&state),
-        });
 
         if socket
             .send(Message::Text(reply.to_string().into()))
@@ -507,8 +715,7 @@ async fn drain_queued(socket: &mut WebSocket) -> bool {
 async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     log::info!("Decode WebSocket client connected");
 
-    let mut lsb = LsbVideo::new(1);
-    let mut current_lsb_bits: u8 = 1;
+    let mut verifier = FrameVerifier::new();
 
     loop {
         let msg = match socket.recv().await {
@@ -539,139 +746,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
             continue;
         }
 
-        let encoded = {
-            let last = state
-                .last_encoded_frame
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            last.clone()
-        };
-
-        let reply = if let Some(ef) = encoded {
-            let verify_start = Instant::now();
-            let mut data_copy = ef.rgb_data.clone();
-            let frame = VideoFrame {
-                width: ef.width,
-                height: ef.height,
-                stride: ef.width * 3,
-                format: VideoFormat::Rgb8,
-                data: &mut data_copy,
-                frame_index: ef.frame_index,
-            };
-
-            // Update LSB bits from live config if changed. Clamped so a
-            // stale config can never reach the panicking constructor.
-            {
-                let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
-                let bits = cfg.lsb_bits.clamp(1, 4);
-                if bits != current_lsb_bits {
-                    current_lsb_bits = bits;
-                    lsb = LsbVideo::new(bits);
-                    log::info!("Video decode: LSB bits updated to {}", current_lsb_bits);
-                }
-            }
-
-            let extracted = lsb.extract(&frame);
-
-            // Real signature verification: check the extracted payload
-            // against the pre-embed pixel data the signature covers, using
-            // the session-wide keypair's public half. Merely *finding* a
-            // payload is NOT proof of authenticity.
-
-            let (verified, payload_info) = match extracted {
-                Ok(Some(payload)) => {
-                    let verified = verify_signature(&state.signer, &payload, &ef.signed_rgb);
-                    if verified {
-                        state.metrics.record_verify_ok();
-                    } else {
-                        state.metrics.record_verify_fail();
-                    }
-                    let hash_hex: String =
-                        payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
-                    let sig_preview: String = payload
-                        .signature
-                        .to_bytes()
-                        .iter()
-                        .take(16)
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
-                    let sig_full: String = payload
-                        .signature
-                        .to_bytes()
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
-                    (
-                        verified,
-                        serde_json::json!({
-                            "payload_found": true,
-                            "frame_index": payload.frame_index,
-                            "hash": hash_hex,
-                            "signature_preview": sig_preview,
-                            "signature_full": sig_full,
-                        }),
-                    )
-                }
-                Ok(None) => {
-                    state.metrics.record_verify_fail();
-                    (
-                        false,
-                        serde_json::json!({"payload_found": false, "error": "no payload found"}),
-                    )
-                }
-                Err(e) => {
-                    state.metrics.record_verify_fail();
-                    (
-                        false,
-                        serde_json::json!({"payload_found": false, "error": e.to_string()}),
-                    )
-                }
-            };
-            let verify_duration = verify_start.elapsed();
-            state.metrics.record_verify_duration(verify_duration);
-
-            let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data)
-                .expect("invalid raw RGB dimensions");
-            let mut jpeg_out = Cursor::new(Vec::new());
-            let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
-            let b64_frame = base64_encode(&jpeg_out.into_inner());
-
-            let metrics_json = state.metrics.to_json();
-            let now = {
-                let d = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                let secs = d.as_secs();
-                // Simple ISO 8601 UTC timestamp
-                let s = secs % 60;
-                let m = (secs / 60) % 60;
-                let h = (secs / 3600) % 24;
-                format!("{:02}:{:02}:{:02}.{:03}Z", h, m, s, d.subsec_millis())
-            };
-            serde_json::json!({
-                "type": "decoded_frame",
-                "frame": b64_frame,
-                "width": ef.width,
-                "height": ef.height,
-                "verified": verified,
-                "payload": payload_info,
-                "verify_us": verify_duration.as_micros() as u64,
-                "timestamp": now,
-                "lsb_bits": current_lsb_bits,
-                "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-                "backend": state.signing_backend,
-                "ots": ots_metrics_json(&state),
-            })
-        } else {
-            let metrics_json = state.metrics.to_json();
-            serde_json::json!({
-                "type": "verify_status",
-                "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-                "backend": state.signing_backend,
-                "waiting": true,
-                "ots": ots_metrics_json(&state),
-            })
-        };
+        let reply = verifier.verify_latest(&state);
 
         if socket
             .send(Message::Text(reply.to_string().into()))
@@ -1125,7 +1200,7 @@ impl EncodedAudioChunk {
 }
 
 /// Base64-encode bytes (standard encoding).
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }

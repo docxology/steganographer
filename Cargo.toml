@@ -4,6 +4,7 @@ members = [
     "steganographer-gst",
     "steganographer-cli",
     "steganographer-dashboard",
+    "steganographer-wasm",
 ]
 resolver = "2"
 

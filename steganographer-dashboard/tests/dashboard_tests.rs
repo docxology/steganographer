@@ -27,6 +27,7 @@ fn test_live_config_serialization_roundtrip() {
         hash_algorithm: "blake3".into(),
         encrypt: false,
         ecc: false,
+        transport: steganographer_dashboard::Transport::Websocket,
     };
     let json = serde_json::to_string(&cfg).expect("serialize");
     let parsed: LiveConfig = serde_json::from_str(&json).expect("deserialize");
@@ -121,6 +122,7 @@ fn test_live_config_full_json_roundtrip() {
         hash_algorithm: "blake3".into(),
         encrypt: false,
         ecc: false,
+        transport: steganographer_dashboard::Transport::Webrtc,
     };
     let json = serde_json::to_string(&original).unwrap();
     let restored: LiveConfig = serde_json::from_str(&json).unwrap();
@@ -204,6 +206,7 @@ fn test_live_config_qr_scale_resolution_roundtrip() {
         hash_algorithm: "blake3".into(),
         encrypt: false,
         ecc: false,
+        transport: steganographer_dashboard::Transport::Websocket,
     };
     let json = serde_json::to_string(&cfg).expect("serialize");
     let parsed: LiveConfig = serde_json::from_str(&json).expect("deserialize");
@@ -903,4 +906,280 @@ async fn test_ws_auth_token_via_subprotocol() {
     );
     // The Sec-WebSocket-Protocol echo only happens on a real 101 upgrade,
     // which oneshot cannot produce; the gate decision is the unit under test.
+}
+
+// ─── LiveConfig transport ─────────────────────────────────────────────
+
+#[test]
+fn test_live_config_transport_default_and_roundtrip() {
+    let cfg = LiveConfig::default();
+    assert_eq!(
+        cfg.transport,
+        steganographer_dashboard::Transport::Websocket
+    );
+
+    let cfg: LiveConfig = serde_json::from_str(r#"{"transport": "webrtc"}"#).unwrap();
+    assert_eq!(cfg.transport, steganographer_dashboard::Transport::Webrtc);
+
+    let cfg: LiveConfig = serde_json::from_str(r#"{"transport": "websocket"}"#).unwrap();
+    assert_eq!(
+        cfg.transport,
+        steganographer_dashboard::Transport::Websocket
+    );
+
+    // Unknown transport values must be rejected at parse time.
+    assert!(serde_json::from_str::<LiveConfig>(r#"{"transport": "carrier-pigeon"}"#).is_err());
+}
+
+// ─── POST /api/webrtc/offer (WHIP-style signaling) ────────────────────
+
+async fn post_offer(
+    app: axum::Router,
+    body: &str,
+    auth: Option<&str>,
+) -> (axum::http::StatusCode, String) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/webrtc/offer")
+        .header("content-type", "application/json");
+    if let Some(t) = auth {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .oneshot(req.body(axum::body::Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_to_string(resp.into_body()).await)
+}
+
+#[tokio::test]
+async fn test_api_webrtc_offer_requires_auth() {
+    let (app, _state) = test_app_with_token(Some(TEST_TOKEN.into()));
+    // Valid offer-shaped JSON so the handler (not the extractor) rejects it.
+    let (status, body) = post_offer(app, r#"{"type": "offer", "sdp": "v=0"}"#, None).await;
+    assert_eq!(status, 401, "missing token must be rejected: {body}");
+}
+
+#[tokio::test]
+async fn test_api_webrtc_offer_rejects_non_offer_type() {
+    let (app, _state) = test_app();
+    let (status, body) = post_offer(app, r#"{"type": "answer", "sdp": "v=0"}"#, None).await;
+    assert_eq!(status, 400, "non-offer SDP type must be rejected: {body}");
+    assert!(
+        body.contains("offer"),
+        "error must name the SDP type: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_api_webrtc_offer_rejects_malformed_sdp() {
+    let (app, _state) = test_app();
+    let (status, body) = post_offer(app, r#"{"type": "offer", "sdp": "not-sdp"}"#, None).await;
+    assert_eq!(status, 400, "malformed SDP must be rejected: {body}");
+}
+
+#[tokio::test]
+async fn test_api_config_get_includes_transport() {
+    use tower::ServiceExt;
+    let (app, _state) = test_app();
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/config")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = body_to_string(resp.into_body()).await;
+    let cfg: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(cfg["transport"], "websocket");
+}
+
+// ─── In-process PeerConnection round trip through the real endpoint ───
+
+use webrtc::data_channel::DataChannelEvent;
+use webrtc::peer_connection::{
+    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
+    RTCIceGatheringState, RTCPeerConnectionState, RTCSdpType, RTCSessionDescription,
+};
+
+/// Handler for the offer-side (browser stand-in) peer connection.
+#[derive(Clone)]
+struct TestOfferHandler {
+    gather_tx: tokio::sync::mpsc::Sender<()>,
+    connected_tx: tokio::sync::mpsc::Sender<()>,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for TestOfferHandler {
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state == RTCIceGatheringState::Complete {
+            let _ = self.gather_tx.try_send(());
+        }
+    }
+
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if state == RTCPeerConnectionState::Connected {
+            let _ = self.connected_tx.try_send(());
+        }
+    }
+}
+
+/// Minimal valid JPEG fixture generated in-process with the same encoder the
+/// pipeline uses (a hand-written JPEG byte sequence would rot silently).
+fn fixture_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x * 7 % 256) as u8, (y * 11 % 256) as u8, 128])
+    });
+    let mut buf = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Jpeg,
+    )
+    .expect("encode fixture JPEG");
+    buf
+}
+
+/// Full loopback proof: two webrtc-rs PeerConnections in-process, signaling
+/// through the real `POST /api/webrtc/offer` endpoint, then one JPEG frame
+/// over the data channel through the shared encode pipeline, asserting the
+/// `encoded_frame` + `decoded_frame` replies and updated verification state.
+///
+/// End-to-end latency and FPS are NOT asserted here — they require a real
+/// browser (the orchestrator runs a headless-Chromium check separately).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_webrtc_data_channel_pipeline_round_trip() {
+    use tower::ServiceExt;
+
+    let (app, _state) = test_app();
+    // A second request (metrics) is made after signaling, so keep a clone.
+    let app2 = app.clone();
+
+    // ── Offer side (browser stand-in) ────────────────────────────────────
+    let (gather_tx, mut gather_rx) = tokio::sync::mpsc::channel(1);
+    let (connected_tx, mut connected_rx) = tokio::sync::mpsc::channel(1);
+    let pc = PeerConnectionBuilder::new()
+        .with_configuration(RTCConfigurationBuilder::new().build())
+        .with_handler(Arc::new(TestOfferHandler {
+            gather_tx,
+            connected_tx,
+        }))
+        .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+        .build()
+        .await
+        .expect("offer-side peer connection builds");
+
+    let dc = pc
+        .create_data_channel("frames", None)
+        .await
+        .expect("data channel created");
+
+    let offer = pc.create_offer(None).await.expect("offer created");
+    pc.set_local_description(offer)
+        .await
+        .expect("local description set");
+
+    // Non-trickle ICE: wait for gathering to complete (mirrors the browser).
+    tokio::time::timeout(std::time::Duration::from_secs(15), gather_rx.recv())
+        .await
+        .expect("ICE gathering completed")
+        .expect("gather channel");
+    let offer_sdp = pc
+        .local_description()
+        .await
+        .expect("local description available");
+    assert_eq!(offer_sdp.sdp_type, RTCSdpType::Offer);
+
+    // ── Signal through the real WHIP endpoint ────────────────────────────
+    let (status, body) = post_offer(app, &serde_json::to_string(&offer_sdp).unwrap(), None).await;
+    assert_eq!(status, 200, "endpoint must answer the offer: {body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["type"], "answer");
+    assert!(
+        answer["sdp"].as_str().unwrap().contains("candidate"),
+        "non-trickle ICE: answer SDP must embed ICE candidates"
+    );
+
+    let answer_sdp: RTCSessionDescription = serde_json::from_str(&body).unwrap();
+    pc.set_remote_description(answer_sdp)
+        .await
+        .expect("remote answer applied");
+
+    // The ICE agent must actually reach Connected over the loopback pair.
+    tokio::time::timeout(std::time::Duration::from_secs(30), connected_rx.recv())
+        .await
+        .expect("peer connection must connect within 30s")
+        .expect("connected channel");
+
+    // ── Drive the data channel: send one frame, collect replies ──────────
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let jpeg = fixture_jpeg(64, 48);
+    tokio::spawn(async move {
+        let mut sent = false;
+        loop {
+            match dc.poll().await {
+                Some(DataChannelEvent::OnOpen) => {
+                    if !sent {
+                        sent = true;
+                        dc.send(bytes::BytesMut::from(&jpeg[..]))
+                            .await
+                            .expect("send fixture frame");
+                    }
+                }
+                Some(DataChannelEvent::OnMessage(m)) => {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&m.data) {
+                        match v["type"].as_str().unwrap_or("") {
+                            "encoded_frame" => { /* replies asserted below */ }
+                            "decoded_frame" => {
+                                let _ = reply_tx.send(v);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(DataChannelEvent::OnClose) | None => break,
+                _ => {}
+            }
+        }
+    });
+
+    let decoded = tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx.recv())
+        .await
+        .expect("timed out waiting for decoded_frame")
+        .expect("data channel closed before decoded_frame arrived");
+    assert_eq!(decoded["verified"], true, "reply: {decoded}");
+    assert_eq!(
+        decoded["payload"]["payload_found"], true,
+        "reply: {decoded}"
+    );
+    assert_eq!(decoded["payload"]["frame_index"], 0, "reply: {decoded}");
+
+    // ── Verification state updated in shared metrics ─────────────────────
+    let resp = app2
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let metrics: serde_json::Value =
+        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
+    let frames = metrics["frames_processed"].as_f64().unwrap_or(0.0);
+    let verified_ok = metrics["frames_verified_ok"].as_f64().unwrap_or(0.0);
+    assert!(
+        frames >= 1.0,
+        "encode pipeline must have processed a frame: {metrics}"
+    );
+    assert!(
+        verified_ok >= 1.0,
+        "verification state must be updated: {metrics}"
+    );
 }

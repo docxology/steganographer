@@ -8,8 +8,9 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 `audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
-`hash_chain`, `steganalysis`, `forensics`, `mdct_audio`, `ots_client`,
-`ots_config`, `ots_handler`, `wasm_inspector`.
+`hash_chain`, `steganalysis`, `forensics` (with the `forensics::ooxml`
+container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
+`wasm_inspector`.
 
 ### packet.rs
 
@@ -20,6 +21,10 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
   (including PKT-009 `max_nesting_depth` = 3 and `max_aggregate_nested_bytes`
   = 64 MiB; unknown non-critical fields are preserved, unknown critical
   fields reject)
+- `GenericPacket::decode_nested` — bounded parent-id chain decoder
+  (PKT-009): expands nested packets up to the depth/aggregate limits with
+  cycle detection, returning a `NestedLevel` chain (outermost first) and the
+  innermost logical payload
 - `PacketCodec` — byte codec contract implemented by `GenericPacketCodec` and
   legacy `SignaturePayloadCodec`
 
@@ -62,19 +67,25 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 - `apply` / `reverse` — ChaCha20-Poly1305 encryption and chunked Reed-Solomon
   error correction over a generic packet body, with envelope descriptor + flag
   bookkeeping
+- `apply_with_password` / `reverse_with_password` — PKT-007 password path:
+  derive the AEAD key with Argon2id (`password.rs`), record a critical
+  `TRANSFORM_KDF_ARGON2ID` descriptor (id 5; pinned 27-byte
+  `[salt 16B][memory u32][iterations u32][lanes u8][output u16]` layout)
+  ahead of the AEAD descriptor it feeds; a KDF descriptor without the
+  password fails closed
 - `is_encrypted`, `TransformError`, `DEFAULT_ECC_CHUNK_LEN`, `MAX_ECC_PARITY`
-
-### video.rs
-
-- `VideoFormat` — `Rgb8` (3 bpp), `Bgra8` (4 bpp), `Yuv420` (1.5 bpp)
-- `VideoFrame` — mutable view: `width`, `height`, `stride`, `format`, `data: &mut [u8]`, `frame_index`
-- `VideoStegoModule` — trait with `embed(&mut frame, sig)` and `extract(&frame)` methods
 
 ### audio.rs
 
 - `AudioBuffer` — `channels: u16`, `sample_rate: u32`, `samples: &mut [i16]`, `frame_index: u64`
 - `AudioStegoModule` — trait with `embed(&mut buf, sig)` and `extract(&buf)` methods
 - Helper: `sample_count()`, `duration_secs()`
+
+### video.rs
+
+- `VideoFormat` — `Rgb8` (3 bpp), `Bgra8` (4 bpp), `Yuv420` (1.5 bpp)
+- `VideoFrame` — mutable view: `width`, `height`, `stride`, `format`, `data: &mut [u8]`, `frame_index`
+- `VideoStegoModule` — trait with `embed(&mut frame, sig)` and `extract(&frame)` methods
 
 ### crypto.rs
 
@@ -147,10 +158,34 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 
 ### forensics.rs
 
-- `ForensicScan` — scan result struct with structural + statistical findings
-  and `text_findings: Vec<unicode_text::TextFinding>` (FOR-005 detector IDs)
+- `ForensicScan` — scan result struct with structural + statistical findings,
+  `text_findings: Vec<unicode_text::TextFinding>` (FOR-005 detector IDs), and
+  `container_findings: Vec<ContainerFinding>` (ZIP/OOXML families; empty for
+  non-container inputs). `detected` is set only by content-derived detectors
+  (inline magic, Unicode/text, DOC-002) — statistical results are
+  observations, never verdicts by themselves
+- `detector_registry()` (FOR-001) — static `DetectorInfo` table (`id`,
+  `summary`, `budget`, `fp_limits`, `calibration`) covering the statistical
+  detectors, the text detectors, and the container families; mirrored by
+  `testdata/corpus/manifest.json` + `tests/calibration.rs`
 - `detect_text_stego(data)` — decode text and collect Unicode steganography findings
-- `scan_bytes(data)` — bounded byte-level forensic scan
+- `scan_bytes(data)` — bounded byte-level forensic scan (inline magic → text
+  → ZIP/OOXML container analysis)
+
+### forensics/ooxml.rs
+
+- Dependency-free in-memory ZIP reader (no new dependencies): central
+  directory parse with hostile-input bounds (`CONTAINER_MAX_ENTRIES` = 4096,
+  `CONTAINER_MAX_FINDINGS` = 64, per-entry inflate cap 4 MiB / package cap
+  8 MiB, `CONTAINER_MAX_EOCD_SCAN_BYTES` = 66000); Zip64/multi-disk
+  data-descriptor archives reject with typed errors
+- `analyze_package(data)` — runs the container families over a ZIP-family
+  buffer, never panics (budget violations surface as DOC-001 evidence):
+  `ZIP_TOPOLOGY` inventory (observation only), `DOC-001` package anomalies
+  (duplicate/encrypted entries, oversized claimed sizes, inflate-budget
+  rejections, media entries claiming text), `DOC-002` WordprocessingML
+  concealment in `word/document.xml` (Unicode/text channels + ≥ 8-space
+  XML text-node runs)
 
 ### unicode_text.rs
 

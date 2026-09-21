@@ -5,13 +5,14 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use steganographer_core::encryption::EncryptionKey;
 use steganographer_core::packet::{
-    AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, KERNEL_SPATIAL_LSB,
-    PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
+    AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, TransformDescriptor,
+    KERNEL_SPATIAL_LSB, PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
 };
 use steganographer_core::transforms;
+use steganographer_core::transforms::{parse_kdf_argon2id_params, TRANSFORM_KDF_ARGON2ID};
 use steganographer_core::{
-    AudioSpatialLsb, CarrierEmbedder, CarrierExtractor, EmbeddingConfig, KeyedAudioSpatialLsb,
-    KeyedSpatialLsb, SpatialLsb, TransformContext, DEFAULT_ECC_CHUNK_LEN,
+    Argon2Params, AudioSpatialLsb, CarrierEmbedder, CarrierExtractor, EmbeddingConfig,
+    KeyedAudioSpatialLsb, KeyedSpatialLsb, SpatialLsb, TransformContext, DEFAULT_ECC_CHUNK_LEN,
 };
 
 use crate::media_io;
@@ -32,6 +33,11 @@ pub struct GenericEncodeOptions {
     pub embedding_key: Option<String>,
     pub embedding_key_file: Option<String>,
     pub verify_write: bool,
+    /// Password-path credentials (PKT-007): when set, the packet's AEAD key is
+    /// derived with Argon2id and recorded in a KDF transform descriptor.
+    /// Mutually exclusive with `--encryption-key` / `--encryption-key-file`.
+    pub password: Option<String>,
+    pub password_file: Option<String>,
 }
 
 pub struct GenericDecodeOptions {
@@ -40,6 +46,11 @@ pub struct GenericDecodeOptions {
     pub decryption_key_file: Option<String>,
     pub embedding_key: Option<String>,
     pub embedding_key_file: Option<String>,
+    /// Password-path credentials (PKT-007): derived from the packet's KDF
+    /// descriptor on decode. Mutually exclusive with
+    /// `--decryption-key` / `--decryption-key-file`.
+    pub password: Option<String>,
+    pub password_file: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +72,8 @@ struct GenericEncodeResult {
     mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kdf: Option<KdfInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +96,8 @@ struct GenericDecodeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    kdf: Option<KdfInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ots: Option<OtsInfo>,
 }
 
@@ -92,6 +107,15 @@ struct OtsInfo {
     digest: String,
     method: String,
     timestamp: Option<u64>,
+}
+
+/// PKT-007 KDF descriptor report surfaced in encode/decode output.
+#[derive(Debug, Serialize)]
+pub(crate) struct KdfInfo {
+    algorithm: &'static str,
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u8,
 }
 
 pub fn encode(
@@ -105,6 +129,16 @@ pub fn encode(
     validate_format(format)?;
     validate_kernel(stego_type)?;
     let audio = is_audio_kernel(stego_type);
+    // PKT-007: resolve the password path up front, before any media work,
+    // so conflicting credentials fail fast.
+    let password_bytes = resolve_password(&options.password, &options.password_file)?;
+    if password_bytes.is_some()
+        && (options.encryption_key.is_some() || options.encryption_key_file.is_some())
+    {
+        anyhow::bail!(
+            "--password/--password-file and --encryption-key/--encryption-key-file are mutually exclusive"
+        );
+    }
     let (payload, payload_kind, default_filename) = match (
         options.payload_file.as_deref(),
         options.payload_text.as_deref(),
@@ -164,9 +198,14 @@ pub fn encode(
         &limits,
     )?;
 
-    // Apply opt-in transforms (sign, compress, AEAD encrypt, chunked RS ECC).
+    // Apply opt-in transforms (sign, compress, password-KDF + AEAD encrypt,
+    // chunked RS ECC). The password path (PKT-007) implies encryption.
     let signer = resolve_signing_key(options)?;
-    let encrypt_key = resolve_encryption_key(options, format)?;
+    let encrypt_key = if password_bytes.is_some() {
+        None
+    } else {
+        resolve_encryption_key(options, format)?
+    };
     let ecc_parity = if options.ecc { options.ecc_parity } else { 0 };
     if options.ecc && !(1..=steganographer_core::MAX_ECC_PARITY).contains(&ecc_parity) {
         anyhow::bail!(
@@ -175,23 +214,32 @@ pub fn encode(
             ecc_parity
         );
     }
-    let encrypted = encrypt_key.is_some();
+    let encrypted = encrypt_key.is_some() || password_bytes.is_some();
     let error_corrected = ecc_parity > 0;
     let context = TransformContext {
         packet_id: &packet.envelope.packet_id,
         payload_kind: packet.envelope.payload_kind as u16,
         original_len: packet.envelope.original_len,
     };
-    let (encoded_body, transforms, flags) = transforms::apply(
+    let kdf_credentials =
+        password_bytes
+            .as_ref()
+            .map(|password| transforms::PasswordKdfCredentials {
+                password,
+                params: Argon2Params::default(),
+            });
+    let (encoded_body, transforms, flags) = transforms::apply_with_password(
         &packet.body,
         &context,
         signer.as_ref(),
         options.compress,
+        kdf_credentials.as_ref(),
         encrypt_key.as_ref(),
         ecc_parity,
         DEFAULT_ECC_CHUNK_LEN,
     )
     .map_err(|e| anyhow::anyhow!("transform application failed: {e}"))?;
+    let kdf = kdf_report(&transforms)?;
     packet.body = encoded_body;
     packet.envelope.transforms = transforms;
     packet.locator.flags = flags
@@ -254,6 +302,7 @@ pub fn encode(
         keyed,
         mime_type: options.mime_type.clone(),
         filename: display_filename,
+        kdf,
     };
     print_encode_result(&result, format)?;
     Ok(())
@@ -271,6 +320,16 @@ pub fn decode(
     options: &GenericDecodeOptions,
 ) -> anyhow::Result<()> {
     validate_format(format)?;
+    // PKT-007: resolve the password path up front, before any media work,
+    // so conflicting credentials fail fast.
+    let password_bytes = resolve_password(&options.password, &options.password_file)?;
+    if password_bytes.is_some()
+        && (options.decryption_key.is_some() || options.decryption_key_file.is_some())
+    {
+        anyhow::bail!(
+            "--password/--password-file and --decryption-key/--decryption-key-file are mutually exclusive"
+        );
+    }
     let audio = is_audio_kernel(stego_type);
     let input_path = std::path::Path::new(input);
     let output_path = std::path::Path::new(output);
@@ -332,18 +391,21 @@ pub fn decode(
         )
     })?;
 
-    // Reverse any recorded transforms (AEAD decryption, Reed-Solomon ECC) and
-    // re-verify the recovered logical payload against the envelope digest.
+    // Reverse any recorded transforms (password-KDF + AEAD decryption,
+    // Reed-Solomon ECC) and re-verify the recovered logical payload against
+    // the envelope digest.
     let decrypt_key = resolve_decryption_key(options)?;
+    let kdf = kdf_report(&report.packet.envelope.transforms)?;
     let context = TransformContext {
         packet_id: &report.packet.envelope.packet_id,
         payload_kind: report.packet.envelope.payload_kind as u16,
         original_len: report.packet.envelope.original_len,
     };
-    let payload = transforms::reverse(
+    let payload = transforms::reverse_with_password(
         &report.packet.body,
         &context,
         decrypt_key.as_ref(),
+        password_bytes.as_deref(),
         &report.packet.envelope.transforms,
         report.packet.envelope.original_len,
     )
@@ -393,6 +455,7 @@ pub fn decode(
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
         ots: ots_info,
+        kdf,
     };
     print_decode_result(&result, format)?;
     Ok(())
@@ -403,11 +466,17 @@ pub fn decode(
 ///
 /// `bits` is `None` for auto-detection (1..=4 tried in order) or an explicit
 /// LSB strength; the caller's CLI layer maps `--bits auto` to `None`.
-pub fn run_extract(
+///
+/// When the packet records a KDF descriptor, `password` re-derives the AEAD
+/// key from it. Password and password-file are mutually exclusive.
+#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
+pub fn run_extract_with_password(
     input: &PathBuf,
     output: &PathBuf,
     bits: Option<u8>,
     force: bool,
+    password: Option<String>,
+    password_file: Option<String>,
 ) -> anyhow::Result<()> {
     let output_str = output
         .to_str()
@@ -465,18 +534,21 @@ pub fn run_extract(
             errors.join("; ")
         )
     })?;
-
     // Fail closed on transforms: an encrypted packet cannot be extracted
-    // without the decryption key, so reversal runs keyless and errors out.
+    // without the decryption key or the packet's password, so reversal runs
+    // without key material unless a password was supplied.
+    let password_bytes = resolve_password(&password, &password_file)?;
+    let kdf = kdf_report(&report.packet.envelope.transforms)?;
     let context = TransformContext {
         packet_id: &report.packet.envelope.packet_id,
         payload_kind: report.packet.envelope.payload_kind as u16,
         original_len: report.packet.envelope.original_len,
     };
-    let payload = transforms::reverse(
+    let payload = transforms::reverse_with_password(
         &report.packet.body,
         &context,
         None,
+        password_bytes.as_deref(),
         &report.packet.envelope.transforms,
         report.packet.envelope.original_len,
     )
@@ -494,10 +566,10 @@ pub fn run_extract(
         kind
     );
     println!("Saved to: {}", output_str);
+    print_kdf_line(&kdf);
     println!("BLAKE3 digest: {}", digest);
     Ok(())
 }
-
 /// The final path component of an extract target must be a safe file name;
 /// the caller supplies the directory.
 fn validate_extract_output_name(output: &str) -> anyhow::Result<()> {
@@ -702,6 +774,54 @@ fn resolve_encryption_key(
     Ok(Some(key))
 }
 
+/// Resolve the password-path credentials shared by encode, decode, and
+/// extract (PKT-007). `--password` and `--password-file` are mutually
+/// exclusive; the file variant strips one trailing newline.
+fn resolve_password(
+    password: &Option<String>,
+    password_file: &Option<String>,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    match (password, password_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--password and --password-file are mutually exclusive")
+        }
+        (Some(password), None) => Ok(Some(password.as_bytes().to_vec())),
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| anyhow::anyhow!("Cannot read password file '{path}': {error}"))?;
+            Ok(Some(
+                text.trim_end_matches(['\r', '\n']).as_bytes().to_vec(),
+            ))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Extract the PKT-007 KDF descriptor report from a transform list, if any.
+pub(crate) fn kdf_report(transforms: &[TransformDescriptor]) -> anyhow::Result<Option<KdfInfo>> {
+    for transform in transforms {
+        if transform.algorithm == TRANSFORM_KDF_ARGON2ID {
+            let params = parse_kdf_argon2id_params(&transform.parameters)?;
+            return Ok(Some(KdfInfo {
+                algorithm: "argon2id",
+                memory_kib: params.memory_kib,
+                iterations: params.iterations,
+                lanes: params.lanes,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Plain-text rendering shared by the encode/decode/extract reports.
+fn print_kdf_line(kdf: &Option<KdfInfo>) {
+    if let Some(kdf) = kdf {
+        println!(
+            "KDF: argon2id (m={}, t={}, p={})",
+            kdf.memory_kib, kdf.iterations, kdf.lanes
+        );
+    }
+}
 fn resolve_decryption_key(options: &GenericDecodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
     if !options.decrypt {
         return Ok(None);
@@ -762,6 +882,7 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
             "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
             result.signed, result.compressed, result.encrypted, result.error_corrected
         );
+        print_kdf_line(&result.kdf);
         println!(
             "Placement: {}",
             if result.keyed { "keyed" } else { "sequential" }
@@ -786,6 +907,7 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
             "Transforms: signed={}, compressed={}, encrypted={}, error_corrected={}",
             result.signed, result.compressed, result.encrypted, result.error_corrected
         );
+        print_kdf_line(&result.kdf);
         println!(
             "Placement: {}",
             if result.keyed { "keyed" } else { "sequential" }
@@ -793,4 +915,145 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
         println!("Decoded payload: {}", result.output);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// A small mono S16 PCM WAV carrier: 4096 samples × 1 LSB ≈ 512 bytes of
+    /// packet capacity, comfortably above the password packet size.
+    fn wav_carrier(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..4096u32 {
+            writer.write_sample(((i % 97) as i16) - 48).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn encode_options(password: Option<String>) -> GenericEncodeOptions {
+        GenericEncodeOptions {
+            payload_file: None,
+            payload_text: Some("secret packet payload".to_string()),
+            mime_type: None,
+            filename: None,
+            input_format: None,
+            encrypt: false,
+            encryption_key: None,
+            encryption_key_file: None,
+            ecc: false,
+            ecc_parity: 0,
+            compress: false,
+            signing_key: None,
+            embedding_key: None,
+            embedding_key_file: None,
+            verify_write: false,
+            password,
+            password_file: None,
+        }
+    }
+
+    fn decode_options(password: Option<String>) -> GenericDecodeOptions {
+        GenericDecodeOptions {
+            decrypt: false,
+            decryption_key: None,
+            decryption_key_file: None,
+            embedding_key: None,
+            embedding_key_file: None,
+            password,
+            password_file: None,
+        }
+    }
+
+    #[test]
+    fn password_encode_decode_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("carrier.wav");
+        let stego = dir.path().join("stego.wav");
+        let payload_out = dir.path().join("payload.bin");
+        wav_carrier(&input);
+
+        encode(
+            input.to_str().unwrap(),
+            stego.to_str().unwrap(),
+            "lsb_audio",
+            1,
+            "plain",
+            &encode_options(Some("correct horse battery staple".to_string())),
+        )
+        .unwrap();
+        decode(
+            stego.to_str().unwrap(),
+            payload_out.to_str().unwrap(),
+            "lsb_audio",
+            "1",
+            "plain",
+            None,
+            true,
+            &decode_options(Some("correct horse battery staple".to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&payload_out).unwrap(),
+            b"secret packet payload"
+        );
+    }
+
+    #[test]
+    fn wrong_password_decode_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("carrier.wav");
+        let stego = dir.path().join("stego.wav");
+        let payload_out = dir.path().join("payload.bin");
+        wav_carrier(&input);
+        encode(
+            input.to_str().unwrap(),
+            stego.to_str().unwrap(),
+            "lsb_audio",
+            1,
+            "plain",
+            &encode_options(Some("correct horse battery staple".to_string())),
+        )
+        .unwrap();
+        let error = decode(
+            stego.to_str().unwrap(),
+            payload_out.to_str().unwrap(),
+            "lsb_audio",
+            "1",
+            "plain",
+            None,
+            true,
+            &decode_options(Some("incorrect horse battery staple".to_string())),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("decryption failed"));
+        assert!(!payload_out.exists());
+    }
+
+    #[test]
+    fn password_and_encryption_key_are_mutually_exclusive() {
+        let mut options = encode_options(Some("pw".to_string()));
+        options.encryption_key = Some("00".repeat(32));
+        let error =
+            encode("/dev/null", "/dev/null2", "lsb_audio", 1, "plain", &options).unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn password_file_resolution_strips_trailing_newline() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("pw.txt");
+        std::fs::write(&path, b"carrier password\n").unwrap();
+        let resolved = resolve_password(&None, &Some(path.to_str().unwrap().to_string())).unwrap();
+        assert_eq!(resolved, Some(b"carrier password".to_vec()));
+        assert!(resolve_password(&Some("a".into()), &Some("b".into())).is_err());
+    }
 }

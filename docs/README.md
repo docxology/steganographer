@@ -22,7 +22,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 
 | Document | Description |
 | --- | --- |
-| [Architecture](architecture.md) | System design, four-crate structure, data flow, threading models, dashboard websocket architecture |
+| [Architecture](architecture.md) | System design, five-crate structure, data flow, threading models, dashboard websocket + WebRTC transport architecture |
 | [Security](security.md) | Security model, threat analysis, steganalysis resistance, dashboard security, and hardening guidelines |
 | [Threat Model](threat-model.md) | Adversary model, 10 threat categories (T1–T10), security boundaries, use-case scenarios, and residual risk analysis |
 
@@ -69,9 +69,11 @@ block-beta
     columns 3
     CLI["steganographer-cli\nClap CLI · Config · Logs · Menu"]:3
     GST["steganographer-gst\nGStreamer · AppSink · AppSrc"]:1
-    DASH["steganographer-dashboard\nAxum GUI · WebSocket · QR Overlay"]:1
+    DASH["steganographer-dashboard\nAxum GUI · WebSocket · WebRTC · QR Overlay"]:1
+    WASM["steganographer-wasm\nBrowser-local · wasm-bindgen · wasm32"]:1
     space:1
-    CORE["steganographer-core\nConfig · Crypto · LSB · Overlay · InfoBar · Metrics"]:3
+    space:1
+    CORE["steganographer-core\nConfig · Crypto · LSB · Overlay · InfoBar · Forensics · Metrics"]:3
     style CLI fill:#5c1a1a,stroke:#a33c3c,color:#fff
     style GST fill:#1a3a5c,stroke:#2d6da3,color:#fff
     style DASH fill:#3d1a3d,stroke:#7a3c7a,color:#fff
@@ -99,12 +101,13 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   343 tests (packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. Unicode text detectors, OTS)
-steganographer-core (integ):  123 tests (E2E, pipeline, template, info_bar, signer_backend incl. ML-DSA, encryption, ECC, OTS, golden vectors)
-steganographer-cli (unit):     14 tests (media descriptors/I/O, canonical carrier binding, verify validation/revocation)
-steganographer-cli (integ):    46 tests (legacy/generic round trips, exit-code contract, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode findings, extract command)
-steganographer-dashboard:     52 tests (LiveConfig, DashboardState, router, API, auth, WS origin/token gates, real verification, config validation)
+steganographer-core (unit):   381 tests (packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF incl. Argon2id, transforms incl. TRANSFORM_KDF_ARGON2ID, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. detector registry, OOXML container analysis, Unicode text detectors, nested decode, OTS)
+steganographer-core (integ):  125 tests (E2E, pipeline, template, info_bar, signer_backend incl. ML-DSA, encryption, ECC, OTS, golden vectors, detector calibration)
+steganographer-cli (unit):     22 tests (media descriptors/I/O, canonical carrier binding, verify validation/revocation)
+steganographer-cli (integ):    46 tests (legacy/generic round trips, exit-code contract, config incl. limits/profiles, key files, encryption, Argon2id password path, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode + container findings, extract command)
+steganographer-dashboard:     58 tests (LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation; 8 doc-tests)
 steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
+steganographer-wasm:           9 tests (packet encode/decode, RGB/PCM carriers, forensic scan, decode-limit overrides)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        602 tests, 0 failures
+Total:                        665 tests, 0 failures
 ```

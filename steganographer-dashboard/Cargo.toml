@@ -20,6 +20,9 @@ anyhow = { workspace = true }
 base64 = "0.22"
 rand = { workspace = true }
 subtle = { workspace = true }
+async-trait = "0.1"
+bytes = "1"
+webrtc = "0.21"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -18,9 +18,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-602_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-665_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
-  <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
+  <img src="https://img.shields.io/badge/crates-5-informational?style=flat-square" alt="5 crates">
 </p>
 
 ---
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 602 tests, 0 failures
+cargo test --workspace   # 665 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -129,14 +129,15 @@ cargo run -p steganographer-cli -- dashboard --port 8080 --backend ed25519
 
 ## 🧩 Architecture
 
-Four Rust crates with strict dependency layering:
+Five Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
 │  steganographer-cli       (binary)           │  Clap CLI: 15 subcommands
 ├──────────────────────────────────────────────┤
-│  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
+│  steganographer-dashboard (web server)       │  Axum + WebSocket/WebRTC, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
+│  steganographer-wasm      (browser facade)    │  wasm-bindgen, wasm32 target
 ├──────────────────────────────────────────────┤
 │  steganographer-core      (algorithms)       │  Pure Rust, 0 system deps
 └──────────────────────────────────────────────┘
@@ -144,10 +145,11 @@ Four Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics | 407 | [Architecture](docs/architecture.md) |
-| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI | 23 | [API Reference](docs/api-reference.md) |
-| **[steganographer-gst](steganographer-gst/)** | GStreamer integration: `stegovideo`/`stegoaudio` native elements, cdylib plugin | 15 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 37 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics (detector registry + OOXML container analysis) | 506 | [Architecture](docs/architecture.md) |
+| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI (WebSocket + WebRTC data-channel transport) | 58 | [API Reference](docs/api-reference.md) |
+| **[steganographer-gst](steganographer-gst/)** | GStreamer integration: `stegovideo`/`stegoaudio` native elements, cdylib plugin | 24 | [GStreamer Guide](docs/gstreamer.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 68 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-wasm](steganographer-wasm/)** | Browser-local facade: packet embed/decode, RGB/PCM carriers, forensic scan (`wasm32`) | 9 | [Platform Expansion Plan](docs/plans/steganography-platform/README.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
 
@@ -196,6 +198,15 @@ steganographer decode --input packed.png --output recovered.pdf --bits auto
 # Generic packet alpha: extract the raw embedded payload from a carrier
 steganographer extract --input packed.png --output payload.bin --bits auto
 
+# Password-protected packet: encrypt with an Argon2id-derived key (PKT-007)
+steganographer encode --input cover.png --output packed.png \
+  --payload-file report.pdf --password-file secret.txt --bits 2
+steganographer decode --input packed.png --output recovered.pdf --bits auto \
+  --password-file secret.txt
+
+# Forensic scan with a named config profile (SUR-006)
+steganographer scan --input ./exports --profile strict
+
 # Validate a TOML configuration file
 steganographer config check
 
@@ -243,21 +254,22 @@ bits = 1
 
 ## ✅ Tests
 
-602 tests across 4 crates — all passing:
+665 tests across 5 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 343 | `steganographer-core/src/*.rs` |
-| Core integration tests | 123 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` + `tests/golden_vectors.rs` |
-| CLI unit + integration tests | 60 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` + `tests/cli_packet_tests.rs` |
-| Dashboard tests | 52 | `steganographer-dashboard/tests/dashboard_tests.rs` + doc-tests |
-| GStreamer unit + integration + doc-tests | 24 | `steganographer-gst/src/` + `steganographer-gst/tests/` + doc-test |
-| **Total** | **602** | **0 failures** |
+| Core unit tests | 381 | `steganographer-core/src/*.rs` |
+| Core integration tests | 125 | `tests/integration_tests.rs` (80) + `tests/ots_integration_tests.rs` (37) + `tests/golden_vectors.rs` (6) + `tests/calibration.rs` (2) |
+| CLI unit + integration tests | 68 | 22 unit in `steganographer-cli/src/` + 46 integration in `tests/cli_integration_tests.rs` (39) + `tests/cli_packet_tests.rs` (7) |
+| Dashboard tests | 58 | 50 tests in `steganographer-dashboard/tests/dashboard_tests.rs` + 8 doc-tests |
+| GStreamer unit + integration + doc-tests | 24 | 14 unit + 9 integration + 1 doc-test |
+| WASM integration tests | 9 | `steganographer-wasm/tests/` |
+| **Total** | **665** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 602 tests
-cargo test -p steganographer-core     # Core only (466 tests)
-cargo test -p steganographer-dashboard # Dashboard only (23 tests)
+cargo test --workspace                # All 665 tests
+cargo test -p steganographer-core     # Core only (506 tests)
+cargo test -p steganographer-dashboard # Dashboard only (58 tests)
 ```
 
 ---
@@ -269,6 +281,9 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | **macOS** | `avfvideosrc` | `osxaudiosrc` | [Platforms](docs/platforms.md) |
 | **Linux** | `v4l2src` | `pulsesrc` / `pipewiresrc` | [Platforms](docs/platforms.md) |
 | **Docker** | Headless | Headless | [Platforms](docs/platforms.md) |
+| **wasm32** | — (byte-buffer facade only) | — | [Platform Expansion Plan](docs/plans/steganography-platform/README.md) |
+
+> 🌐 `steganographer-wasm` targets `wasm32-unknown-unknown` for browser-local steganography (packet encode/decode, RGB/PCM carriers, forensic scan) — no network, no filesystem.
 
 > ⚠️ GStreamer is optional. The core crate and offline encode/verify commands work without it.
 

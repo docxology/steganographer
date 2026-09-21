@@ -218,6 +218,8 @@ pub fn run_with_key(
             video: None,
             audio: None,
             ots: None,
+            limits: None,
+            profiles: None,
         }
     });
 

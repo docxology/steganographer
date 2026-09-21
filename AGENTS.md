@@ -8,10 +8,11 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed + interleaved placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate with public-key-only `MlDsaVerifier`/`HybridVerifier`, Hybrid), metrics, config, frequency-domain kernels, encryption (packet-id-derived AEAD nonce), ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics + unicode-text detectors (FOR-005), and WASM inspection facade (32 modules + `lib.rs`) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed + interleaved placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate with public-key-only `MlDsaVerifier`/`HybridVerifier`, Hybrid), metrics, config, frequency-domain kernels, encryption (packet-id-derived AEAD nonce), ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms (incl. the `TRANSFORM_KDF_ARGON2ID` password-KDF transform, PKT-007), steganalysis, forensics with the stable detector registry + calibration corpus (FOR-001) and OOXML/ZIP container analysis (DOC-001/DOC-002), bounded nested decode (`decode_nested`, PKT-009), unicode-text detectors (FOR-005), and WASM inspection facade (31 modules + `forensics/ooxml` + `lib.rs`) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines + native `stegovideo` (keyed/sequential LSB video element) and `stegoaudio` (S16 PCM audio element) with cdylib plugin packaging (6 modules + integration tests) |
 | `steganographer-cli/` | Crate | CLI binary: 15 Clap subcommands — video, audio, encode, decode, extract, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (10 modules) |
-| `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 7 static assets) |
+| `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, optional WebRTC data-channel transport (WHIP-style `/api/webrtc/offer`), dynamic LSB, signature preview (3 modules + 11 static assets) |
+| `steganographer-wasm/` | Crate | Browser-facing facade over core: packet encode/decode, RGB + PCM S16LE embed/extract, forensic scan, decode-limits JSON — wasm-bindgen exports cfg-gated to `wasm32` (3 modules + integration tests) |
 | `config/` | Config | Example TOML configuration files |
 | `docs/` | Docs | 17 user-facing guides + 7 steganography-platform planning specifications (+ `README.md` / `AGENTS.md`) |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
@@ -19,9 +20,8 @@
 
 ## File Counts
 
-- **Root files**: 18 (`.dockerignore`, `.gitattributes`, `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `deny.toml`, `Dockerfile`, `FUNDING.md`, `LICENSE`, `README.md`, `release.toml`, `run.sh`, `rust-toolchain.toml`, `steganographer.toml`, `TODO.md`)
-- **Source files**: 60 Rust files (49 `src/` modules + 5 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 7 static web assets across 4 crates
-- **Tests**: 343 core unit + 123 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs`) + 14 CLI unit + 46 CLI integration (39 in `cli_integration_tests.rs` + 7 in `cli_packet_tests.rs`) + 44 dashboard tests + 8 dashboard doc-tests + 14 GStreamer unit + 9 GStreamer integration + 1 GStreamer doc-test = **602 passing tests** — **canonical count home is this line** (as of 2026-09-20; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
+- **Source files**: 70 Rust files (55 `src/` modules + 9 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 11 static web assets across 5 crates
+- **Tests**: 381 core unit + 125 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs` + 2 in `calibration.rs`) + 22 CLI unit + 46 CLI integration (39 in `cli_integration_tests.rs` + 7 in `cli_packet_tests.rs`) + 50 dashboard tests + 8 dashboard doc-tests + 14 GStreamer unit + 9 GStreamer integration + 1 GStreamer doc-test + 9 WASM integration = **665 passing tests** — **canonical count home is this line** (as of 2026-09-21; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
 - **Doc files**: 27 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications + `manuscript/MANUSCRIPT_STATUS.md`) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -30,8 +30,7 @@
 ```bash
 cargo build --workspace
 cargo test -p steganographer-core              # core crate only (count: canonical Tests line above)
-cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 602 total tests
+cargo test --workspace                         # 665 total tests
 ./run.sh                                       # Interactive menu
 ./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
 ./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo

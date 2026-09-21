@@ -70,6 +70,12 @@ let awaitingSignResponse = false;
 let frameCounter = 0;
 let selectedCameraDeviceId = '';
 
+// WebRTC transport state (active when liveConfig.transport === 'webrtc')
+let webrtcPeer = null;
+let webrtcDc = null;
+let webrtcReconnectAttempts = 0;
+const WEBRTC_MAX_RECONNECT_ATTEMPTS = 3;
+
 // Frame diff viewer state
 let diffViewerEnabled = false;
 let diffOverlayEnabled = true;
@@ -100,6 +106,7 @@ let liveConfig = {
     height: 480,
     qrScale: 10,        // % of video width (10=small corner, 100=full frame)
     resolution: '640x480',
+    transport: 'websocket',
 };
 
 // ─── DOM References ───────────────────────────────────────────────────────────
@@ -139,6 +146,7 @@ const el = {
     cfgQrScale: document.getElementById('cfg-qr-scale'),
     cfgQrScaleVal: document.getElementById('cfg-qr-scale-val'),
     cfgResolution: document.getElementById('cfg-resolution'),
+    cfgTransport: document.getElementById('cfg-transport'),
     // Stego info
     infoPayloadSize: document.getElementById('info-payload-size'),
     infoHashAlgo: document.getElementById('info-hash-algo'),
@@ -420,7 +428,10 @@ function startSigningInterval() {
 }
 
 function sendFrameForSigning() {
-    if (!cameraActive || !encodeWs || encodeWs.readyState !== WebSocket.OPEN || awaitingSignResponse) return;
+    const dcOpen = webrtcDc && webrtcDc.readyState === 'open';
+    if (!cameraActive || awaitingSignResponse) return;
+    if (liveConfig.transport === 'webrtc' && !dcOpen) return;
+    if (liveConfig.transport === 'websocket' && (!encodeWs || encodeWs.readyState !== WebSocket.OPEN)) return;
     const v = el.webcamVideo;
     if (v.readyState < 2) return;
     const c = document.createElement('canvas');
@@ -436,12 +447,123 @@ function sendFrameForSigning() {
 
     el.signIndicator.classList.remove('hidden');
     c.toBlob((blob) => {
-        if (blob && encodeWs && encodeWs.readyState === WebSocket.OPEN) {
-            awaitingSignResponse = true;
-            blob.arrayBuffer().then(buf => encodeWs.send(buf));
-        }
+        if (!blob) return;
+        blob.arrayBuffer().then(buf => {
+            if (liveConfig.transport === 'webrtc' && webrtcDc && webrtcDc.readyState === 'open') {
+                awaitingSignResponse = true;
+                webrtcDc.send(buf);
+            } else if (encodeWs && encodeWs.readyState === WebSocket.OPEN) {
+                awaitingSignResponse = true;
+                encodeWs.send(buf);
+            }
+        });
     }, 'image/jpeg', JPEG_QUALITY);
 }
+
+// ─── WebRTC (WHIP-style signaling + data channel) ────────────────────────────
+
+/// Wait (non-trickle) until ICE gathering completes so the offer carries the
+/// full candidate set — the server answers in a single HTTP request.
+function gatherIceComplete(pc, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        const timer = setTimeout(() => { cleanup(); resolve(); }, timeoutMs);
+        function onGathering() {
+            if (pc.iceGatheringState === 'complete') { cleanup(); resolve(); }
+        }
+        function cleanup() {
+            clearTimeout(timer);
+            pc.removeEventListener('icegatheringstatechange', onGathering);
+        }
+        pc.addEventListener('icegatheringstatechange', onGathering);
+    });
+}
+
+/// Negotiate a WebRTC data channel against POST /api/webrtc/offer and use it
+/// for the encode path. Message shapes on the data channel are identical to
+/// the WebSocket handlers (binary JPEG in, `encoded_frame`/`decoded_frame`
+/// JSON out), so the same UI message handlers render both transports.
+async function connectEncodeWebrtc() {
+    try {
+        console.log('[encode] WebRTC negotiating…');
+        const pc = new RTCPeerConnection();
+        const dc = pc.createDataChannel('frames');
+        dc.binaryType = 'arraybuffer';
+        webrtcPeer = pc;
+        webrtcDc = dc;
+
+        dc.onopen = () => {
+            console.log('[encode] WebRTC data channel open');
+            webrtcReconnectAttempts = 0;
+            updateConnectionStatus(true);
+        };
+        dc.onmessage = (e) => {
+            let msg = null;
+            try { msg = JSON.parse(e.data); } catch (err) { }
+            if (!msg || !msg.type) return;
+            // Data-channel replies carry the exact WS message shapes.
+            if (msg.type === 'encoded_frame') handleEncodeMessage(msg);
+            else if (msg.type === 'decoded_frame') handleDecodeMessage(msg);
+            else if (msg.type === 'error') console.warn('[encode]', msg.message);
+        };
+        dc.onclose = () => {
+            console.log('[encode] WebRTC data channel closed');
+            updateConnectionStatus(false);
+            webrtcDc = null;
+            scheduleEncodeReconnect();
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await gatherIceComplete(pc);
+
+        const r = await fetch('/api/webrtc/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }),
+        });
+        if (!r.ok) throw new Error(`signaling failed: HTTP ${r.status}`);
+        const answer = await r.json();
+        await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+        console.log('[encode] WebRTC answer applied');
+    } catch (err) {
+        console.warn('[encode] WebRTC negotiation failed:', err);
+        teardownWebrtc();
+        if (webrtcReconnectAttempts < WEBRTC_MAX_RECONNECT_ATTEMPTS) {
+            webrtcReconnectAttempts++;
+            setTimeout(connectEncodeWebrtc, WS_RECONNECT_DELAY_MS);
+        } else {
+            // Give up on WebRTC: fall back to the WebSocket transport.
+            console.warn('[encode] falling back to WebSocket transport');
+            liveConfig.transport = 'websocket';
+            if (el.cfgTransport) el.cfgTransport.value = 'websocket';
+            connectEncodeWs();
+        }
+    }
+}
+
+function teardownWebrtc() {
+    if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
+    if (webrtcPeer) { try { webrtcPeer.close(); } catch (e) { } webrtcPeer = null; }
+}
+
+/// Connect the video encode path using the configured transport.
+function connectEncode() {
+    if (liveConfig.transport === 'webrtc') {
+        teardownWebrtc();
+        if (encodeWs) { encodeWs.onclose = null; encodeWs.close(); encodeWs = null; }
+        connectEncodeWebrtc();
+    } else {
+        teardownWebrtc();
+        connectEncodeWs();
+    }
+}
+
+/// Reconnect the encode path on transport drop (honors the active transport).
+function scheduleEncodeReconnect() {
+    setTimeout(connectEncode, WS_RECONNECT_DELAY_MS);
+}
+
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectEncodeWs() {
@@ -633,6 +755,16 @@ function setupConfigControls() {
         });
     }
 
+    // Video transport dropdown (WebSocket ↔ WebRTC)
+    if (el.cfgTransport) {
+        el.cfgTransport.addEventListener('change', () => {
+            liveConfig.transport = el.cfgTransport.value;
+            pushConfigToServer();
+            // Reconnect the encode path with the newly selected transport.
+            connectEncode();
+        });
+    }
+
     updateStegoInfo();
 }
 
@@ -735,6 +867,12 @@ async function fetchConfig() {
         if (c.width && c.height) {
             el.footerResolutionValue.textContent = `${c.width}×${c.height}`;
             liveConfig.width = c.width; liveConfig.height = c.height;
+        }
+        if (c.transport && c.transport !== liveConfig.transport) {
+            liveConfig.transport = c.transport;
+            if (el.cfgTransport) el.cfgTransport.value = c.transport;
+            // Reconnect the encode path with the server's transport choice.
+            connectEncode();
         }
         updateStegoInfo();
     } catch (e) { }
@@ -1178,13 +1316,12 @@ function setupCameraSelector() {
     }
 }
 
-
 function init() {
     ingestAuthToken();
     console.log('Steganographer Dashboard initializing...');
     initThemeToggle();
     fetchConfig();
-    connectEncodeWs();
+    connectEncode();
     connectDecodeWs();
     detectMetaMask();
     setupConfigControls();

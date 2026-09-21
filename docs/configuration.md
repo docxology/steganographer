@@ -2,7 +2,7 @@
 
 ## Overview
 
-Steganographer uses TOML configuration files to define pipeline behavior. The configuration is hierarchical with four main sections: `global`, `video` (with `pipeline`, `input`, `output`, `stego`), `audio`, and the optional `ots` (OpenTimestamps attestation).
+Steganographer uses TOML configuration files to define pipeline behavior. The configuration is hierarchical with four main sections: `global`, `video` (with `pipeline`, `input`, `output`, `stego`), `audio`, plus the optional `ots` (OpenTimestamps attestation), `[limits]` (packet decode ceilings), and `[profiles.<name>]` (named limits + scanner presets).
 
 The `run.sh` interactive menu reads these values to construct GStreamer pipelines, and the Rust CLI uses them for module configuration.
 
@@ -227,6 +227,59 @@ The dashboard reads the same block: with `enabled = true` it serves an OTS
 panel (`/ots.js`, `/ots/status`) and Bearer-authenticated `/ots/stamp` and
 `/ots/verify` endpoints. See [OTS Integration](ots-integration.md).
 
+---
+
+### `[limits]`
+
+Optional. Resource ceilings for generic packet decoding, mirroring
+`DecodeLimits` in `steganographer-core::packet`. Every field is optional —
+absent fields keep the built-in defaults.
+
+| Key | Type | Built-in default | Description |
+| --- | --- | --- | --- |
+| `max_packet_len` | usize | 16 MiB + 16 KiB + locator | Maximum serialized packet size |
+| `max_body_len` | usize | 16 MiB | Maximum packet body size |
+| `max_original_len` | usize | 16 MiB | Maximum declared logical payload length (checked before any transform is reversed — blocks DEFLATE bombs) |
+| `max_field_len` | usize | 8 KiB | Maximum envelope field length |
+| `max_extensions` | usize | 64 | Maximum extension fields per envelope |
+| `max_nesting_depth` | usize | 3 | PKT-009 maximum parent-id chain depth |
+| `max_aggregate_nested_bytes` | usize | 64 MiB | PKT-009 maximum aggregate bytes across a nested chain |
+
+Validation (via `config check` or profile resolution): every field must be
+greater than 0, and `max_body_len` must not exceed `max_packet_len`.
+
+### `[profiles.<name>]`
+
+Optional named profiles (SUR-006). A profile bundles a `[limits]` override
+table and a `scan.detectors` scanner-knob set; `steganographer scan
+--profile <name>` applies it, and `config check` validates every profile.
+Known `scan.detectors` IDs: `statistical`, `magic`, `ZERO_WIDTH`,
+`VARIATION_SELECTORS`, `BIDI_CONTROLS`, `WHITESPACE_ANOMALY`,
+`HOMOGLYPH_SUSPECT`. Container findings (`ZIP_TOPOLOGY`, DOC-001, DOC-002)
+have no detector knob and always contribute.
+
+```toml
+[limits]
+max_body_len = 1048576
+max_nesting_depth = 2
+
+[profiles.strict]
+[profiles.strict.limits]
+max_body_len = 4096
+max_packet_len = 8192
+max_nesting_depth = 1
+
+[profiles.strict.scan]
+detectors = ["ZERO_WIDTH", "statistical"]
+
+[profiles.loose]
+[profiles.loose.scan]
+detectors = ["magic"]
+```
+
+An unknown `--profile` name, an empty `scan.detectors` set, or an unknown
+detector ID is a usage error (exit 2).
+
 ## Complete Example
 
 ```toml
@@ -275,6 +328,15 @@ pipeline = ["lsb_signature"]
 [audio.stego.lsb_signature]
 bits = 1
 key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+# Optional packet-decode ceilings and named scan profiles (see above):
+# [limits]
+# max_body_len = 1048576
+# [profiles.strict]
+# [profiles.strict.limits]
+# max_body_len = 4096
+# [profiles.strict.scan]
+# detectors = ["ZERO_WIDTH", "statistical"]
 ```
 
 ## Minimal Configs

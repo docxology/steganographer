@@ -318,6 +318,22 @@
                             </select>
                         </div>
                     </div>
+                    <!-- Video Transport -->
+                    <div class="config-row">
+                        <span class="config-label">Transport
+                            <span class="help-icon">?<span class="help-tooltip">How JPEG frames travel to the
+                                    server. "WebSocket" is the default `/ws/encode` path. "WebRTC" negotiates a
+                                    data channel via /api/webrtc/offer (WHIP-style, one HTTP request) and streams
+                                    frames over it — lower latency on localhost, automatic WebSocket fallback if
+                                    negotiation fails.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="cfg-transport" aria-label="Video Transport">
+                                <option value="websocket" selected>WebSocket</option>
+                                <option value="webrtc">WebRTC (data channel)</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Stego Info -->

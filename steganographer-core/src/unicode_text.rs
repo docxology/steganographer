@@ -29,6 +29,17 @@ pub const WHITESPACE_ANOMALY: &str = "WHITESPACE_ANOMALY";
 /// Stable detector ID: non-ASCII characters with strong ASCII confusables.
 pub const HOMOGLYPH_SUSPECT: &str = "HOMOGLYPH_SUSPECT";
 
+/// All stable text detector IDs, in [`crate::forensics::detector_registry`]
+/// order (FOR-001 registry integration; the calibration corpus and the
+/// registry reference these strings).
+pub const TEXT_DETECTOR_IDS: &[&str] = &[
+    ZERO_WIDTH,
+    VARIATION_SELECTORS,
+    BIDI_CONTROLS,
+    WHITESPACE_ANOMALY,
+    HOMOGLYPH_SUSPECT,
+];
+
 /// Maximum input scanned, in bytes. Inputs longer than this are truncated to
 /// their first [`MAX_TEXT_SCAN_BYTES`] bytes (cut at a char boundary) before
 /// analysis, mirroring the bounded-scan budget of [`crate::forensics`].

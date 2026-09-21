@@ -7,7 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = []
+default = ["ots"]
+# `ots` enables the OpenTimestamps client (`ots_client`/`ots_handler`), which
+# needs an HTTP client. It is on by default so the workspace keeps full
+# functionality; build with `--no-default-features` for a network-free core
+# that also compiles for `wasm32-unknown-unknown`.
+ots = ["dep:reqwest"]
 ethereum = ["k256"]
 
 [dependencies]
@@ -29,8 +34,9 @@ qrcode = "0.14"
 chrono = "0.4"
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 flate2 = "1"
-# Async HTTP client for the OpenTimestamps attestation REST API.
-reqwest = { workspace = true }
+# HTTP client for the OpenTimestamps attestation REST API (`ots_client`).
+# Optional: only pulled in by the `ots` feature (default on).
+reqwest = { workspace = true, optional = true }
 ml-dsa = { workspace = true }
 zeroize = { workspace = true }
 

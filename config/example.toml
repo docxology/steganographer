@@ -116,3 +116,31 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 # interval_secs = 300             # minimum seconds between stamps
 # proof_dir = "ots_proofs"        # directory for .ots proof files
 # timeout_secs = 30               # HTTP request timeout
+
+# ─── Packet Decode Limits (optional) ─────────────────────────────────────────
+#
+# Resource ceilings for generic packet decoding (steganographer-core DecodeLimits).
+# Every field is optional; absent fields keep the built-in defaults.
+# Validate with: steganographer config check
+# [limits]
+# max_packet_len = 16843216        # serialized packet size (default 16 MiB + 16 KiB + locator)
+# max_body_len = 16777216          # packet body size (default 16 MiB)
+# max_original_len = 16777216      # declared logical payload length (blocks DEFLATE bombs)
+# max_field_len = 8192             # envelope field length
+# max_extensions = 64              # extension fields per envelope
+# max_nesting_depth = 3            # PKT-009 parent-id chain depth
+# max_aggregate_nested_bytes = 67108864  # PKT-009 aggregate nested bytes
+
+# ─── Named Scan Profiles (optional, SUR-006) ─────────────────────────────────
+#
+# Profiles bundle a [limits] override table and a scan.detectors selection;
+# apply with: steganographer scan --input <PATH> --profile <name>
+# Known detector IDs: statistical, magic, ZERO_WIDTH, VARIATION_SELECTORS,
+# BIDI_CONTROLS, WHITESPACE_ANOMALY, HOMOGLYPH_SUSPECT. Container findings
+# (ZIP_TOPOLOGY, DOC-001, DOC-002) always contribute.
+# [profiles.strict]
+# [profiles.strict.limits]
+# max_body_len = 4096
+# max_packet_len = 8192
+# [profiles.strict.scan]
+# detectors = ["ZERO_WIDTH", "statistical"]

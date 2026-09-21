@@ -174,7 +174,7 @@ flowchart LR
 | Non-guarantee | Reason |
 | --- | --- |
 | **Tamper prevention** | Media can still be modified — modifications are just detectable |
-| **Covert channels** | LSB embedding is detectable by statistical steganalysis at high bit counts |
+| **Covert channels** | LSB embedding is detectable by statistical steganalysis at high bit counts — note that the project's own `scan` statistical detectors (chi-squared, sample-pairs, RS) are *observations* with documented false-positive limits (`detector_registry()`, FOR-001); only content-derived evidence (inline magic, Unicode/text findings, DOC-002 WordprocessingML concealment) sets the `detected` verdict. Container/OOXML findings (`ZIP_TOPOLOGY`, DOC-001, DOC-002) surface package-level concealment within bounded hostile-input budgets |
 | **Compression survival (LSB)** | Pure LSB data is destroyed by lossy compression (JPEG, H.264, MP3) — DCT and spread-spectrum modules improve robustness |
 | **Key management** | The system generates keys but does not manage their lifecycle |
 

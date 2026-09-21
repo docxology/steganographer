@@ -8,6 +8,8 @@ Integration tests for the steganographer-core crate.
 | ------ | ------- | ------- | ------------- |
 | `integration_tests.rs` | 80 | ~1900 | Cross-module E2E, crypto, LSB, config, overlay, template, info_bar, metrics, signer_backend, encryption, ECC, DCT, spread-spectrum, adaptive, KDF, hash-chain, steganalysis, multi-frame, WASM, and stress tests |
 | `ots_integration_tests.rs` | 37 | ~450 | OpenTimestamps client, config, and handler tests |
+| `golden_vectors.rs` | 6 | — | Alpha-provisional packet/placement/carrier golden vectors with SHA-256 sidecars + immutability drift gate (owner materializes with `-- --ignored`) |
+| `calibration.rs` | 2 | — | FOR-001 detector calibration corpus outcomes (`testdata/corpus/manifest.json`) |
 
 ## Test Categories (`integration_tests.rs`)
 
@@ -41,4 +43,6 @@ Integration tests for the steganographer-core crate.
 ```bash
 cargo test -p steganographer-core --test integration_tests
 cargo test -p steganographer-core --test ots_integration_tests
+cargo test -p steganographer-core --test golden_vectors
+cargo test -p steganographer-core --test calibration
 ```

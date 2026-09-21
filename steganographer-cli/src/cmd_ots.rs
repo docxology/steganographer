@@ -79,6 +79,8 @@ pub fn stamp(
             video: None,
             audio: None,
             ots: None,
+            limits: None,
+            profiles: None,
         }
     });
 
@@ -250,6 +252,8 @@ pub fn verify(
             video: None,
             audio: None,
             ots: None,
+            limits: None,
+            profiles: None,
         }
     });
 

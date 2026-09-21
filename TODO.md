@@ -211,3 +211,60 @@ clippy `-D warnings` clean across the workspace.
       required per backlog (unchanged).
 
 
+---
+
+## 🔁 2026-09-21 Continuation Round — forensics registry, OOXML, WASM, WebRTC, password path
+
+Workspace **602 → 665 tests** (`./scripts/status.sh --check` canonical line in
+root `AGENTS.md`; core 506 = 381 unit + 125 integration, CLI 68, dashboard 58,
+GST 24, WASM 9).
+
+### Landed
+
+- [x] **Argon2id password-KDF transform (PKT-007)** — `apply_with_password` /
+      `reverse_with_password` + critical `TRANSFORM_KDF_ARGON2ID` descriptor;
+      `encode`/`decode`/`extract` gain `--password`/`--password-file`
+      (mutually exclusive with explicit keys).
+- [x] **Full bounded nested decode (PKT-009)** —
+      `GenericPacket::decode_nested` expands parent-id chains with depth (3) /
+      aggregate (64 MiB) limits and cycle detection.
+- [x] **Detector registry + calibration corpus (FOR-001, QUA calibration)** —
+      `detector_registry()` documents every scan detector (IDs, budgets,
+      false-positive limits, calibration mapping); `testdata/corpus/` +
+      `tests/calibration.rs` pin outcomes.
+- [x] **OOXML/WordprocessingML container scanning (DOC-001/DOC-002 slice)** —
+      dependency-free `forensics/ooxml` ZIP reader with hostile-input budgets;
+      `scan_bytes` reports `container_findings`; `scan` CLI surfaces them.
+      Zero new dependencies.
+- [x] **SUR-006 profiles/`[limits]`** — optional `[limits]` +
+      `[profiles.<name>]` (`limits` + `scan.detectors`) TOML tables;
+      `config check` validates them; `scan --profile <name>` applies them.
+- [x] **Scan symlink policy** — top-level symlinked inputs rejected by
+      default; `--follow-input-symlink` opts in; `--profile` added.
+- [x] **steganographer-wasm crate (WASM-001)** — browser-local facade
+      (packet encode/decode, RGB + PCM S16LE carriers, forensic scan,
+      decode-limits JSON), cfg-gated to `wasm32`; core `ots`/`reqwest` and
+      `ethereum` features off. 9 native integration tests.
+- [x] **WebRTC dashboard transport** — WHIP-style `POST /api/webrtc/offer`
+      (auth-gated, non-trickle ICE) + `LiveConfig.transport`
+      (`websocket` default | `webrtc`); data-channel media reuses the shared
+      sign → embed → verify pipeline and WS size caps; automatic WebSocket
+      fallback; peer-connection reaper. In-process two-PeerConnection tests
+      prove signaling + the real endpoint round trip.
+
+### Remaining (owner-gated / measurement)
+
+- [ ] **JSON v1 envelope (SUR-003)** — schema v1 publication needs owner
+      sign-off; exit codes landed 2026-09-20.
+- [ ] **DOC-003 / DOC-004** — pptx/xlsx deep analysis (headers/footers,
+      embedded media) and PDF parser evaluation are owner-gated.
+- [ ] **Learned watermarking encoder** — owner intent required per backlog
+      (training data licensing, model size budget); unchanged.
+- [ ] **WebRTC browser-side latency/fps measurement** — the transport is
+      landed and in-process tests prove the pipeline; measuring ≥ 15 fps
+      720p / < 500 ms end-to-end latency on localhost is now possible via a
+      headless Chromium run against the dashboard and is owner-run.
+- [ ] **Golden-vector freeze** — owner materializes
+      `cargo test -p steganographer-core --test golden_vectors -- --ignored`
+      (alpha-provisional corpus, unchanged).
+
