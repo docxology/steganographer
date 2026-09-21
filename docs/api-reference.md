@@ -631,18 +631,26 @@ pub struct LiveConfig {
     pub hash_algorithm: String,   // "blake3", "sha256", "sha3-256" (camelCase: hashAlgorithm)
     pub encrypt: bool,            // Enable payload encryption (camelCase: encrypt)
     pub ecc: bool,                // Enable error correction (camelCase: ecc)
+    pub transport: Transport,     // Live video feed transport: "websocket" (default) or "webrtc"
 }
 ```
 
+`Transport` is a serde enum: `websocket` streams JPEG frames over the
+`/ws/encode` WebSocket (default); `webrtc` negotiates a WebRTC data channel
+through `POST /api/webrtc/offer` (WHIP-style) and streams the same
+`encoded_frame`/`decoded_frame` JSON messages over it, so the same UI handlers
+render both transports. Unknown transport values are rejected at parse time.
+The audio feed always uses WebSocket.
+
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
-| `default` | `fn default() -> Self` | opacity=1.0, lsb_bits=1, ed25519, "CONFIDENTIAL", 1000ms, qr_scale=10%, "640x480", "lsb", "blake3", no encryption, no ECC |
+| `default` | `fn default() -> Self` | opacity=1.0, lsb_bits=1, ed25519, "CONFIDENTIAL", 1000ms, qr_scale=10%, "640x480", "lsb", "blake3", no encryption, no ECC, transport websocket |
 
 `POST /api/config` validates a `LiveConfig` before applying it:
-`lsb_bits` must be 1–4, `opacity` must be within 0.0–1.0, and
-`sign_rate_ms` must be ≥ 50 (avoids a busy loop). The first violation
-returns HTTP 400 with a user-facing message; a wrong `Authorization`
-header returns HTTP 401.
+`lsb_bits` must be 1–4, `opacity` must be within 0.0–1.0,
+`sign_rate_ms` must be ≥ 50 (avoids a busy loop), and `transport` must be
+`websocket` or `webrtc`. The first violation returns HTTP 400 with a
+user-facing message; a wrong `Authorization` header returns HTTP 401.
 
 ### `DashboardState`
 
@@ -685,9 +693,12 @@ signature covers — real verification, not a "payload found" echo.
 > **Security:**
 >
 > - **POST routes** (`/api/config`, `/api/metrics/reset`, `/ots/stamp`,
->   `/ots/verify`) require an `Authorization: Bearer <token>` header when
->   `auth_token` is set in `DashboardState` (constant-time comparison). If
->   `auth_token` is `None` (local-only mode), auth is disabled.
+>   `/ots/verify`, `/api/webrtc/offer`) require an `Authorization: Bearer
+>   <token>` header when `auth_token` is set in `DashboardState`
+>   (constant-time comparison). If `auth_token` is `None` (local-only mode),
+>   auth is disabled. The WebRTC signaling POST needs no Origin check: a POST
+>   carries no ambient credentials and the response is unreadable cross-origin
+>   without CORS headers.
 > - **WebSocket upgrades** pass a dedicated gate (CORS does not apply to WS):
 >   cross-origin `Origin` headers are rejected with HTTP 403 unless the origin
 >   host is loopback (`127.0.0.1`, `::1`, `localhost`) or matches the request's
@@ -714,15 +725,13 @@ signature covers — real verification, not a "payload found" echo.
 | GET | `/ws/audio/decode` | `ws_audio_decode_handler` | Audio decode WebSocket (extract + real signature verification) |
 | GET | `/api/version` | `api_version` | Version, crate name, and `signature_payload_size` as JSON |
 | GET | `/api/metrics` | `api_metrics` | Live pipeline metrics as JSON |
-| GET | `/api/config` | `api_config_get` | Current config + identity as JSON |
-| POST | `/api/config` | `api_config_post` | Update live config from dashboard UI (Bearer auth; validated) |
-| POST | `/api/metrics/reset` | `api_metrics_reset` | Reset all metrics counters to zero (Bearer auth) |
 | GET | `/api/session` | `api_session` | Session stats: uptime, config, metrics, backend, identity |
 | GET | `/api/docs` | `api_docs_list` | List available documentation files |
 | GET | `/api/docs/{name}` | `api_docs_content` | Return raw markdown content of a doc file |
 | GET | `/ots/status` | `ots_status` | OTS configuration and readiness (HTTP 200 even when disabled; the JSON body carries the real status) |
 | POST | `/ots/stamp` | `ots_stamp` | Stamp the current Merkle root or an optional binary request body (Bearer auth) |
 | POST | `/ots/verify` | `ots_verify` | Verify a `.ots` proof file sent as the request body (Bearer auth) |
+| POST | `/api/webrtc/offer` | `api_webrtc_offer` | WHIP-style WebRTC signaling: browser SDP offer JSON in, server SDP answer JSON out (non-trickle ICE); data channel feeds the encode pipeline (Bearer auth) |
 
 #### Audio WebSocket Protocol
 
@@ -810,8 +819,32 @@ also echoes `ots` metrics (`ots_proofs_count`, `ots_last_timestamp`,
   "stego_type": "lsb",
   "hash_algorithm": "blake3",
   "encrypt": false,
-  "ecc": false
+  "ecc": false,
+  "transport": "websocket"
 }
+```
+
+#### `POST /api/webrtc/offer` Request/Response
+
+WHIP-style single-request signaling for the WebRTC transport. The body is a
+browser SDP offer; the response is the server SDP answer with **non-trickle
+ICE** — all server candidates are gathered before the answer is returned, so
+no trickle-ICE channel is required. Media flows over the negotiated **data
+channel only** (no RTP audio/video tracks); data-channel messages reuse the
+WebSocket encode/decode shapes (binary JPEG in, `encoded_frame`/`decoded_frame`
+JSON out), and the same session signer, live config, size caps (4 MiB message
+/ 1 MiB frame, 4096×4096 JPEG), and real-verification pipeline apply. Requires
+Bearer auth when an auth token is configured; non-offer SDP types and
+malformed SDP are rejected with HTTP 400. Answer-side peer connections are
+reaped on disconnect, failure, data-channel close, or after a 60 s
+never-connected deadline.
+
+```json
+// Request
+{ "type": "offer", "sdp": "v=0 ..." }
+
+// Response
+{ "type": "answer", "sdp": "v=0 ..." }
 ```
 
 #### `POST /api/config` Request Body
@@ -824,7 +857,8 @@ CamelCase, deserialized into `LiveConfig`:
   "lsbBits": 2,
   "signingBackend": "ed25519",
   "overlayText": "SECRET",
-  "signRateMs": 500
+  "signRateMs": 500,
+  "transport": "webrtc"
 }
 ```
 

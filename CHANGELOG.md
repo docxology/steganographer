@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-09-21 continuation round)
+
+- **Argon2id password-KDF transform (`PKT-007`).** Generic packet bodies can
+  now be encrypted with a key derived from a human-chosen password via
+  Argon2id (RFC 9106 parameters in `password.rs`). `transforms` gains
+  `apply_with_password` / `reverse_with_password` and the critical
+  `TRANSFORM_KDF_ARGON2ID` descriptor (id 5; pinned 27-byte layout: salt,
+  memory, iterations, lanes, output length) recorded ahead of the AEAD
+  descriptor it feeds; a KDF descriptor without the password fails closed.
+  CLI wiring: `encode`/`decode`/`extract` gain `--password`/`--password-file`,
+  mutually exclusive with explicit encryption/decryption keys.
+- **Full bounded nested decode (`PKT-009`).** The nesting scaffold became a
+  real decoder: `GenericPacket::decode_nested` expands `FIELD_PARENT_ID`
+  chains up to `max_nesting_depth` (3) and `max_aggregate_nested_bytes`
+  (64 MiB), with cycle detection and a typed `NestedLevel` chain
+  (outermost first) plus the innermost logical payload.
+- **Forensic detector registry + calibration corpus (`FOR-001`, QUA
+  calibration).** `forensics::detector_registry()` documents every scan
+  detector with stable IDs, summaries, byte/time budgets, false-positive
+  limits, and calibration mapping; `testdata/corpus/` +
+  `tests/calibration.rs` pin benign/triggered outcomes for each ID.
+- **OOXML/WordprocessingML container scanning (`DOC-001`/`DOC-002` slice).**
+  New dependency-free `forensics/ooxml` module: in-memory ZIP reader with
+  hostile-input budgets (4096 entries, 64 findings, 4 MiB/entry + 8 MiB/package
+  inflate caps — zero new dependencies), `ZIP_TOPOLOGY` inventory
+  (observation only), DOC-001 package anomalies, and DOC-002 concealment
+  detection in `word/document.xml`; `scan_bytes` surfaces `container_findings`
+  and the `scan` CLI reports them.
+- **`SUR-006` profiles/`[limits]`.** Optional `[limits]` (7 `DecodeLimits`
+  overrides) and `[profiles.<name>]` (`limits` + `scan.detectors`) TOML
+  tables with `config check` validation; `scan --profile <name>` applies a
+  profile's detector selection and limits.
+- **Scan symlink policy + options.** Top-level symlinked `scan` inputs are
+  now rejected by default (usage error); `--follow-input-symlink` opts into
+  scanning the link target, and `--profile <NAME>` selects a config profile.
+- **`steganographer-wasm` crate (`WASM-001`).** Browser-local facade over
+  core with wasm-bindgen exports cfg-gated to `wasm32`: packet encode/decode,
+  RGB + PCM S16LE embed/extract, forensic scan, and JSON-overridable decode
+  limits; core is used with `ots`/`reqwest` and `ethereum` features off.
+  9 native integration tests.
+- **WebRTC dashboard transport.** New WHIP-style `POST /api/webrtc/offer`
+  (auth-gated, non-trickle ICE, data-channel media, no RTP tracks) plus
+  `LiveConfig.transport` (`websocket` | `webrtc`, default `websocket`);
+  data-channel frames reuse the WebSocket size caps and the shared
+  sign → embed → verify pipeline, with automatic WebSocket fallback and a
+  peer-connection reaper. In-process two-PeerConnection tests cover
+  signaling + the real endpoint round trip.
+
+### Changed (2026-09-21 continuation round)
+
+- **Statistical detector results are observations, never verdicts alone.**
+  `ForensicScan::detected` is set only by content-derived evidence (inline
+  magic, Unicode/text findings, DOC-002 concealment); chi-squared,
+  sample-pairs/SPA, RS, entropy, file family, ZIP topology, and DOC-001
+  topology anomalies accompany the verdict but never trigger it. The `scan`
+  exit-code semantics are unchanged (0/1/2 as documented).
+
+### Fixed (2026-09-21 continuation round)
+
+- **Docs counts synced to the 2026-09-21 canonical Tests line** — workspace
+  602 → 665 (core 506 = 381 unit + 125 integration incl. golden vectors +
+  calibration; CLI 68; dashboard 58; GST 24; WASM 9), plus stale module/file
+  counts and the new fifth crate, refreshed across root/crate AGENTS.md,
+  README, and `docs/`.
+
 ### Added (2026-09-20 deep-review round)
 
 - **Real FIPS 204 ML-DSA (security incident fixed).** `MlDsaBackend` and the

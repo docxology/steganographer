@@ -2,9 +2,13 @@
 //!
 //! Supports TOML deserialization with [`Config::from_toml`].
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::ots_config::OtsConfig;
+use crate::packet::DecodeLimits;
+use crate::unicode_text;
 
 /// Top-level configuration.
 #[derive(Debug, Deserialize, Clone)]
@@ -17,7 +21,145 @@ pub struct Config {
     /// project behaves exactly as before. See [`crate::ots_config`].
     #[serde(default)]
     pub ots: Option<OtsConfig>,
+    /// Optional global resource ceilings mirroring the semantics of
+    /// [`DecodeLimits`] (see [`LimitsConfig`]). Absent fields keep the
+    /// built-in defaults, so behavior is unchanged when the table is absent.
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
+    /// Optional named profiles (`[profiles.<name>]`). A profile bundles
+    /// limits overrides and scanner knobs; resolve it with [`Config::profile`].
+    /// See [`ProfileConfig`].
+    #[serde(default)]
+    pub profiles: Option<BTreeMap<String, ProfileConfig>>,
 }
+
+/// Resource ceilings for packet decoding, mirroring the semantics of
+/// [`DecodeLimits`] in the optional `[limits]` table. Every field is
+/// optional: absent fields keep the built-in [`DecodeLimits::default`] value.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct LimitsConfig {
+    /// Ceiling on the total encoded packet size.
+    #[serde(default)]
+    pub max_packet_len: Option<usize>,
+    /// Ceiling on the encoded body length.
+    #[serde(default)]
+    pub max_body_len: Option<usize>,
+    /// Ceiling on the declared logical payload length (`original_len`),
+    /// enforced before any transform is reversed.
+    #[serde(default)]
+    pub max_original_len: Option<usize>,
+    /// Ceiling on a single field/extension value length.
+    #[serde(default)]
+    pub max_field_len: Option<usize>,
+    /// Ceiling on the number of extension fields.
+    #[serde(default)]
+    pub max_extensions: Option<usize>,
+    /// Maximum parent-id chain depth a recursive decoder may expand (PKT-009).
+    #[serde(default)]
+    pub max_nesting_depth: Option<usize>,
+    /// Maximum aggregate bytes across every nested packet in one chain
+    /// (PKT-009).
+    #[serde(default)]
+    pub max_aggregate_nested_bytes: Option<usize>,
+}
+
+impl LimitsConfig {
+    /// Validate the configured ceilings: every present value must be
+    /// non-zero, and the body ceiling cannot exceed the packet ceiling
+    /// (an encoded packet carries its body).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let fields = [
+            ("max_packet_len", self.max_packet_len),
+            ("max_body_len", self.max_body_len),
+            ("max_original_len", self.max_original_len),
+            ("max_field_len", self.max_field_len),
+            ("max_extensions", self.max_extensions),
+            ("max_nesting_depth", self.max_nesting_depth),
+            (
+                "max_aggregate_nested_bytes",
+                self.max_aggregate_nested_bytes,
+            ),
+        ];
+        for (name, value) in fields {
+            if value == Some(0) {
+                anyhow::bail!("limits.{name} must be greater than 0");
+            }
+        }
+        if let (Some(body), Some(packet)) = (self.max_body_len, self.max_packet_len) {
+            if body > packet {
+                anyhow::bail!(
+                    "limits.max_body_len ({body}) exceeds limits.max_packet_len ({packet})"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply these overrides on top of the built-in [`DecodeLimits`] defaults.
+    pub fn apply_to(&self, limits: &mut DecodeLimits) {
+        if let Some(v) = self.max_packet_len {
+            limits.max_packet_len = v;
+        }
+        if let Some(v) = self.max_body_len {
+            limits.max_body_len = v;
+        }
+        if let Some(v) = self.max_original_len {
+            limits.max_original_len = v;
+        }
+        if let Some(v) = self.max_field_len {
+            limits.max_field_len = v;
+        }
+        if let Some(v) = self.max_extensions {
+            limits.max_extensions = v;
+        }
+        if let Some(v) = self.max_nesting_depth {
+            limits.max_nesting_depth = v;
+        }
+        if let Some(v) = self.max_aggregate_nested_bytes {
+            limits.max_aggregate_nested_bytes = v;
+        }
+    }
+
+    /// Build a [`DecodeLimits`] from the built-in defaults plus these
+    /// overrides.
+    pub fn to_decode_limits(&self) -> DecodeLimits {
+        let mut limits = DecodeLimits::default();
+        self.apply_to(&mut limits);
+        limits
+    }
+}
+
+/// Scanner knobs a profile may set. Minimum viable: the detector set a scan
+/// reports.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct ScanProfileConfig {
+    /// Detector IDs this profile's scan reports. Omit to keep every detector.
+    #[serde(default)]
+    pub detectors: Option<Vec<String>>,
+}
+
+/// A named profile (`[profiles.<name>]`): limits overrides plus scanner
+/// knobs. Resolve via [`Config::profile`].
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct ProfileConfig {
+    /// Resource-limit overrides this profile applies.
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
+    /// Scanner knobs this profile applies.
+    #[serde(default)]
+    pub scan: Option<ScanProfileConfig>,
+}
+
+/// Detector identifiers accepted in a profile's `scan.detectors` set.
+pub const SCAN_DETECTORS: [&str; 7] = [
+    "statistical",
+    "magic",
+    unicode_text::ZERO_WIDTH,
+    unicode_text::VARIATION_SELECTORS,
+    unicode_text::BIDI_CONTROLS,
+    unicode_text::WHITESPACE_ANOMALY,
+    unicode_text::HOMOGLYPH_SUSPECT,
+];
 
 /// Global settings.
 #[derive(Debug, Deserialize, Clone)]
@@ -248,6 +390,67 @@ impl Config {
     /// Whether OTS stamping is enabled in this configuration.
     pub fn ots_enabled(&self) -> bool {
         self.ots.as_ref().is_some_and(|o| o.is_enabled())
+    }
+
+    /// Validate the optional `[limits]` and `[profiles]` tables.
+    ///
+    /// Kept out of [`Config::from_toml`] so parse-time behavior is unchanged
+    /// for existing configs; `config check` and profile resolution call it.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(limits) = &self.limits {
+            limits
+                .validate()
+                .map_err(|error| anyhow::anyhow!("[limits]: {error}"))?;
+        }
+        if let Some(profiles) = &self.profiles {
+            for (name, profile) in profiles {
+                if let Some(limits) = &profile.limits {
+                    limits
+                        .validate()
+                        .map_err(|error| anyhow::anyhow!("[profiles.{name}] limits: {error}"))?;
+                }
+                if let Some(detectors) = profile
+                    .scan
+                    .as_ref()
+                    .and_then(|scan| scan.detectors.as_ref())
+                {
+                    if detectors.is_empty() {
+                        anyhow::bail!("[profiles.{name}] scan.detectors must not be empty");
+                    }
+                    for detector in detectors {
+                        if !SCAN_DETECTORS.contains(&detector.as_str()) {
+                            anyhow::bail!(
+                                "[profiles.{name}] unknown scan detector '{detector}' \
+                                 (known: {})",
+                                SCAN_DETECTORS.join(", ")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a named profile from the `[profiles]` table.
+    ///
+    /// Errors when the table is absent or the name is unknown, listing the
+    /// configured profiles.
+    pub fn profile(&self, name: &str) -> anyhow::Result<&ProfileConfig> {
+        let profiles = self
+            .profiles
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no [profiles] table in configuration"))?;
+        profiles.get(name).ok_or_else(|| {
+            let mut names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            let listed = if names.is_empty() {
+                "<none>".to_string()
+            } else {
+                names.join(", ")
+            };
+            anyhow::anyhow!("unknown profile '{name}' (configured: {listed})")
+        })
     }
 }
 
@@ -525,5 +728,129 @@ interval_secs = 120
         };
         assert!(cfg.encrypt_enabled());
         assert_eq!(cfg.spread_count(), 5);
+    }
+    #[test]
+    fn test_limits_and_profiles_default_to_none() {
+        let cfg = Config::from_toml("[global]\nlog_level = \"info\"\n").unwrap();
+        assert!(cfg.limits.is_none());
+        assert!(cfg.profiles.is_none());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_limits_and_profiles() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[limits]
+max_body_len = 1048576
+max_nesting_depth = 2
+
+[profiles.strict]
+[profiles.strict.limits]
+max_body_len = 4096
+max_packet_len = 8192
+max_nesting_depth = 1
+
+[profiles.strict.scan]
+detectors = ["ZERO_WIDTH", "statistical"]
+
+[profiles.loose]
+[profiles.loose.scan]
+detectors = ["magic"]
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        let limits = cfg.limits.as_ref().unwrap();
+        assert_eq!(limits.max_body_len, Some(1048576));
+        assert_eq!(limits.max_packet_len, None);
+        assert_eq!(limits.max_nesting_depth, Some(2));
+
+        let strict = cfg.profile("strict").unwrap();
+        let strict_limits = strict.limits.as_ref().unwrap();
+        assert_eq!(strict_limits.max_body_len, Some(4096));
+        assert_eq!(strict_limits.max_packet_len, Some(8192));
+        let scan = strict.scan.as_ref().unwrap();
+        assert_eq!(
+            scan.detectors.as_ref().unwrap(),
+            &vec!["ZERO_WIDTH".to_string(), "statistical".to_string()]
+        );
+        assert!(cfg.validate().is_ok());
+
+        let loose = cfg.profile("loose").unwrap();
+        assert!(loose.limits.is_none());
+
+        // Profile limits apply on top of the built-in defaults.
+        let decoded = strict_limits.to_decode_limits();
+        assert_eq!(decoded.max_body_len, 4096);
+        assert_eq!(decoded.max_packet_len, 8192);
+        assert_eq!(decoded.max_nesting_depth, 1);
+        assert_eq!(decoded.max_field_len, DecodeLimits::default().max_field_len);
+    }
+
+    #[test]
+    fn test_invalid_limit_value_rejected() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[limits]
+max_body_len = 0
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("max_body_len"));
+    }
+
+    #[test]
+    fn test_body_longer_than_packet_rejected() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[limits]
+max_body_len = 8192
+max_packet_len = 4096
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("max_body_len"));
+        assert!(error.contains("max_packet_len"));
+    }
+
+    #[test]
+    fn test_unknown_profile_rejected() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[profiles.strict]
+[profiles.strict.scan]
+detectors = ["statistical"]
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        let error = cfg.profile("missing").unwrap_err().to_string();
+        assert!(error.contains("unknown profile 'missing'"));
+        assert!(error.contains("strict"));
+
+        // No [profiles] table at all also errors.
+        let bare = Config::from_toml("[global]\nlog_level = \"info\"\n").unwrap();
+        assert!(bare.profile("strict").is_err());
+    }
+
+    #[test]
+    fn test_unknown_scan_detector_rejected() {
+        let toml_str = r#"
+[global]
+log_level = "info"
+
+[profiles.bad]
+[profiles.bad.scan]
+detectors = ["totally_bogus"]
+"#;
+        let cfg = Config::from_toml(toml_str).unwrap();
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("profiles.bad"));
+        assert!(error.contains("unknown scan detector"));
     }
 }

@@ -8,15 +8,9 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | 606 | `DashboardState` (incl. `signer`, `audio_key`, `ots_config`, `ots_client`), `LiveConfig`, `create_router()`, `start_server()`, `check_auth()`, `validate_live_config()`, OTS endpoints, embedded static assets, docs API |
-| `src/ws_handler.rs` | 1288 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `ws_gate()` (origin 403 + `?token=`/`bearer-<token>` 401), `verify_signature()`, `EncodedFrame`/`EncodedAudioChunk` (pre-embed snapshots), `ots_metrics_json()` |
-| `src/static/index.html` | 783 | Three-tab layout (Video/Audio/Docs), dual encode/decode panels, live config controls, copy-to-clipboard, kbd hints, footer verified counter |
-| `src/static/style.css` | 2621 | Premium dark theme (gray/black/red), glassmorphism, responsive layout, micro-animations, help tooltips, copy-btn, kbd-hint, export-btn |
-| `src/static/app.js` | 1484 | Webcam capture, WebSocket encode/decode, metrics rendering, live config sync, video recording, keyboard shortcuts, session export, copy-to-clipboard, help tooltip positioning |
-| `src/static/audio_tab.js` | 719 | Microphone capture via Web Audio API, waveform/spectrum visualization, audio WebSocket encode/decode, WAV recording/export |
-| `src/static/docs_tab.js` | 261 | Documentation viewer: fetches markdown list from API, renders with marked.js |
-| `src/static/js/ots.js` | 165 | OpenTimestamps status/stamp/verify client for the OTS panel |
-| `tests/dashboard_tests.rs` | 880 | 23 tests for router creation, static asset serving, API endpoints |
+| `src/lib.rs` | 648 | `DashboardState` (incl. `signer`, `audio_key`, `ots_config`, `ots_client`), `LiveConfig` (incl. `transport: Transport`), `create_router()`, `start_server()`, `check_auth()`, `validate_live_config()`, OTS endpoints, embedded static assets, docs API |
+| `src/ws_handler.rs` | 1367 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `ws_gate()` (origin 403 + `?token=`/`bearer-<token>` 401), shared `FramePipeline`/`FrameVerifier` (sign → LSB embed → verify, reused by the WebRTC path), `verify_signature()`, `EncodedFrame`/`EncodedAudioChunk` (pre-embed snapshots), `ots_metrics_json()` |
+| `src/webrtc.rs` | 409 | `api_webrtc_offer()` (WHIP-style POST, auth-gated, non-trickle answer), `WebrtcHandler` (`on_data_channel` frame loop), `reap_connection()` — webrtc-rs 0.21 data-channel transport into the shared pipeline |
 
 ## Routes
 
@@ -34,7 +28,7 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 | `/ws/audio/decode` | WS | Audio decode — extract LSB payload → verify signature → result + signature preview |
 | `/api/metrics` | GET | JSON metrics (frames, FPS, latency) |
 | `/api/metrics/reset` | POST | Reset metrics counters |
-| `/api/config` | GET/POST | Get/update live config (lsbBits, opacity, overlay, signRate, qrScale, resolution, stegoType, hashAlgorithm, encrypt, ecc; POST validated: lsbBits 1–4, opacity 0.0–1.0, signRateMs ≥ 50) |
+| `/api/config` | GET/POST | Get/update live config (lsbBits, opacity, overlay, signRate, qrScale, resolution, stegoType, hashAlgorithm, encrypt, ecc, transport; POST validated: lsbBits 1–4, opacity 0.0–1.0, signRateMs ≥ 50, transport ∈ {websocket, webrtc}) |
 | `/api/session` | GET | Session stats: uptime, config snapshot, metrics, backend, identity |
 | `/api/version` | GET | Version info |
 | `/api/docs` | GET | List available documentation files |
@@ -42,6 +36,7 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 | `/ots/status` | GET | OpenTimestamps configuration status |
 | `/ots/stamp` | POST | Stamp a payload's Merkle root |
 | `/ots/verify` | POST | Verify an OTS proof |
+| `/api/webrtc/offer` | POST | WHIP-style signaling: browser SDP offer in, non-trickle answer out; data channel feeds the encode pipeline |
 
 ## Dynamic LSB Configuration
 
@@ -49,8 +44,8 @@ The dashboard supports live LSB bit-depth changes (1–4) via the UI slider. Bot
 
 ## Security
 - **Default bind**: `127.0.0.1` (local-only). Use `--host 0.0.0.0` for network access.
-- **Auth**: `--auth-token <token>` enables Bearer token auth on the guarded POST routes (`/api/config`, `/api/metrics/reset`, `/ots/stamp`, `/ots/verify`). Token comparison is constant-time via `subtle::ConstantTimeEq`.
-- **WebSocket gates** (`ws_gate`, before the upgrade): cross-site `Origin` headers are rejected with HTTP 403 unless the origin host is loopback (`127.0.0.1`/`::1`/`localhost`) or matches the request's `Host` header; when `auth_token` is set, the upgrade additionally requires `?token=<token>` (minimal percent-decoding) **or** a `Sec-WebSocket-Protocol: bearer-<token>` subprotocol, else HTTP 401. Accepted upgrades get a 4 MiB decoded-message cap and a 1 MiB WS-frame cap (plus 4096×4096 image and 10 s/384 kHz audio sanity caps inside the handlers).
+- **Auth**: `--auth-token <token>` enables Bearer token auth on the guarded POST routes (`/api/config`, `/api/metrics/reset`, `/ots/stamp`, `/ots/verify`, `/api/webrtc/offer`). Token comparison is constant-time via `subtle::ConstantTimeEq`. The WebRTC signaling POST needs no Origin check: a POST carries no ambient credentials and the response is unreadable cross-origin without CORS headers.
+- **WebRTC transport** (`transport: "webrtc"` in live config, or the UI toggle): data-channel messages reuse the WS size caps (4 MiB message, 4096×4096 image); answer PCs are closed by a reaper on disconnect/failure/data-channel-close or after a 60 s never-connected deadline.
 - **Real verification**: video/audio decode handlers verify the extracted `SignaturePayload` against the pre-embed pixel/sample snapshot (`signed_rgb` / `signed_samples`) using `DashboardState.signer`'s public half — a tampered frame flips `verified` to `false`. The session-wide `audio_key` (32 random bytes at startup) is shared by the audio encode/decode handlers.
 - **CORS**: Restricted to GET/POST methods with Content-Type header. No permissive cross-origin access.
 - **Warning**: Binding `0.0.0.0` without `--auth-token` logs a security warning.
@@ -66,4 +61,4 @@ The dashboard supports live LSB bit-depth changes (1–4) via the UI slider. Bot
 
 ## Test Coverage
 
-23 tests in `tests/dashboard_tests.rs`
+52 tests in `tests/dashboard_tests.rs` (plus 6 WebRTC/transport tests: transport serde, signaling auth/type/SDP validation, config transport field, and an in-process two-PeerConnection data-channel round trip through the real endpoint)

@@ -52,6 +52,8 @@ const DOC_METADATA = {
     'security.md': { icon: '🛡️', label: 'Security' },
     'steganography-theory.md': { icon: '📐', label: 'Steganography Theory' },
     'threat-model.md': { icon: '⚠️', label: 'Threat Model' },
+    'ots-integration.md': { icon: '⏳', label: 'OpenTimestamps' },
+    'key-rotation.md': { icon: '🔑', label: 'Key Rotation' },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

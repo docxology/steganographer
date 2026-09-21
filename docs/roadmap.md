@@ -84,24 +84,45 @@ the protocol/key review is complete for alpha use.
 
 ## v0.8.0 — Safe formats and scanning
 
-- Stabilize safe PNG/WAV I/O and post-write extraction.
-- Introduce `steganographer-formats` and `steganographer-forensics` with their
-  first complete vertical slices.
-- Separate decode, verify, scan, and extract semantics.
-- Publish JSON/JSONL schema v1 and stable exit codes.
-- Register current chi-square, SPA, RS, and combined analysis.
-- Add media/container/text detectors, bounded recursion, and calibration corpus.
-- Migrate legacy configuration through explicit profiles.
-
-Exit gate: automation uses the stable machine contract; standard scan is bounded
-and evidence-oriented.
+- [x] Stabilize safe PNG/WAV I/O and post-write extraction.
+- [x] Introduce `steganographer-formats` and `steganographer-forensics` with their
+  first complete vertical slices — implemented as the in-core `forensics`
+  module (with `forensics::ooxml`) and PNG/WAV carrier support in the CLI;
+  no separate crates were spun out.
+- [x] Separate decode, verify, scan, and extract semantics (2026-09-20 round:
+  `extract` subcommand + the 0/1/2/3 exit-code contract).
+- Publish JSON/JSONL schema v1 and stable exit codes — exit codes landed
+  (2026-09-20); the JSON v1 envelope (SUR-003) is **owner-gated**.
+- [x] Register current chi-square, SPA, RS, and combined analysis —
+  registered with stable IDs in the FOR-001 detector registry
+  (`detector_registry()`).
+- [x] Add media/container/text detectors, bounded recursion, and calibration
+  corpus — implemented: Unicode/text detectors (FOR-005), ZIP/OOXML container
+  slice (DOC-001/DOC-002), bounded nested decode (`decode_nested`, PKT-009),
+  the FOR-001 detector registry, and the calibration corpus
+  (`testdata/corpus/` + `tests/calibration.rs`). Pptx/xlsx deep analysis and
+  PDF parser evaluation (DOC-003/DOC-004) remain **owner-gated**.
+- [x] Migrate legacy configuration through explicit profiles (SUR-006) —
+  implemented as the optional `[limits]` + `[profiles.<name>]` TOML tables
+  with `scan --profile` and `config check` validation.
 
 ## v0.9.0 — Documents and browser-local beta
 
-- Add OOXML package topology and WordprocessingML concealment analysis.
+- [x] Add OOXML package topology and WordprocessingML concealment analysis —
+  implemented (2026-09-21): `steganographer-core/src/forensics/ooxml.rs`
+  dependency-free ZIP reader with `ZIP_TOPOLOGY` inventory, DOC-001 package
+  anomalies, and DOC-002 WordprocessingML concealment detection in the
+  `scan` command. DOC-003/DOC-004 (headers/footers, embedded media,
+  pptx/xlsx deep analysis) remain **owner-gated**.
 - Recursively scan embedded media under aggregate limits.
-- Add the first bounded PDF structural scan if parser evaluation is complete.
-- Build packet, PNG/WAV, and supported scan capabilities to WASM.
+- Add the first bounded PDF structural scan if parser evaluation is complete
+  (**owner-gated** evaluation).
+- [x] Build packet, PNG/WAV, and supported scan capabilities to WASM —
+  implemented (2026-09-21) as the `steganographer-wasm` crate (WASM-001):
+  packet encode/decode, RGB + PCM S16LE embed/extract, forensic scan, and
+  decode-limits JSON, cfg-gated to `wasm32` and tested natively. PNG/WAV
+  container decoding stays native — the wasm surface takes raw byte buffers;
+  `wasm-pack`/`wasm-bindgen` bundling is future packaging work.
 - Add browser-local dashboard workflows using Web Workers.
 
 Exit gate: document and browser features share native schemas and fixtures, do
@@ -126,22 +147,34 @@ These remain independent, experimental tracks:
 
 - JPEG F5/matrix encoding from permissively licensed sources or clean Rust.
 - PVD, chroma, palette, and document/text embedding under the lab profile.
-- Learned watermarking with reproducible model and dataset licensing.
+- Learned watermarking with reproducible model and dataset licensing
+  (**owner-gated**).
 - Broader containers/codecs and hardware acceleration.
 - Optional MCP/agent adapter after a real consumer validates JSON v1.
 - Post-quantum and hybrid signatures once payload size and dependency maturity
   meet the existing cryptographic roadmap constraints.
 
+---
+
 ## Parallel maintenance backlog
 
 The platform sequence does not replace maintenance and distribution work in
 [`TODO.md`](../TODO.md). Crates.io and `cargo install` support, Windows CI, a
-native GStreamer transform, WebRTC,
+native GStreamer transform,
 Homebrew distribution, certificate chains, and related research can proceed
 when they do not destabilize an active protocol/format vertical slice.
 
 Where work overlaps, shared platform contracts win—for example, container I/O
 should build on carrier descriptors rather than introduce another raw-byte path.
+
+WebRTC streaming is implemented (2026-09-21): the dashboard gained a
+WHIP-style `POST /api/webrtc/offer` signaling endpoint and a data-channel
+media transport (`transport: "webrtc"` in the live config) with automatic
+WebSocket fallback; in-process two-PeerConnection tests prove signaling plus
+the shared encode/verify pipeline. Browser-side latency/fps measurement is
+still owner-run.
+
+---
 
 ## Workstream specifications
 

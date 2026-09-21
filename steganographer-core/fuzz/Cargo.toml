@@ -47,5 +47,11 @@ path = "fuzz_targets/fuzz_carrier_extract.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_nested_decode"
+path = "fuzz_targets/fuzz_nested_decode.rs"
+test = false
+doc = false
+
 # Keep cargo-fuzz's instrumented package independent from the release workspace.
 [workspace]

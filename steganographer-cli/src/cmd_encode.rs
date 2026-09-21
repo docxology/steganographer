@@ -273,6 +273,8 @@ pub fn run(
             video: None,
             audio: None,
             ots: None,
+            limits: None,
+            profiles: None,
         }
     });
 

@@ -40,8 +40,10 @@ pub mod lsb_video;
 pub mod mdct_audio;
 pub mod metrics;
 pub mod multi_frame;
+#[cfg(feature = "ots")]
 pub mod ots_client;
 pub mod ots_config;
+#[cfg(feature = "ots")]
 pub mod ots_handler;
 pub mod overlay;
 pub mod packet;
@@ -73,6 +75,7 @@ pub use multi_frame::{
     reconstruct, reconstruct_payload_bytes, split, split_payload_bytes, GenericPayloadShard,
     SignatureShard,
 };
+#[cfg(feature = "ots")]
 pub use ots_client::{OTSClient, OTSError, OTSMethod, OTSVResult};
 pub use ots_config::{OtsConfig, OtsSettings};
 pub use packet::{

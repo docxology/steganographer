@@ -111,6 +111,14 @@ enum Commands {
         /// Path to encryption key file
         #[arg(long)]
         encryption_key_file: Option<String>,
+        /// Password for a password-derived (Argon2id) encryption key;
+        /// mutually exclusive with --encryption-key/--encryption-key-file
+        #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file"])]
+        password: Option<String>,
+        /// Path to a password file for password-derived encryption;
+        /// mutually exclusive with --encryption-key/--encryption-key-file
+        #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file"])]
+        password_file: Option<String>,
         /// Embedding key (hex-encoded, 32 bytes) for keyed audio/spread-spectrum placement
         #[arg(long)]
         embedding_key: Option<String>,
@@ -185,6 +193,14 @@ enum Commands {
         /// Path to decryption key file
         #[arg(long)]
         decryption_key_file: Option<String>,
+        /// Password for a password-derived (Argon2id) decryption key;
+        /// mutually exclusive with --decryption-key/--decryption-key-file
+        #[arg(long, conflicts_with_all = ["decryption_key", "decryption_key_file"])]
+        password: Option<String>,
+        /// Path to a password file for password-derived decryption;
+        /// mutually exclusive with --decryption-key/--decryption-key-file
+        #[arg(long, conflicts_with_all = ["decryption_key", "decryption_key_file"])]
+        password_file: Option<String>,
         /// Embedding key (hex-encoded 32 bytes) for keyed placement
         #[arg(long)]
         embedding_key: Option<String>,
@@ -262,6 +278,12 @@ enum Commands {
         /// Replace an existing payload output
         #[arg(long)]
         force: bool,
+        /// Password for password-derived packet decoding (Argon2id)
+        #[arg(long)]
+        password: Option<String>,
+        /// Path to a password file for password-derived packet decoding
+        #[arg(long)]
+        password_file: Option<String>,
     },
 
     /// Generate a new Ed25519 signing key pair
@@ -322,6 +344,14 @@ enum Commands {
         /// Output format: "plain", "json", or "jsonl"
         #[arg(long, default_value = "plain")]
         format: String,
+        /// Reject the input when it is a symlink (symlinks are never followed
+        /// by scan); pass this flag to scan the link target anyway
+        #[arg(long)]
+        follow_input_symlink: bool,
+        /// Apply a named [profiles.<name>] profile from the config file
+        /// (unknown profiles are a usage error)
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Derive keys (signing, encryption, embedding) from a master secret
@@ -508,6 +538,8 @@ fn main() -> anyhow::Result<()> {
             mime_type,
             filename,
             no_verify_write,
+            password,
+            password_file,
         } => {
             let opts = cmd_encode::EncodeOptions {
                 encrypt,
@@ -555,6 +587,8 @@ fn main() -> anyhow::Result<()> {
                         embedding_key: opts.embedding_key.clone(),
                         embedding_key_file: opts.embedding_key_file.clone(),
                         verify_write: !no_verify_write,
+                        password,
+                        password_file,
                     },
                 )
             } else if dir {
@@ -593,6 +627,8 @@ fn main() -> anyhow::Result<()> {
             decryption_key_file,
             embedding_key,
             embedding_key_file,
+            password,
+            password_file,
         } => match cmd_packet::decode(
             &input,
             &output,
@@ -607,6 +643,8 @@ fn main() -> anyhow::Result<()> {
                 decryption_key_file,
                 embedding_key,
                 embedding_key_file,
+                password,
+                password_file,
             },
         ) {
             Ok(()) => Ok(()),
@@ -627,6 +665,8 @@ fn main() -> anyhow::Result<()> {
             output,
             bits,
             force,
+            password,
+            password_file,
         } => {
             let bits = match bits.to_ascii_lowercase().as_str() {
                 "auto" => None,
@@ -637,11 +677,13 @@ fn main() -> anyhow::Result<()> {
                     )),
                 },
             };
-            match cmd_packet::run_extract(
+            match cmd_packet::run_extract_with_password(
                 &PathBuf::from(input),
                 &PathBuf::from(output),
                 bits,
                 force,
+                password,
+                password_file,
             ) {
                 Ok(()) => Ok(()),
                 Err(e) => {
@@ -762,6 +804,8 @@ fn main() -> anyhow::Result<()> {
             max_files,
             max_bytes,
             format,
+            follow_input_symlink,
+            profile,
         } => {
             // Argument-shape validation is a usage error (exit 2); a
             // runtime failure inside the scan is a runtime error (exit 1);
@@ -776,11 +820,32 @@ fn main() -> anyhow::Result<()> {
             if !path.is_file() && !path.is_dir() {
                 usage_error(format!("'{input}' is not a regular file or directory"));
             }
-            let code = cmd_scan::run(&input, max_depth, max_files, max_bytes, &format)
-                .unwrap_or_else(|error| {
-                    eprintln!("Error: {error:#}");
-                    std::process::exit(1);
-                });
+            // Symlinks are never followed by scan; rejecting the symlinked
+            // input keeps the top level consistent with directory recursion
+            // (usage class, exit 2).
+            if let Err(message) = cmd_scan::check_input_symlink(path, follow_input_symlink) {
+                usage_error(message);
+            }
+            let scan_profile = match profile.as_deref() {
+                Some(name) => match resolve_scan_profile(&cli.config, name) {
+                    Ok(profile) => Some(profile),
+                    Err(error) => usage_error(format!("{error:#}")),
+                },
+                None => None,
+            };
+            let code = cmd_scan::run(
+                &input,
+                max_depth,
+                max_files,
+                max_bytes,
+                &format,
+                follow_input_symlink,
+                scan_profile.as_ref(),
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("Error: {error:#}");
+                std::process::exit(1);
+            });
             std::process::exit(code);
         }
 
@@ -907,24 +972,42 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Config { action } => match action.as_str() {
             "check" => match steganographer_core::config::Config::from_file(&cli.config) {
-                Ok(cfg) => {
-                    let mut sections = vec!["global"];
-                    if cfg.video.is_some() {
-                        sections.push("video");
+                Ok(cfg) => match cfg.validate() {
+                    Ok(()) => {
+                        let mut sections = vec!["global"];
+                        if cfg.video.is_some() {
+                            sections.push("video");
+                        }
+                        if cfg.audio.is_some() {
+                            sections.push("audio");
+                        }
+                        if cfg.limits.is_some() {
+                            sections.push("limits");
+                        }
+                        if cfg.profiles.is_some() {
+                            sections.push("profiles");
+                        }
+                        println!("✓ Configuration valid: {}", cli.config);
+                        println!("  Sections: {}", sections.join(", "));
+                        if let Some(ref algo) = cfg.global.hash_algorithm {
+                            println!("  Hash algorithm: {}", algo);
+                        }
+                        if let Some(ref kf) = cfg.global.key_file {
+                            println!("  Key file: {}", kf);
+                        }
+                        if let Some(ref profiles) = cfg.profiles {
+                            let mut names: Vec<&str> =
+                                profiles.keys().map(String::as_str).collect();
+                            names.sort_unstable();
+                            println!("  Profiles: {}", names.join(", "));
+                        }
+                        Ok(())
                     }
-                    if cfg.audio.is_some() {
-                        sections.push("audio");
+                    Err(e) => {
+                        eprintln!("✗ Configuration error in {}: {}", cli.config, e);
+                        std::process::exit(1);
                     }
-                    println!("✓ Configuration valid: {}", cli.config);
-                    println!("  Sections: {}", sections.join(", "));
-                    if let Some(ref algo) = cfg.global.hash_algorithm {
-                        println!("  Hash algorithm: {}", algo);
-                    }
-                    if let Some(ref kf) = cfg.global.key_file {
-                        println!("  Key file: {}", kf);
-                    }
-                    Ok(())
-                }
+                },
                 Err(e) => {
                     eprintln!("✗ Configuration error in {}: {}", cli.config, e);
                     std::process::exit(1);
@@ -1052,6 +1135,23 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Resolve a named `[profiles.<name>]` profile from the config file.
+///
+/// Config-load failures, validation failures, and unknown profiles are
+/// usage-class errors for the scan subcommand (exit 2 via `usage_error`).
+fn resolve_scan_profile(
+    config_path: &str,
+    name: &str,
+) -> anyhow::Result<steganographer_core::config::ProfileConfig> {
+    let config = steganographer_core::config::Config::from_file(config_path)
+        .map_err(|error| anyhow::anyhow!("cannot load config '{config_path}': {error:#}"))?;
+    config.validate()?;
+    config
+        .profile(name)
+        .cloned()
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// Report a usage-class error and terminate with exit code 2

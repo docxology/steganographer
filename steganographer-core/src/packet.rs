@@ -5,6 +5,8 @@
 //! packet identifiers, nonces, and carrier descriptors.
 
 use crate::crypto::SignaturePayload;
+use crate::encryption::EncryptionKey;
+use crate::transforms::{reverse_with_password, TransformContext};
 use sha2::Digest as _;
 use thiserror::Error;
 
@@ -151,6 +153,10 @@ pub enum PacketError {
     DigestMismatch,
     #[error("legacy signature payload must be exactly {expected} bytes, got {actual}")]
     LegacyLength { expected: usize, actual: usize },
+    #[error("packet nesting loop detected at depth {depth}")]
+    NestingCycle { depth: usize },
+    #[error("packet transform reversal failed: {0}")]
+    Transform(#[from] crate::transforms::TransformError),
     #[error("legacy signature payload is invalid: {0}")]
     LegacyPayload(String),
 }
@@ -1143,9 +1149,126 @@ impl GenericPacket {
         })
     }
 
+    /// Full bounded nested-packet decode (PKT-009).
+    ///
+    /// Decodes `input` as a packet and, while its *logical payload* (transforms
+    /// reversed) is itself a generic packet whose [`FIELD_PARENT_ID`] chains to
+    /// the carrying packet's identifier, recursively expands it. Nesting is
+    /// opt-in: a packet-shaped payload whose parent identifier is absent is
+    /// returned as the terminal logical payload, and a parent identifier that
+    /// does not match the carrier is a protocol violation — so single-level
+    /// packets decode identically through this entry point.
+    ///
+    /// Every expansion is bounded by [`check_nesting`]: chain depth against
+    /// [`DecodeLimits::max_nesting_depth`] and the running aggregate byte count
+    /// of every packet in the chain (root included) against
+    /// [`DecodeLimits::max_aggregate_nested_bytes`], checked from the child's
+    /// locator *before* its body is decoded. A packet identifier that reappears
+    /// in the chain (self-nesting or a parent-id loop) is rejected as a cycle.
+    ///
+    /// Each level's transforms are reversed with `decrypt_key` / `password`
+    /// (see [`crate::transforms::reverse_with_password`]); the innermost level's
+    /// logical payload is the returned `payload`.
+    pub fn decode_nested(
+        input: &[u8],
+        limits: &DecodeLimits,
+        decrypt_key: Option<&EncryptionKey>,
+        password: Option<&[u8]>,
+    ) -> Result<NestedDecode, PacketError> {
+        let mut chain = Vec::new();
+        let mut seen_ids: Vec<[u8; 16]> = Vec::new();
+        let mut aggregate = 0usize;
+        let mut depth = 1usize;
+        let mut packet = GenericPacket::decode(input, limits)?;
+
+        loop {
+            let packet_len = packet.encoded_len()?;
+            check_nesting(depth, (aggregate + packet_len) as u64, limits)?;
+            let packet_id = packet.envelope.packet_id;
+            if seen_ids.contains(&packet_id) {
+                return Err(PacketError::NestingCycle { depth });
+            }
+            seen_ids.push(packet_id);
+            aggregate += packet_len;
+            chain.push(NestedLevel {
+                depth,
+                packet_id,
+                parent_id: packet.envelope.parent_id,
+                payload_kind: packet.envelope.payload_kind,
+            });
+
+            let context = TransformContext {
+                packet_id: &packet.envelope.packet_id,
+                payload_kind: packet.envelope.payload_kind as u16,
+                original_len: packet.envelope.original_len,
+            };
+            let payload = reverse_with_password(
+                &packet.body,
+                &context,
+                decrypt_key,
+                password,
+                &packet.envelope.transforms,
+                packet.envelope.original_len,
+            )?;
+
+            if !looks_like_packet(&payload) {
+                return Ok(NestedDecode { chain, payload });
+            }
+            // Cheap preflight from the child's fixed locator, before any
+            // variable-size child allocation: bounds the chain even when every
+            // level is individually within the per-packet ceilings.
+            let child_locator = Locator::from_bytes(&payload, limits)?;
+            let child_len = child_locator.packet_len()?;
+            check_nesting(depth + 1, (aggregate + child_len) as u64, limits)?;
+            let child = GenericPacket::decode(&payload, limits)?;
+            match child.envelope.parent_id {
+                Some(parent) if parent == packet_id => {}
+                Some(_) => {
+                    return Err(PacketError::InvalidField {
+                        field_id: FIELD_PARENT_ID,
+                        reason:
+                            "nested packet parent identifier does not match the carrying packet",
+                    })
+                }
+                // Opt-in nesting: a packet-shaped payload without a parent
+                // chain is the terminal logical payload.
+                None => return Ok(NestedDecode { chain, payload }),
+            }
+            packet = child;
+            depth += 1;
+        }
+    }
+
     pub fn encoded_len(&self) -> Result<usize, PacketError> {
         self.locator.packet_len()
     }
+}
+
+/// One level of a [`GenericPacket::decode_nested`] chain, outermost first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedLevel {
+    /// Chain depth, 1-based: the outermost packet is depth 1.
+    pub depth: usize,
+    pub packet_id: [u8; 16],
+    /// The child's recorded [`FIELD_PARENT_ID`] (must match the carrying
+    /// packet's identifier).
+    pub parent_id: Option<[u8; 16]>,
+    pub payload_kind: PayloadKind,
+}
+
+/// Full nested decode result: the parent-id chain plus the innermost logical
+/// payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedDecode {
+    /// Chain entries, outermost first (`chain[0]` is the input packet).
+    pub chain: Vec<NestedLevel>,
+    /// The innermost decoded logical payload.
+    pub payload: Vec<u8>,
+}
+
+/// Cheap gate before treating a logical payload as a nested packet.
+fn looks_like_packet(bytes: &[u8]) -> bool {
+    bytes.len() >= LOCATOR_SIZE && bytes[..4] == PACKET_MAGIC
 }
 fn validate_untransformed_body(envelope: &PacketEnvelope, body: &[u8]) -> Result<(), PacketError> {
     if !envelope.transforms.is_empty() {
@@ -1182,15 +1305,15 @@ fn validate_flag_transform_consistency(
             flag: FLAG_ENCRYPTED,
         });
     }
-    if flags & FLAG_PAYLOAD_SIGNED != 0 && !has_sign {
-        return Err(PacketError::MissingTransformForFlag {
-            flag: FLAG_PAYLOAD_SIGNED,
-        });
-    }
     if has_aead && flags & FLAG_ENCRYPTED == 0 {
         return Err(PacketError::MissingFlagForTransform {
             algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
             flag: FLAG_ENCRYPTED,
+        });
+    }
+    if flags & FLAG_PAYLOAD_SIGNED != 0 && !has_sign {
+        return Err(PacketError::MissingTransformForFlag {
+            flag: FLAG_PAYLOAD_SIGNED,
         });
     }
     if has_sign && flags & FLAG_PAYLOAD_SIGNED == 0 {
@@ -1202,11 +1325,11 @@ fn validate_flag_transform_consistency(
     Ok(())
 }
 
-/// PKT-009 nesting scaffold. A future recursive decoder following
-/// [`FIELD_PARENT_ID`] chains will call this before expanding each nested
-/// packet, tracking the current chain depth and the aggregate decoded bytes.
-/// The full recursive decoder is intentionally not implemented yet; this
-/// entry point pins the contract and the typed rejections.
+/// PKT-009 nesting bound, called before each nested-packet expansion: rejects
+/// a chain deeper than [`DecodeLimits::max_nesting_depth`] and a running
+/// aggregate (every packet expanded in the chain, root included) above
+/// [`DecodeLimits::max_aggregate_nested_bytes`]. The recursive decoder is
+/// [`GenericPacket::decode_nested`].
 pub fn check_nesting(
     depth: usize,
     aggregate_bytes: u64,
@@ -1715,6 +1838,232 @@ mod tests {
         assert!(matches!(
             codec.encode(&p, &mut out),
             Err(PacketError::LimitExceeded { what: "body", .. })
+        ));
+    }
+
+    /// Wrap `leaf` bytes in `ids.len()` untransformed packets, outermost id
+    /// first. Each packet's [`FIELD_PARENT_ID`] names the wrapper that carries
+    /// it (the outermost packet has no parent).
+    fn build_nested_chain(ids: &[[u8; 16]], leaf: &[u8]) -> Vec<u8> {
+        let limits = DecodeLimits::default();
+        let mut payload = leaf.to_vec();
+        for i in (0..ids.len()).rev() {
+            let mut wrapper = GenericPacket::new_untransformed(
+                payload,
+                ids[i],
+                *b"nonce123",
+                PayloadKind::Bytes,
+                AlgorithmDescriptor::new(1, 1, Vec::new()),
+                AlgorithmDescriptor::new(1, 1, Vec::new()),
+                &limits,
+            )
+            .unwrap();
+            wrapper.envelope.parent_id = if i > 0 { Some(ids[i - 1]) } else { None };
+            let envelope_bytes = wrapper.envelope.encode(&limits).unwrap();
+            wrapper.locator.envelope_len = envelope_bytes.len() as u32;
+            wrapper.locator.envelope_crc32c = crc32c(&envelope_bytes);
+            payload = wrapper.encode(&limits).unwrap();
+        }
+        payload
+    }
+
+    #[test]
+    fn two_level_nested_roundtrip_reports_chain() {
+        let root_id = *b"rootpacketid-011";
+        let inner_id = *b"innerpacketid011";
+        let bytes = build_nested_chain(&[root_id, inner_id], b"deep logical payload");
+        // Single-level decode is unchanged: the input packet's body is the
+        // raw (still packet-shaped) logical payload.
+        let single = GenericPacket::decode(&bytes, &DecodeLimits::default()).unwrap();
+        assert_eq!(single.envelope.packet_id, root_id);
+
+        let nested =
+            GenericPacket::decode_nested(&bytes, &DecodeLimits::default(), None, None).unwrap();
+        assert_eq!(nested.chain.len(), 2);
+        assert_eq!(nested.chain[0].depth, 1);
+        assert_eq!(nested.chain[0].packet_id, root_id);
+        assert_eq!(nested.chain[0].parent_id, None);
+        assert_eq!(nested.chain[1].depth, 2);
+        assert_eq!(nested.chain[1].packet_id, inner_id);
+        assert_eq!(nested.chain[1].parent_id, Some(root_id));
+        assert_eq!(nested.payload, b"deep logical payload");
+    }
+
+    #[test]
+    fn nested_depth_four_is_rejected() {
+        let ids: Vec<[u8; 16]> = (0..4u8)
+            .map(|i| {
+                let mut id = [b'd'; 16];
+                id[15] = b'0' + i;
+                id
+            })
+            .collect();
+        let bytes = build_nested_chain(&ids, b"leaf");
+        assert!(matches!(
+            GenericPacket::decode_nested(&bytes, &DecodeLimits::default(), None, None),
+            Err(PacketError::NestingDepthExceeded {
+                depth: 4,
+                maximum: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn nested_self_cycle_is_rejected() {
+        // Self-nesting: the child carries the root's own identifier and
+        // claims the root as its parent.
+        let limits = DecodeLimits::default();
+        let cycle_id = *b"cyclepacketid-01";
+        let mut child = GenericPacket::new_untransformed(
+            b"loop payload".to_vec(),
+            cycle_id,
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        child.envelope.parent_id = Some(cycle_id);
+        let envelope_bytes = child.envelope.encode(&limits).unwrap();
+        child.locator.envelope_len = envelope_bytes.len() as u32;
+        child.locator.envelope_crc32c = crc32c(&envelope_bytes);
+        let child_bytes = child.encode(&limits).unwrap();
+        let root = GenericPacket::new_untransformed(
+            child_bytes,
+            cycle_id,
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        let root_bytes = root.encode(&limits).unwrap();
+        assert!(matches!(
+            GenericPacket::decode_nested(&root_bytes, &limits, None, None),
+            Err(PacketError::NestingCycle { depth: 2 })
+        ));
+    }
+
+    #[test]
+    fn nested_aggregate_bytes_are_bounded() {
+        let bytes = build_nested_chain(
+            &[*b"aggroot-00000000", *b"aggchild-0000001"],
+            b"leaf payload bytes",
+        );
+        let tight = DecodeLimits {
+            max_aggregate_nested_bytes: 128,
+            ..DecodeLimits::default()
+        };
+        assert!(matches!(
+            GenericPacket::decode_nested(&bytes, &tight, None, None),
+            Err(PacketError::LimitExceeded {
+                what: "aggregate nested bytes",
+                ..
+            })
+        ));
+        let relaxed = DecodeLimits {
+            max_aggregate_nested_bytes: 1024,
+            ..DecodeLimits::default()
+        };
+        assert!(GenericPacket::decode_nested(&bytes, &relaxed, None, None).is_ok());
+    }
+
+    #[test]
+    fn hostile_wide_nested_chain_is_bounded() {
+        // Ten individually-small wrappers: every level passes the per-packet
+        // ceilings, but the chain is bounded by the aggregate ceiling before
+        // the fifth level is ever decoded.
+        let ids: Vec<[u8; 16]> = (0..10u8)
+            .map(|i| {
+                let mut id = [b'w'; 16];
+                id[15] = b'0' + i;
+                id
+            })
+            .collect();
+        let bytes = build_nested_chain(&ids, b"tiny leaf");
+        let limits = DecodeLimits {
+            max_nesting_depth: 32,
+            max_aggregate_nested_bytes: 512,
+            ..DecodeLimits::default()
+        };
+        assert!(matches!(
+            GenericPacket::decode_nested(&bytes, &limits, None, None),
+            Err(PacketError::LimitExceeded {
+                what: "aggregate nested bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn packet_shaped_payload_without_parent_chain_is_terminal() {
+        // Opt-in semantics: a packet whose payload is a valid packet with no
+        // parent chaining stays a terminal logical payload (chain length 1).
+        let limits = DecodeLimits::default();
+        let inner = GenericPacket::new_untransformed(
+            b"plain inner".to_vec(),
+            *b"innerpacketid011",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        let inner_bytes = inner.encode(&limits).unwrap();
+        let root = GenericPacket::new_untransformed(
+            inner_bytes.clone(),
+            *b"rootpacketid-021",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        let root_bytes = root.encode(&limits).unwrap();
+        let nested = GenericPacket::decode_nested(&root_bytes, &limits, None, None).unwrap();
+        assert_eq!(nested.chain.len(), 1);
+        assert_eq!(nested.payload, inner_bytes);
+    }
+
+    #[test]
+    fn mismatched_nested_parent_id_is_rejected() {
+        let limits = DecodeLimits::default();
+        let mut child = GenericPacket::new_untransformed(
+            b"orphan payload".to_vec(),
+            *b"childpacketid-01",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        child.envelope.parent_id = Some(*b"someotherparent0"); // not the carrier
+        let envelope_bytes = child.envelope.encode(&limits).unwrap();
+        child.locator.envelope_len = envelope_bytes.len() as u32;
+        child.locator.envelope_crc32c = crc32c(&envelope_bytes);
+        let child_bytes = child.encode(&limits).unwrap();
+        let root = GenericPacket::new_untransformed(
+            child_bytes,
+            *b"rootpacketid-031",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            &limits,
+        )
+        .unwrap();
+        let root_bytes = root.encode(&limits).unwrap();
+        assert!(matches!(
+            GenericPacket::decode_nested(&root_bytes, &limits, None, None),
+            Err(PacketError::InvalidField {
+                field_id: FIELD_PARENT_ID,
+                ..
+            })
         ));
     }
 }

@@ -35,6 +35,7 @@ use crate::error_correction;
 use crate::packet::{
     TransformDescriptor, FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_ERROR_CORRECTED, FLAG_PAYLOAD_SIGNED,
 };
+use crate::password::{self, Argon2Params};
 use thiserror::Error;
 
 /// ChaCha20-Poly1305 AEAD transform.
@@ -45,6 +46,25 @@ pub const TRANSFORM_ECC_REED_SOLOMON: u16 = 2;
 pub const TRANSFORM_COMPRESS_DEFLATE: u16 = 3;
 /// Ed25519 payload-signature transform.
 pub const TRANSFORM_PAYLOAD_SIGN_ED25519: u16 = 4;
+/// Argon2id password key-derivation transform (PKT-007). Additive descriptor:
+/// packets written before this identifier existed decode unchanged, and
+/// decoders that predate it fail closed on the critical descriptor.
+pub const TRANSFORM_KDF_ARGON2ID: u16 = 5;
+
+/// Serialized size of the Argon2id KDF transform parameters, pinned layout:
+/// `[salt (16B)] [memory_kib u32 LE] [iterations u32 LE] [lanes u8] [output_len u16 LE]`.
+pub const KDF_ARGON2ID_PARAMS_SIZE: usize = 16 + 4 + 4 + 1 + 2;
+/// Salt length carried in the KDF descriptor (128-bit).
+pub const KDF_ARGON2ID_SALT_LEN: usize = 16;
+/// Pinned KDF output length: the derived master secret *is* the 32-byte
+/// ChaCha20-Poly1305 key.
+pub const KDF_ARGON2ID_OUTPUT_LEN: u16 = 32;
+/// DoS ceiling on the unauthenticated `memory_kib` descriptor field (1 GiB):
+/// a hostile descriptor must not direct a decoder to spend attacker-chosen
+/// memory per decode attempt.
+pub const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
+/// DoS ceiling on the unauthenticated iteration count.
+pub const MAX_KDF_ITERATIONS: u32 = 1024;
 
 /// Serialized size of the Ed25519 sign-transform parameters
 /// (`public_key || signature`).
@@ -88,6 +108,10 @@ pub enum TransformError {
     UnsupportedTransform(u16),
     #[error("encrypted packet requires a {what} key, but none was provided")]
     MissingKey { what: &'static str },
+    #[error("Argon2id key derivation failed: {0}")]
+    KdfFailed(String),
+    #[error("a password and a raw encryption key were both supplied; they are mutually exclusive")]
+    AmbiguousKeySource,
     #[error("transform descriptor is malformed: {0}")]
     InvalidDescriptor(&'static str),
     #[error("recovered payload length {actual} does not match the envelope ({expected})")]
@@ -118,6 +142,87 @@ pub fn is_encrypted(transforms: &[TransformDescriptor]) -> bool {
         .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305)
 }
 
+/// Password credentials for the Argon2id KDF transform (PKT-007). On apply
+/// the salt is fresh-random and the descriptor records it alongside the
+/// Argon2 parameters so [`reverse_with_password`] can re-derive the key.
+#[derive(Debug, Clone, Copy)]
+pub struct PasswordKdfCredentials<'a> {
+    pub password: &'a [u8],
+    /// Argon2id parameters; `output_len` must be 32 (the AEAD key size).
+    pub params: Argon2Params,
+}
+
+/// Parsed Argon2id KDF descriptor parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2idKdfParams {
+    pub salt: [u8; KDF_ARGON2ID_SALT_LEN],
+    pub memory_kib: u32,
+    pub iterations: u32,
+    pub lanes: u8,
+}
+
+/// Validate the Argon2id parameter bounds a decoder will spend: the
+/// algorithmic floor from [`Argon2Params::validate`] plus hard DoS ceilings
+/// ([`MAX_KDF_MEMORY_KIB`], [`MAX_KDF_ITERATIONS`]) because the descriptor is
+/// unauthenticated.
+fn validate_kdf_bounds(memory_kib: u32, iterations: u32, lanes: u8) -> Result<(), TransformError> {
+    if memory_kib == 0 || memory_kib > MAX_KDF_MEMORY_KIB {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id memory cost is zero or exceeds the decode ceiling",
+        ));
+    }
+    if iterations == 0 || iterations > MAX_KDF_ITERATIONS {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id iteration count is zero or exceeds the decode ceiling",
+        ));
+    }
+    Argon2Params {
+        memory_kib,
+        iterations,
+        parallelism: u32::from(lanes),
+        output_len: usize::from(KDF_ARGON2ID_OUTPUT_LEN),
+    }
+    .validate()
+    .map_err(|e| TransformError::KdfFailed(e.to_string()))
+}
+
+/// Serialize the Argon2id KDF descriptor parameters, pinned layout:
+/// `[salt (16B)] [memory_kib u32 LE] [iterations u32 LE] [lanes u8] [output_len u16 LE]`.
+fn kdf_argon2id_params(salt: &[u8; KDF_ARGON2ID_SALT_LEN], params: &Argon2Params) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KDF_ARGON2ID_PARAMS_SIZE);
+    out.extend_from_slice(salt);
+    out.extend_from_slice(&params.memory_kib.to_le_bytes());
+    out.extend_from_slice(&params.iterations.to_le_bytes());
+    out.push(u8::try_from(params.parallelism).expect("lane count fits in one byte"));
+    out.extend_from_slice(&KDF_ARGON2ID_OUTPUT_LEN.to_le_bytes());
+    out
+}
+
+/// Parse and bound-check the Argon2id KDF descriptor parameters.
+pub fn parse_kdf_argon2id_params(params: &[u8]) -> Result<Argon2idKdfParams, TransformError> {
+    if params.len() != KDF_ARGON2ID_PARAMS_SIZE {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id KDF transform parameters must be 27 bytes",
+        ));
+    }
+    let output_len = u16::from_le_bytes([params[25], params[26]]);
+    if output_len != KDF_ARGON2ID_OUTPUT_LEN {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id KDF output length must be 32 bytes",
+        ));
+    }
+    let memory_kib = u32::from_le_bytes(params[16..20].try_into().expect("fixed slice"));
+    let iterations = u32::from_le_bytes(params[20..24].try_into().expect("fixed slice"));
+    let lanes = params[24];
+    validate_kdf_bounds(memory_kib, iterations, lanes)?;
+    Ok(Argon2idKdfParams {
+        salt: params[..16].try_into().expect("fixed slice"),
+        memory_kib,
+        iterations,
+        lanes,
+    })
+}
+
 /// Apply signing (optional), compression (optional), encryption (optional),
 /// and error correction (optional) to a logical payload, returning the encoded
 /// body, the transform descriptors, and the locator flag bits to set.
@@ -130,8 +235,38 @@ pub fn apply(
     ecc_parity: usize,
     ecc_chunk_len: usize,
 ) -> Result<(Vec<u8>, Vec<TransformDescriptor>, u16), TransformError> {
+    apply_with_password(
+        payload,
+        context,
+        signer,
+        compress,
+        None,
+        encrypt_key,
+        ecc_parity,
+        ecc_chunk_len,
+    )
+}
+
+/// [`apply`] with the PKT-007 password path: when `password` is set, the AEAD
+/// key is derived with Argon2id (`password.rs`) and recorded in a
+/// [`TRANSFORM_KDF_ARGON2ID`] descriptor ahead of the AEAD descriptor it
+/// feeds. `password` and `encrypt_key` are mutually exclusive.
+#[allow(clippy::too_many_arguments)] // transform-chain application context
+pub fn apply_with_password(
+    payload: &[u8],
+    context: &TransformContext<'_>,
+    signer: Option<&SigningKey>,
+    compress: bool,
+    password: Option<&PasswordKdfCredentials<'_>>,
+    encrypt_key: Option<&EncryptionKey>,
+    ecc_parity: usize,
+    ecc_chunk_len: usize,
+) -> Result<(Vec<u8>, Vec<TransformDescriptor>, u16), TransformError> {
+    if password.is_some() && encrypt_key.is_some() {
+        return Err(TransformError::AmbiguousKeySource);
+    }
     let mut body = payload.to_vec();
-    let mut transforms = Vec::with_capacity(4);
+    let mut transforms = Vec::with_capacity(5);
     let mut flags = 0u16;
 
     if let Some(signing_key) = signer {
@@ -166,7 +301,39 @@ pub fn apply(
         }
     }
 
-    if let Some(key) = encrypt_key {
+    // PKT-007: password mode derives the AEAD key with Argon2id and records
+    // the descriptor before the AEAD transform, so a decoder re-derives the
+    // key and hands it to the AEAD reverse (KDF applied before AEAD; reversed
+    // after it in the reverse pass).
+    let mut derived_key = None;
+    if let Some(credentials) = password {
+        let params = credentials.params;
+        if params.output_len != usize::from(KDF_ARGON2ID_OUTPUT_LEN) {
+            return Err(TransformError::InvalidDescriptor(
+                "Argon2id KDF output length must be 32 bytes to feed the AEAD key",
+            ));
+        }
+        params
+            .validate()
+            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
+        u8::try_from(params.parallelism).map_err(|_| {
+            TransformError::InvalidDescriptor("Argon2id lane count must fit in one byte")
+        })?;
+        let salt = password::generate_salt();
+        let master = password::derive_master_from_password(credentials.password, &salt, &params)
+            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
+        transforms.push(TransformDescriptor {
+            algorithm: TRANSFORM_KDF_ARGON2ID,
+            version: 1,
+            critical: true,
+            parameters: kdf_argon2id_params(&salt, &params),
+        });
+        derived_key = Some(EncryptionKey::from_bytes(
+            master.as_slice().try_into().expect("output_len is 32"),
+        ));
+    }
+    let effective_key = encrypt_key.or(derived_key.as_ref());
+    if let Some(key) = effective_key {
         body = encryption::encrypt(key, context.packet_id, &body, Some(&context.aad()))
             .map_err(|e| TransformError::EncryptionFailed(e.to_string()))?;
         transforms.push(TransformDescriptor {
@@ -205,6 +372,75 @@ pub fn reverse(
     transforms: &[TransformDescriptor],
     original_len: u64,
 ) -> Result<Vec<u8>, TransformError> {
+    reverse_with_password(
+        encoded_body,
+        context,
+        encrypt_key,
+        None,
+        transforms,
+        original_len,
+    )
+}
+
+/// [`reverse`] with the PKT-007 password path: when the envelope records a
+/// [`TRANSFORM_KDF_ARGON2ID`] descriptor, `password` re-derives the AEAD key
+/// from the descriptor's salt and Argon2 parameters and hands it to the AEAD
+/// reverse. A KDF descriptor without a password fails closed.
+pub fn reverse_with_password(
+    encoded_body: &[u8],
+    context: &TransformContext<'_>,
+    encrypt_key: Option<&EncryptionKey>,
+    password: Option<&[u8]>,
+    transforms: &[TransformDescriptor],
+    original_len: u64,
+) -> Result<Vec<u8>, TransformError> {
+    // The KDF descriptor is applied before (and therefore reversed after) the
+    // AEAD descriptor it feeds, so the key must be re-derived before the
+    // reverse loop reaches AEAD.
+    let mut derived_key = None;
+    let mut kdf_seen = false;
+    for transform in transforms {
+        if transform.algorithm == TRANSFORM_KDF_ARGON2ID {
+            if kdf_seen {
+                return Err(TransformError::InvalidDescriptor(
+                    "duplicate Argon2id KDF transform",
+                ));
+            }
+            kdf_seen = true;
+            let kdf = parse_kdf_argon2id_params(&transform.parameters)?;
+            // Fail closed before any Argon2 work on ambiguous or absent
+            // credentials.
+            if encrypt_key.is_some() {
+                return Err(TransformError::AmbiguousKeySource);
+            }
+            let password = password.ok_or(TransformError::MissingKey { what: "password" })?;
+            let master = password::derive_master_from_password(
+                password,
+                &kdf.salt,
+                &Argon2Params {
+                    memory_kib: kdf.memory_kib,
+                    iterations: kdf.iterations,
+                    parallelism: u32::from(kdf.lanes),
+                    output_len: usize::from(KDF_ARGON2ID_OUTPUT_LEN),
+                },
+            )
+            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
+            derived_key = Some(EncryptionKey::from_bytes(
+                master.as_slice().try_into().expect("pinned output length"),
+            ));
+        }
+    }
+    if kdf_seen
+        && !transforms
+            .iter()
+            .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305)
+    {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id KDF transform requires a ChaCha20-Poly1305 AEAD transform",
+        ));
+    }
+    let effective_key = derived_key.as_ref().or(encrypt_key);
+
     let mut body = encoded_body.to_vec();
 
     // Reverse transforms in the opposite order they were applied. ECC and
@@ -212,8 +448,15 @@ pub fn reverse(
     // canonical order so future non-commutative transforms stay correct.
     for transform in transforms.iter().rev() {
         match transform.algorithm {
+            TRANSFORM_KDF_ARGON2ID => {
+                // Key material was re-derived before the loop (this descriptor
+                // is applied before, and reversed after, the AEAD transform it
+                // feeds); it transforms no bytes. Bounds were already checked
+                // in the pre-scan.
+                parse_kdf_argon2id_params(&transform.parameters)?;
+            }
             TRANSFORM_AEAD_CHACHA20_POLY1305 => {
-                let key = encrypt_key.ok_or(TransformError::MissingKey { what: "decryption" })?;
+                let key = effective_key.ok_or(TransformError::MissingKey { what: "decryption" })?;
                 body = encryption::decrypt(key, context.packet_id, &body, Some(&context.aad()))
                     .map_err(|e| TransformError::DecryptionFailed(e.to_string()))?;
             }
@@ -914,6 +1157,278 @@ mod tests {
         assert!(matches!(
             deflate_decompress(&bomb, (1u64 << 40) as usize),
             Err(TransformError::InvalidDescriptor(_))
+        ));
+    }
+
+    #[test]
+    fn kdf_password_roundtrip_and_wrong_password_fails_closed() {
+        let payload = b"password-protected payload".to_vec();
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let credentials = PasswordKdfCredentials {
+            password: b"correct horse battery staple",
+            params: Argon2Params::fast(),
+        };
+        let (body, transforms, flags) = apply_with_password(
+            &payload,
+            &ctx,
+            None,
+            false,
+            Some(&credentials),
+            None,
+            0,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        assert_eq!(flags, FLAG_ENCRYPTED);
+        assert_eq!(transforms.len(), 2);
+        assert_eq!(transforms[0].algorithm, TRANSFORM_KDF_ARGON2ID);
+        assert_eq!(transforms[1].algorithm, TRANSFORM_AEAD_CHACHA20_POLY1305);
+        // Pinned 27-byte layout: salt || memory u32 LE || iterations u32 LE
+        // || lanes u8 || output u16 LE.
+        assert_eq!(transforms[0].parameters.len(), KDF_ARGON2ID_PARAMS_SIZE);
+        let kdf = parse_kdf_argon2id_params(&transforms[0].parameters).unwrap();
+        assert_eq!(kdf.memory_kib, Argon2Params::fast().memory_kib);
+        assert_eq!(kdf.iterations, Argon2Params::fast().iterations);
+        assert_eq!(kdf.lanes, 1);
+
+        let recovered = reverse_with_password(
+            &body,
+            &ctx,
+            None,
+            Some(b"correct horse battery staple"),
+            &transforms,
+            payload.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(recovered, payload);
+
+        // Wrong password fails closed (Poly1305 tag), missing password fails
+        // closed with the typed missing-key error.
+        assert!(matches!(
+            reverse_with_password(
+                &body,
+                &ctx,
+                None,
+                Some(b"incorrect horse battery staple"),
+                &transforms,
+                payload.len() as u64,
+            ),
+            Err(TransformError::DecryptionFailed(_))
+        ));
+        assert!(matches!(
+            reverse_with_password(&body, &ctx, None, None, &transforms, payload.len() as u64),
+            Err(TransformError::MissingKey { what: "password" })
+        ));
+    }
+
+    #[test]
+    fn kdf_fixed_salt_descriptor_is_deterministic() {
+        let packet = GenericPacket::new_untransformed(
+            b"seed".to_vec(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let params = Argon2Params::fast();
+        let salt = [0x42u8; KDF_ARGON2ID_SALT_LEN];
+        let descriptor = kdf_argon2id_params(&salt, &params);
+
+        // Same salt + params + password always yields the same key.
+        let master = crate::password::derive_master_from_password(b"pw", &salt, &params).unwrap();
+        assert_eq!(
+            master,
+            crate::password::derive_master_from_password(b"pw", &salt, &params).unwrap()
+        );
+        let key = EncryptionKey::from_bytes(master.as_slice().try_into().unwrap());
+
+        // Encrypt independently with the derived key; the descriptor-driven
+        // reverse must land on exactly that key.
+        let body = encryption::encrypt(
+            &key,
+            ctx.packet_id,
+            b"secret nested payload",
+            Some(&ctx.aad()),
+        )
+        .unwrap();
+        let transforms = vec![
+            TransformDescriptor {
+                algorithm: TRANSFORM_KDF_ARGON2ID,
+                version: 1,
+                critical: true,
+                parameters: descriptor.clone(),
+            },
+            TransformDescriptor {
+                algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
+                version: 1,
+                critical: true,
+                parameters: Vec::new(),
+            },
+        ];
+        let recovered = reverse_with_password(
+            &body,
+            &ctx,
+            None,
+            Some(b"pw"),
+            &transforms,
+            b"secret nested payload".len() as u64,
+        )
+        .unwrap();
+        assert_eq!(recovered, b"secret nested payload");
+
+        // Descriptor round-trips through the parser unchanged.
+        let kdf = parse_kdf_argon2id_params(&descriptor).unwrap();
+        assert_eq!(kdf.salt, salt);
+        assert_eq!(kdf.memory_kib, params.memory_kib);
+    }
+
+    #[test]
+    fn kdf_descriptor_param_bounds_are_enforced() {
+        let salt = [0u8; KDF_ARGON2ID_SALT_LEN];
+        let good = kdf_argon2id_params(&salt, &Argon2Params::fast());
+        assert_eq!(good.len(), KDF_ARGON2ID_PARAMS_SIZE);
+
+        // Wrong total length and wrong pinned output length are rejected.
+        let mut short = good.clone();
+        short.pop();
+        assert!(matches!(
+            parse_kdf_argon2id_params(&short),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+        let mut bad_output = good.clone();
+        let len = bad_output.len();
+        bad_output[len - 2..].copy_from_slice(&33u16.to_le_bytes());
+        assert!(matches!(
+            parse_kdf_argon2id_params(&bad_output),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+
+        // DoS ceilings: memory and iteration counts above the hard caps are
+        // rejected before any Argon2 work.
+        let mut huge_memory = good.clone();
+        huge_memory[16..20].copy_from_slice(&(MAX_KDF_MEMORY_KIB + 1).to_le_bytes());
+        assert!(matches!(
+            parse_kdf_argon2id_params(&huge_memory),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+        let mut zero_memory = good.clone();
+        zero_memory[16..20].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            parse_kdf_argon2id_params(&zero_memory),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+        let mut huge_iterations = good.clone();
+        huge_iterations[20..24].copy_from_slice(&(MAX_KDF_ITERATIONS + 1).to_le_bytes());
+        assert!(matches!(
+            parse_kdf_argon2id_params(&huge_iterations),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+
+        // Below the algorithmic floor (memory >= 8 KiB × lanes) fails too.
+        let mut tiny = good.clone();
+        tiny[16..20].copy_from_slice(&4u32.to_le_bytes());
+        tiny[24] = 2;
+        assert!(matches!(
+            parse_kdf_argon2id_params(&tiny),
+            Err(TransformError::KdfFailed(_))
+        ));
+    }
+
+    #[test]
+    fn kdf_apply_rejects_mismatched_output_len_and_key_sources() {
+        let packet = GenericPacket::new_untransformed(
+            b"payload".to_vec(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let mut short_params = Argon2Params::fast();
+        short_params.output_len = 16;
+        let credentials = PasswordKdfCredentials {
+            password: b"pw",
+            params: short_params,
+        };
+        assert!(matches!(
+            apply_with_password(
+                b"x",
+                &ctx,
+                None,
+                false,
+                Some(&credentials),
+                None,
+                0,
+                DEFAULT_ECC_CHUNK_LEN
+            ),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+
+        let good_credentials = PasswordKdfCredentials {
+            password: b"pw",
+            params: Argon2Params::fast(),
+        };
+        assert!(matches!(
+            apply_with_password(
+                b"x",
+                &ctx,
+                None,
+                false,
+                Some(&good_credentials),
+                Some(&test_key()),
+                0,
+                DEFAULT_ECC_CHUNK_LEN
+            ),
+            Err(TransformError::AmbiguousKeySource)
+        ));
+    }
+
+    #[test]
+    fn kdf_descriptor_without_aead_fails_closed() {
+        let packet = GenericPacket::new_untransformed(
+            b"payload".to_vec(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        let ctx = context(&packet);
+        let descriptor = kdf_argon2id_params(&[0u8; KDF_ARGON2ID_SALT_LEN], &Argon2Params::fast());
+        let transforms = vec![TransformDescriptor {
+            algorithm: TRANSFORM_KDF_ARGON2ID,
+            version: 1,
+            critical: true,
+            parameters: descriptor,
+        }];
+        // A KDF descriptor with nothing to feed is a protocol violation.
+        assert!(matches!(
+            reverse_with_password(b"ciphertext", &ctx, None, Some(b"pw"), &transforms, 7),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+        // The legacy password-less reverse fails closed with a missing key.
+        assert!(matches!(
+            reverse(b"ciphertext", &ctx, None, &transforms, 7),
+            Err(TransformError::MissingKey { what: "password" })
         ));
     }
 }

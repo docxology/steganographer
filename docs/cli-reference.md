@@ -131,6 +131,8 @@ steganographer encode [OPTIONS]
 | `--encrypt` | — | `false` | Encrypt the payload (legacy signature or generic packet) with ChaCha20-Poly1305 |
 | `--encryption-key <HEX>` | — | Random | ChaCha20-Poly1305 key |
 | `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
+| `--password <TEXT>` | — | None | Password for an Argon2id-derived encryption key (PKT-007); the KDF transform records its salt + parameters in the envelope. **Mutually exclusive with `--encryption-key`/`--encryption-key-file`; visible in shell history/`ps`** |
+| `--password-file <PATH>` | — | None | File containing the password for password-derived encryption (mutually exclusive with `--encryption-key`/`--encryption-key-file`) |
 | `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction (legacy signature or generic packet) |
 | `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
 | `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
@@ -162,6 +164,11 @@ steganographer encode -i audio.wav -o audio_signed.wav --stego-type lsb_audio \
 # Opt-in generic packet alpha
 steganographer encode -i cover.png -o packed.png \
   --payload-file report.pdf --mime-type application/pdf --bits 2
+
+# Password-protected packet (Argon2id KDF, PKT-007) — mutually exclusive
+# with --encryption-key/--encryption-key-file
+steganographer encode -i cover.png -o packed.png \
+  --payload-file report.pdf --password-file secret.txt --bits 2
 ```
 
 Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
@@ -169,8 +176,12 @@ carrier behavior and prints the public key needed by `verify`. The generic
 packet path supports `lsb_video` (RGB/PNG) and `lsb_audio` (PCM S16 WAV / raw
 S16LE) carriers, sequential or keyed placement (`--embedding-key`), and the
 Ed25519 signing (`--signing-key`), DEFLATE (`--compress`), AEAD encryption
-(`--encrypt`), and chunked Reed-Solomon (`--ecc`) transforms. After writing, the
-carrier is re-read and re-extracted to confirm byte-identical packet recovery
+(`--encrypt` or the password path), and chunked Reed-Solomon (`--ecc`)
+transforms. The password path (PKT-007) derives the AEAD key with Argon2id
+and records a critical `TRANSFORM_KDF_ARGON2ID` descriptor (salt + parameters)
+so `decode --password*` can re-derive it; it is mutually exclusive with
+explicit encryption keys. After writing, the carrier is re-read and
+re-extracted to confirm byte-identical packet recovery
 (post-write verification); `--no-verify-write` skips that check. Multi-frame
 spreading remains unsupported for generic packets.
 
@@ -197,6 +208,8 @@ steganographer decode --input packed.png --output recovered.pdf [OPTIONS]
 | `--decrypt` | — | `false` | Decrypt an AEAD-encrypted generic packet payload |
 | `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
 | `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
+| `--password <TEXT>` | — | None | Password to re-derive the Argon2id AEAD key recorded in the packet's `TRANSFORM_KDF_ARGON2ID` descriptor (PKT-007). **Mutually exclusive with `--decryption-key`/`--decryption-key-file`; visible in shell history/`ps`** |
+| `--password-file <PATH>` | — | None | File containing the password for password-derived decryption (mutually exclusive with `--decryption-key`/`--decryption-key-file`) |
 | `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for keyed placement |
 | `--embedding-key-file <PATH>` | — | None | File containing the embedding key |
 
@@ -205,6 +218,9 @@ steganographer decode -i packed.png -o recovered.pdf --bits auto --format json
 
 # Encrypted packet requires the key
 steganographer decode -i packed.png -o recovered.pdf --decrypt --decryption-key <hex>
+
+# Password-protected packet: re-derive the Argon2id AEAD key from the envelope
+steganographer decode -i packed.png -o recovered.pdf --password-file secret.txt
 ```
 
 Decode validates locator limits, envelope CRC32C, canonical metadata, declared
@@ -332,9 +348,14 @@ steganographer extract [OPTIONS] --input <PATH> --output <PATH>
 | `--output <PATH>` | `-o` | Required | Payload destination |
 | `--bits <VALUE>` | — | `auto` | Probe 1–4 LSBs, or require an exact strength |
 | `--force` | — | `false` | Replace an existing payload output |
+| `--password <TEXT>` | — | None | Password for password-derived packet decoding (Argon2id, PKT-007); reverses a `TRANSFORM_KDF_ARGON2ID` transform chain. **Mutually exclusive with `--decryption-key`/`--decryption-key-file` in `decode`; visible in shell history/`ps`** |
+| `--password-file <PATH>` | — | None | File containing the password for password-derived packet decoding |
 
 ```bash
 steganographer extract -i frame.rgb -o payload.bin --bits auto --force
+
+# Password-protected carrier (Argon2id KDF)
+steganographer extract -i packed.png -o payload.bin --password-file secret.txt
 ```
 
 Exit behavior follows the shared contract: a carrier with no embedded packet
@@ -467,6 +488,13 @@ steganographer --config my-config.toml config check
   Hash algorithm: blake3
 ```
 
+`config check` also validates the optional `[limits]` table (all seven
+`DecodeLimits` overrides must be > 0, and `max_body_len` must not exceed
+`max_packet_len`) and the optional `[profiles.<name>]` tables (each
+profile's `limits` validate the same way, and its `scan.detectors` set must
+only contain known detector IDs). Profiles are listed in the output when
+present.
+
 ---
 
 ### `analyze` — Steganographic Analysis
@@ -497,10 +525,12 @@ steganographer analyze --input signed.rgb --format json
 
 ### `scan` — Bounded Forensic Scan
 
-Run structural (entropy, magic-byte family, embedded signature/packet magic)
-and statistical (chi-squared, sample-pairs, RS) detectors over a file or
-recursively over a directory. Symlinks are never followed; recursion and per-file
-reads are bounded.
+Run structural (entropy, magic-byte family, embedded signature/packet magic),
+statistical (chi-squared, sample-pairs, RS), text (Unicode stego), and
+container (ZIP/OOXML `ZIP_TOPOLOGY`, DOC-001, DOC-002) detectors over a file
+or recursively over a directory. Top-level symlinked inputs are rejected by
+default (usage error); recursion never follows symlinks, and recursion and
+per-file reads are bounded.
 
 ```bash
 steganographer scan [OPTIONS] --input <PATH>
@@ -509,10 +539,17 @@ steganographer scan [OPTIONS] --input <PATH>
 | Option | Default | Description |
 | --- | --- | --- |
 | `--input <PATH>` | Required | File or directory to scan |
+| `--profile <NAME>` | None | Apply the named `[profiles.<name>]` profile from the config file (limits + `scan.detectors` selection; unknown profiles and config errors are usage errors, exit 2) |
+| `--follow-input-symlink` | `false` | Scan the target of a top-level symlinked input instead of rejecting it |
 | `--max-depth <N>` | `8` | Maximum directory depth (`0` = top-level files only) |
 | `--max-files <N>` | `10000` | Maximum number of files to scan |
 | `--max-bytes <N>` | `67108864` | Maximum bytes read per file (larger files truncated) |
 | `--format <FORMAT>` | `plain` | `plain`, `json`, or `jsonl` |
+
+Without a profile every detector reports; a profile's `scan.detectors` set
+selects which findings are reported (container findings always contribute).
+Detector IDs, budgets, and false-positive limits are documented in the
+`detector_registry()` in `steganographer-core/src/forensics.rs`.
 
 `jsonl` writes one finding per line to stdout and the summary to stderr. The
 exit code is `0` when no findings are present, `1` when at least one file is
@@ -524,6 +561,9 @@ steganographer scan --input suspicious.png --format json
 
 # Recursively scan a directory, one finding per line
 steganographer scan --input ./exports --format jsonl
+
+# Scan with a named config profile (SUR-006: detector selection + limits)
+steganographer scan --input ./exports --profile strict
 ```
 
 ---

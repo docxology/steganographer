@@ -80,6 +80,24 @@ Properties enforced by the current protocol work:
 - **Interleaved placement** (`PLACEMENT_INTERLEAVED`, PLC-001): an
   `InterleavedSchedule` coprime-stride slot mapping spreads packet slots across
   the carrier instead of the leading sequential slots.
+- **Detector registry (FOR-001)**: every `scan` detector — statistical
+  (chi-squared, sample-pairs, RS), text (Unicode stego), and container
+  (ZIP/OOXML) — has a stable ID, a documented byte/time budget, stated
+  false-positive limits, and calibration corpus samples
+  (`steganographer-core/src/forensics.rs`, `detector_registry()` +
+  `testdata/corpus/`).
+- **Statistical detector results are observations, never verdicts**: high
+  entropy or structured input can trip chi-squared/sample-pairs/RS on clean
+  data, so only content-derived evidence (inline `STEG`/`STG3` magic,
+  Unicode/text findings, DOC-002 WordprocessingML concealment) sets the
+  `detected` verdict; entropy, file family, ZIP topology, and DOC-001
+  topology anomalies stay observational.
+- **Container/OOXML scanning (DOC-001/DOC-002 slice)**: a dependency-free
+  in-memory ZIP reader with hostile-input budgets (`CONTAINER_*` constants:
+  4096 entries, 64 findings, 4 MiB/entry + 8 MiB/package inflate caps) feeds
+  the `scan` command's container findings for docx/pptx/xlsx and generic
+  ZIP-family input; budget violations never panic — they surface as typed
+  DOC-001 evidence.
 
 ### Spread-Spectrum: Host-Canceling Differential Pairs
 

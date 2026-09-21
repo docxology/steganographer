@@ -9,6 +9,7 @@
 //!
 //! Uses Axum + WebSocket + HTML5 Canvas for low-latency frame streaming.
 
+pub mod webrtc;
 pub mod ws_handler;
 
 use axum::{extract::State, response::Html, routing::get, Json, Router};
@@ -56,6 +57,11 @@ pub struct LiveConfig {
     /// Enable error correction.
     #[serde(default, rename = "ecc")]
     pub ecc: bool,
+    /// Transport used for the live video feed: "websocket" (default, the
+    /// `/ws/encode` path) or "webrtc" (WHIP-style offer + data channel to
+    /// `/api/webrtc/offer`). The audio feed always uses WebSocket.
+    #[serde(default = "default_transport", rename = "transport")]
+    pub transport: Transport,
 }
 
 fn default_opacity() -> f64 {
@@ -86,6 +92,10 @@ fn default_hash_algo() -> String {
     "blake3".into()
 }
 
+fn default_transport() -> Transport {
+    Transport::Websocket
+}
+
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
@@ -100,8 +110,21 @@ impl Default for LiveConfig {
             hash_algorithm: default_hash_algo(),
             encrypt: false,
             ecc: false,
+            transport: default_transport(),
         }
     }
+}
+
+/// Wire transport for the live video feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Transport {
+    /// Stream JPEG frames over the `/ws/encode` WebSocket (default).
+    #[serde(rename = "websocket")]
+    Websocket,
+    /// Stream JPEG frames over a WebRTC data channel negotiated through
+    /// `POST /api/webrtc/offer`.
+    #[serde(rename = "webrtc")]
+    Webrtc,
 }
 
 /// Shared dashboard state accessible by all handlers.
@@ -225,6 +248,10 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/ots/status", get(ots_status))
         .route("/ots/stamp", axum::routing::post(ots_stamp))
         .route("/ots/verify", axum::routing::post(ots_verify))
+        .route(
+            "/api/webrtc/offer",
+            axum::routing::post(webrtc::api_webrtc_offer),
+        )
         .layer(cors)
         .with_state(state)
 }
@@ -393,6 +420,10 @@ async fn api_docs_content(
 /// GET /api/config — return current config state.
 async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
     let live = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
+    let transport = match live.transport {
+        Transport::Websocket => "websocket",
+        Transport::Webrtc => "webrtc",
+    };
     serde_json::json!({
         "signing_backend": live.signing_backend,
         "identity": state.identity,
@@ -406,6 +437,7 @@ async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
         "hash_algorithm": live.hash_algorithm,
         "encrypt": live.encrypt,
         "ecc": live.ecc,
+        "transport": transport,
     })
     .to_string()
 }
@@ -430,9 +462,10 @@ async fn api_config_post(
     }
 
     log::info!(
-        "Config updated: opacity={:.2}, lsb_bits={}, backend={}, overlay='{}', sign_rate={}ms, qr_scale={}%, res={}",
+        "Config updated: opacity={:.2}, lsb_bits={}, backend={}, overlay='{}', sign_rate={}ms, qr_scale={}%, res={}, transport={:?}",
         new_cfg.opacity, new_cfg.lsb_bits, new_cfg.signing_backend,
-        new_cfg.overlay_text, new_cfg.sign_rate_ms, new_cfg.qr_scale, new_cfg.resolution
+        new_cfg.overlay_text, new_cfg.sign_rate_ms, new_cfg.qr_scale, new_cfg.resolution,
+        new_cfg.transport
     );
 
     let mut cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());

@@ -1,0 +1,26 @@
+[package]
+name = "steganographer-wasm"
+description = "Browser-facing bindings: generic packet framing, spatial-LSB capacity/embed/extract over RGB and S16LE PCM carriers, and forensics scans"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Network-free core: no `ots` (reqwest), no `ethereum` (k256). Everything the
+# wasm surface needs is pure computation over raw byte buffers.
+steganographer-core = { path = "../steganographer-core", default-features = false }
+serde_json = { workspace = true }
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rand` 0.8 inside steganographer-core needs the `js` feature on getrandom to
+# draw OS entropy under wasm32-unknown-unknown (browser/Node.js bindings).
+getrandom = { version = "0.2", features = ["js"] }
+# `getrandom` 0.3/0.4 (transitive via ml-dsa's rand_core 0.9 line) additionally
+# requires the `wasm_js` feature to compile under wasm32-unknown-unknown.
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
