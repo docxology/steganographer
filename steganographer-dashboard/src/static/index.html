@@ -110,6 +110,12 @@
                     <option value="">Default Camera</option>
                 </select>
             </div>
+            <!-- WebRTC H.264 media preview (enhancement view; shown only
+                 when the server publishes the RTP video track) -->
+            <div class="media-preview-container hidden" id="media-preview-container">
+                <span class="media-preview-label">📡 Media preview (H.264 RTP)</span>
+                <video id="media-preview" autoplay playsinline muted class="media-preview"></video>
+            </div>
             <div class="panel-stats" id="encode-stats">
                 <div class="stat" id="stat-frames"
                     title="Total number of video frames cryptographically signed since session start">
@@ -261,6 +267,22 @@
                             </select>
                         </div>
                     </div>
+                    <!-- Transport (WebRTC / WebSocket) -->
+                    <div class="config-row">
+                        <span class="config-label">Transport
+                            <span class="help-icon">?<span class="help-tooltip"><strong>Auto</strong> tries the
+                                    WebRTC DataChannel first and falls back to WebSocket.
+                                    <strong>WebSocket</strong> and <strong>WebRTC</strong> pin the transport.
+                                    Changing this reloads the page.</span></span>
+                        </span>
+                        <div class="config-control">
+                            <select class="config-select" id="cfg-transport" aria-label="Transport">
+                                <option value="auto" selected>Auto</option>
+                                <option value="websocket">WebSocket</option>
+                                <option value="webrtc">WebRTC</option>
+                            </select>
+                        </div>
+                    </div>
                     <!-- Overlay Text -->
                     <div class="config-row">
                         <span class="config-label">Overlay Text
@@ -315,22 +337,6 @@
                                 <option value="800x600">800×600</option>
                                 <option value="1280x720">1280×720 (HD)</option>
                                 <option value="1920x1080">1920×1080 (FHD)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <!-- Video Transport -->
-                    <div class="config-row">
-                        <span class="config-label">Transport
-                            <span class="help-icon">?<span class="help-tooltip">How JPEG frames travel to the
-                                    server. "WebSocket" is the default `/ws/encode` path. "WebRTC" negotiates a
-                                    data channel via /api/webrtc/offer (WHIP-style, one HTTP request) and streams
-                                    frames over it — lower latency on localhost, automatic WebSocket fallback if
-                                    negotiation fails.</span></span>
-                        </span>
-                        <div class="config-control">
-                            <select class="config-select" id="cfg-transport" aria-label="Video Transport">
-                                <option value="websocket" selected>WebSocket</option>
-                                <option value="webrtc">WebRTC (data channel)</option>
                             </select>
                         </div>
                     </div>
@@ -671,6 +677,10 @@
         <div class="footer-section" id="footer-resolution">
             <span class="footer-label">Resolution:</span>
             <span class="footer-value" id="footer-resolution-value">—</span>
+        </div>
+        <div class="footer-section" id="footer-media-fps" title="WebRTC H.264 media preview frame rate">
+            <span class="footer-label">Media fps:</span>
+            <span class="footer-value" id="footer-media-fps-value">—</span>
         </div>
         <div class="footer-section" id="footer-payload">
             <span class="footer-label">Payload:</span>

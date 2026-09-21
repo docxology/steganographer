@@ -70,11 +70,6 @@ let awaitingSignResponse = false;
 let frameCounter = 0;
 let selectedCameraDeviceId = '';
 
-// WebRTC transport state (active when liveConfig.transport === 'webrtc')
-let webrtcPeer = null;
-let webrtcDc = null;
-let webrtcReconnectAttempts = 0;
-const WEBRTC_MAX_RECONNECT_ATTEMPTS = 3;
 
 // Frame diff viewer state
 let diffViewerEnabled = false;
@@ -146,7 +141,6 @@ const el = {
     cfgQrScale: document.getElementById('cfg-qr-scale'),
     cfgQrScaleVal: document.getElementById('cfg-qr-scale-val'),
     cfgResolution: document.getElementById('cfg-resolution'),
-    cfgTransport: document.getElementById('cfg-transport'),
     // Stego info
     infoPayloadSize: document.getElementById('info-payload-size'),
     infoHashAlgo: document.getElementById('info-hash-algo'),
@@ -428,10 +422,8 @@ function startSigningInterval() {
 }
 
 function sendFrameForSigning() {
-    const dcOpen = webrtcDc && webrtcDc.readyState === 'open';
     if (!cameraActive || awaitingSignResponse) return;
-    if (liveConfig.transport === 'webrtc' && !dcOpen) return;
-    if (liveConfig.transport === 'websocket' && (!encodeWs || encodeWs.readyState !== WebSocket.OPEN)) return;
+    if (!transportIsConnected()) return;
     const v = el.webcamVideo;
     if (v.readyState < 2) return;
     const c = document.createElement('canvas');
@@ -447,121 +439,11 @@ function sendFrameForSigning() {
 
     el.signIndicator.classList.remove('hidden');
     c.toBlob((blob) => {
-        if (!blob) return;
-        blob.arrayBuffer().then(buf => {
-            if (liveConfig.transport === 'webrtc' && webrtcDc && webrtcDc.readyState === 'open') {
-                awaitingSignResponse = true;
-                webrtcDc.send(buf);
-            } else if (encodeWs && encodeWs.readyState === WebSocket.OPEN) {
-                awaitingSignResponse = true;
-                encodeWs.send(buf);
-            }
-        });
+        if (blob && transportIsConnected()) {
+            awaitingSignResponse = true;
+            blob.arrayBuffer().then(buf => sendFrameBytes(buf));
+        }
     }, 'image/jpeg', JPEG_QUALITY);
-}
-
-// ─── WebRTC (WHIP-style signaling + data channel) ────────────────────────────
-
-/// Wait (non-trickle) until ICE gathering completes so the offer carries the
-/// full candidate set — the server answers in a single HTTP request.
-function gatherIceComplete(pc, timeoutMs = 5000) {
-    return new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') return resolve();
-        const timer = setTimeout(() => { cleanup(); resolve(); }, timeoutMs);
-        function onGathering() {
-            if (pc.iceGatheringState === 'complete') { cleanup(); resolve(); }
-        }
-        function cleanup() {
-            clearTimeout(timer);
-            pc.removeEventListener('icegatheringstatechange', onGathering);
-        }
-        pc.addEventListener('icegatheringstatechange', onGathering);
-    });
-}
-
-/// Negotiate a WebRTC data channel against POST /api/webrtc/offer and use it
-/// for the encode path. Message shapes on the data channel are identical to
-/// the WebSocket handlers (binary JPEG in, `encoded_frame`/`decoded_frame`
-/// JSON out), so the same UI message handlers render both transports.
-async function connectEncodeWebrtc() {
-    try {
-        console.log('[encode] WebRTC negotiating…');
-        const pc = new RTCPeerConnection();
-        const dc = pc.createDataChannel('frames');
-        dc.binaryType = 'arraybuffer';
-        webrtcPeer = pc;
-        webrtcDc = dc;
-
-        dc.onopen = () => {
-            console.log('[encode] WebRTC data channel open');
-            webrtcReconnectAttempts = 0;
-            updateConnectionStatus(true);
-        };
-        dc.onmessage = (e) => {
-            let msg = null;
-            try { msg = JSON.parse(e.data); } catch (err) { }
-            if (!msg || !msg.type) return;
-            // Data-channel replies carry the exact WS message shapes.
-            if (msg.type === 'encoded_frame') handleEncodeMessage(msg);
-            else if (msg.type === 'decoded_frame') handleDecodeMessage(msg);
-            else if (msg.type === 'error') console.warn('[encode]', msg.message);
-        };
-        dc.onclose = () => {
-            console.log('[encode] WebRTC data channel closed');
-            updateConnectionStatus(false);
-            webrtcDc = null;
-            scheduleEncodeReconnect();
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await gatherIceComplete(pc);
-
-        const r = await fetch('/api/webrtc/offer', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }),
-        });
-        if (!r.ok) throw new Error(`signaling failed: HTTP ${r.status}`);
-        const answer = await r.json();
-        await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
-        console.log('[encode] WebRTC answer applied');
-    } catch (err) {
-        console.warn('[encode] WebRTC negotiation failed:', err);
-        teardownWebrtc();
-        if (webrtcReconnectAttempts < WEBRTC_MAX_RECONNECT_ATTEMPTS) {
-            webrtcReconnectAttempts++;
-            setTimeout(connectEncodeWebrtc, WS_RECONNECT_DELAY_MS);
-        } else {
-            // Give up on WebRTC: fall back to the WebSocket transport.
-            console.warn('[encode] falling back to WebSocket transport');
-            liveConfig.transport = 'websocket';
-            if (el.cfgTransport) el.cfgTransport.value = 'websocket';
-            connectEncodeWs();
-        }
-    }
-}
-
-function teardownWebrtc() {
-    if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
-    if (webrtcPeer) { try { webrtcPeer.close(); } catch (e) { } webrtcPeer = null; }
-}
-
-/// Connect the video encode path using the configured transport.
-function connectEncode() {
-    if (liveConfig.transport === 'webrtc') {
-        teardownWebrtc();
-        if (encodeWs) { encodeWs.onclose = null; encodeWs.close(); encodeWs = null; }
-        connectEncodeWebrtc();
-    } else {
-        teardownWebrtc();
-        connectEncodeWs();
-    }
-}
-
-/// Reconnect the encode path on transport drop (honors the active transport).
-function scheduleEncodeReconnect() {
-    setTimeout(connectEncode, WS_RECONNECT_DELAY_MS);
 }
 
 
@@ -573,7 +455,7 @@ function connectEncodeWs() {
     let heartbeatId = null;
     encodeWs.onopen = () => {
         console.log('[encode] WS connected');
-        updateConnectionStatus(true);
+        updateConnectionStatus(true, 'Connected (WS)');
         heartbeatId = setInterval(() => {
             if (encodeWs?.readyState === WebSocket.OPEN) encodeWs.send('ping');
         }, WS_HEARTBEAT_INTERVAL_MS);
@@ -594,6 +476,325 @@ function connectDecodeWs() {
     decodeWs.onmessage = (e) => { try { handleDecodeMessage(JSON.parse(e.data)); } catch (err) { } };
     decodeWs.onclose = () => { clearInterval(decodePollInterval); setTimeout(connectDecodeWs, WS_RECONNECT_DELAY_MS); };
     decodeWs.onerror = () => decodeWs.close();
+}
+
+
+// ─── Transport: WebRTC DataChannel with WebSocket fallback ────────────────────
+
+const WEBRTC_CHUNK_MAGIC = 0x5354474f;          // "STGO"
+const WEBRTC_CHUNK_HEADER_BYTES = 20;           // u32 magic + u64 msg_id + u32 idx + u32 count
+const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
+const TRANSPORT_STORAGE_KEY = 'stego-transport';
+const WEBRTC_ANSWER_TIMEOUT_MS = 5000;
+const WEBRTC_MEDIA_TRACK_TIMEOUT_MS = 5000;
+// Once WebRTC fails, fall back to WebSocket permanently for this session.
+let transportFallback = false;
+let transport = null;
+let webrtcPc = null;
+let webrtcDc = null;
+let webrtcPollTimer = null;
+let webrtcMsgId = 0;
+// Partial inbound binary messages keyed by msg_id (chunk reassembly).
+const webrtcPartial = new Map();
+// WebRTC media (H.264 RTP track) state. The media preview is an enhancement
+// view: the DataChannel canvas path remains the primary rendering surface.
+let mediaFpsActive = false;
+let mediaTrackTimer = null;
+
+function resolveTransportPreference() {
+    const q = new URL(location.href).searchParams.get('transport');
+    if (q === 'webrtc' || q === 'websocket' || q === 'auto') return q;
+    const saved = localStorage.getItem(TRANSPORT_STORAGE_KEY);
+    if (saved === 'webrtc' || saved === 'websocket') return saved;
+    return 'auto';
+}
+
+function transportIsConnected() {
+    if (transport && transport.mode === 'webrtc') {
+        return webrtcDc && webrtcDc.readyState === 'open';
+    }
+    return !!(encodeWs && encodeWs.readyState === WebSocket.OPEN);
+}
+
+function connectTransport() {
+    const pref = resolveTransportPreference();
+    console.log('[transport] preference:', pref, 'fallback:', transportFallback);
+    if (pref === 'webrtc' || (pref === 'auto' && !transportFallback)) {
+        connectWebRtcTransport();
+    } else {
+        connectWsTransport();
+    }
+}
+
+function connectWsTransport() {
+    transport = { mode: 'ws' };
+    connectEncodeWs();
+    connectDecodeWs();
+}
+
+function fallbackToWs(reason) {
+    console.warn('[transport] WebRTC failed, falling back to WebSocket:', reason);
+    transportFallback = true;
+    // Persist so reloads skip the failed WebRTC attempt.
+    try { localStorage.setItem(TRANSPORT_STORAGE_KEY, 'websocket'); } catch (e) { }
+    teardownWebRtcTransport();
+    if (!transport || transport.mode !== 'ws') connectWsTransport();
+}
+
+function teardownWebRtcTransport() {
+    if (webrtcPollTimer) { clearInterval(webrtcPollTimer); webrtcPollTimer = null; }
+    if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
+    if (webrtcPc) { try { webrtcPc.close(); } catch (e) { } webrtcPc = null; }
+    webrtcPartial.clear();
+    resetMediaPreview();
+}
+
+async function connectWebRtcTransport() {
+    try {
+        // Probe the server's WebRTC capabilities: mirror its ICE server list
+        // and learn whether the H.264 media track is published.
+        let mediaEnabled = false;
+        let iceServers = [];
+        try {
+            const cfgResp = await fetch('/api/webrtc/config');
+            if (cfgResp.ok) {
+                const cfg = await cfgResp.json();
+                mediaEnabled = !!cfg.media;
+                iceServers = parseIceServersForBrowser(cfg.ice_servers || []);
+            }
+        } catch (err) {
+            // Config endpoint unavailable -> DataChannel-only session.
+        }
+
+        const pc = new RTCPeerConnection({ iceServers });
+        webrtcPc = pc;
+        const dc = pc.createDataChannel('frames', { ordered: true });
+        webrtcDc = dc;
+
+        // Media: recvonly video transceiver must be added BEFORE createOffer
+        // so the server answers with a sendonly H.264 track. A 5s guard keeps
+        // the DataChannel canvas path as the default when no track arrives.
+        if (mediaEnabled) {
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            mediaTrackTimer = setTimeout(() => {
+                console.log('[media] no WebRTC track within 5s; keeping DataChannel canvas path');
+            }, WEBRTC_MEDIA_TRACK_TIMEOUT_MS);
+            pc.ontrack = (ev) => {
+                if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
+                if (ev.streams && ev.streams[0]) {
+                    showMediaPreview(ev.streams[0]);
+                }
+            };
+        }
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        // Non-trickle server: it consumes candidates from the SDP only, so
+        // wait for gathering (capped at 1s — host candidates appear fast).
+        // Without this the offer carries no candidates and the server-side
+        // ICE agent has no candidate pairs to check.
+        if (pc.iceGatheringState !== 'complete') {
+            await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 1000);
+                pc.addEventListener('icegatheringstatechange', () => {
+                    if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+                });
+            });
+        }
+        const resp = await fetch('/api/webrtc/offer', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer' }),
+        });
+        if (resp.status === 501) throw new Error('webrtc feature disabled; using websocket fallback');
+        if (!resp.ok) throw new Error(`offer endpoint returned ${resp.status}`);
+        const answer = await resp.json();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+
+        // The media restructure dropped the old `opened` promise; restore
+        // the wait as a timeout race so a pre-open DataChannel failure
+        // falls back to WebSocket instead of hanging forever.
+        await Promise.race([
+            new Promise((resolve) => { dc.onopen = resolve; }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('DataChannel open timeout')), WEBRTC_ANSWER_TIMEOUT_MS)),
+        ]);
+        console.log('[transport] WebRTC DataChannel open (session', answer.session_id + ')');
+
+        dc.onmessage = (e) => handleWebRtcMessage(e.data);
+        dc.onclose = () => { updateConnectionStatus(false); fallbackToWs('DataChannel closed'); };
+        dc.onerror = () => fallbackToWs('DataChannel error');
+
+        transport = { mode: 'webrtc' };
+        updateConnectionStatus(true, 'Connected (WebRTC)');
+
+        // Decode poll semantics over the DataChannel.
+        webrtcPollTimer = setInterval(() => {
+            if (webrtcDc && webrtcDc.readyState === 'open') {
+                webrtcDc.send(JSON.stringify({ kind: 'decode_poll', msg_id: ++webrtcMsgId }));
+            }
+        }, DECODE_POLL_INTERVAL_MS);
+    } catch (err) {
+        fallbackToWs(err);
+    }
+}
+
+// Convert the server's ICE server URL list into browser RTCIceServer
+/// entries. Inline TURN credentials (`turn:user:cred@host:port`) are hoisted
+/// into username/credential; unsupported or incomplete entries are skipped.
+function parseIceServersForBrowser(urls) {
+    return urls.map((raw) => {
+        const m = /^(stuns?|turns?):(.+)$/i.exec(String(raw).trim());
+        if (!m) return null;
+        const scheme = m[1].toLowerCase();
+        let rest = m[2];
+        let username = '';
+        let credential = '';
+        const at = rest.lastIndexOf('@');
+        if (at >= 0) {
+            const userinfo = rest.slice(0, at);
+            rest = rest.slice(at + 1);
+            const sep = userinfo.indexOf(':');
+            username = sep >= 0 ? userinfo.slice(0, sep) : userinfo;
+            credential = sep >= 0 ? userinfo.slice(sep + 1) : '';
+        }
+        if ((scheme === 'turn' || scheme === 'turns') && (!username || !credential)) return null;
+        return { urls: [scheme + ':' + rest], username, credential };
+    }).filter(Boolean);
+}
+
+// Attach the remote media stream to the preview <video> and start the fps
+// counter (requestVideoFrameCallback when available, rAF otherwise).
+function showMediaPreview(stream) {
+    const video = document.getElementById('media-preview');
+    const wrap = document.getElementById('media-preview-container');
+    if (!video || !wrap) return;
+    if (video.srcObject !== stream) {
+        video.srcObject = stream;
+        wrap.classList.remove('hidden');
+    }
+    startMediaFpsCounter(video);
+}
+
+function startMediaFpsCounter(video) {
+    if (mediaFpsActive) return;
+    mediaFpsActive = true;
+    const el = document.getElementById('footer-media-fps-value');
+    let frames = 0;
+    let windowStart = performance.now();
+    const update = () => {
+        const now = performance.now();
+        if (now - windowStart >= 1000) {
+            if (el) el.textContent = (frames * 1000 / (now - windowStart)).toFixed(1);
+            frames = 0;
+            windowStart = now;
+        }
+    };
+    if (typeof video.requestVideoFrameCallback === 'function') {
+        const loop = () => {
+            if (!mediaFpsActive) return;
+            frames += 1;
+            update();
+            video.requestVideoFrameCallback(loop);
+        };
+        video.requestVideoFrameCallback(loop);
+    } else {
+        const loop = () => {
+            if (!mediaFpsActive) return;
+            frames += 1;
+            update();
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+    }
+}
+
+function resetMediaPreview() {
+    mediaFpsActive = false;
+    if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
+    const video = document.getElementById('media-preview');
+    if (video) video.srcObject = null;
+    const wrap = document.getElementById('media-preview-container');
+    if (wrap) wrap.classList.add('hidden');
+    const fpsEl = document.getElementById('footer-media-fps-value');
+    if (fpsEl) fpsEl.textContent = '—';
+}
+
+function handleWebRtcMessage(data) {
+    let payload;
+    if (typeof data === 'string') {
+        payload = data;
+    } else {
+        // Binary chunk: reassemble with the framing header.
+        const buf = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+        if (buf.length < WEBRTC_CHUNK_HEADER_BYTES) return;
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const magic = dv.getUint32(0);
+        if (magic !== WEBRTC_CHUNK_MAGIC) return;
+        const msgId = dv.getBigUint64(4);
+        const idx = dv.getUint32(12);
+        const count = dv.getUint32(16);
+        const partial = webrtcPartial.get(msgId) || { chunks: new Array(count), received: 0 };
+        if (partial.chunks.length !== count) { webrtcPartial.delete(msgId); return; }
+        if (partial.chunks[idx] === undefined) {
+            partial.chunks[idx] = buf.slice(WEBRTC_CHUNK_HEADER_BYTES);
+            partial.received += 1;
+        }
+        if (partial.received < count) { webrtcPartial.set(msgId, partial); return; }
+        webrtcPartial.delete(msgId);
+        const total = partial.chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (const c of partial.chunks) { out.set(c, off); off += c.length; }
+        payload = new TextDecoder().decode(out);
+    }
+    try {
+        const msg = JSON.parse(payload);
+        if (msg.type === 'encoded_frame' || msg.type === 'metrics') handleEncodeMessage(msg);
+        else if (msg.type === 'decoded_frame' || msg.type === 'verify_status') handleDecodeMessage(msg);
+    } catch (err) { }
+}
+
+function webRtcSendChunked(msgId, payloadBytes) {
+    const count = Math.max(1, Math.ceil(payloadBytes.length / WEBRTC_CHUNK_PAYLOAD_MAX));
+    const header = new ArrayBuffer(WEBRTC_CHUNK_HEADER_BYTES);
+    for (let i = 0; i < count; i++) {
+        const slice = payloadBytes.subarray(i * WEBRTC_CHUNK_PAYLOAD_MAX, (i + 1) * WEBRTC_CHUNK_PAYLOAD_MAX);
+        const chunk = new Uint8Array(WEBRTC_CHUNK_HEADER_BYTES + slice.length);
+        const dv = new DataView(chunk.buffer);
+        dv.setUint32(0, WEBRTC_CHUNK_MAGIC);
+        // msg_id fits in 32 bits in practice; write low word into u64 field.
+        dv.setUint32(4, 0); dv.setUint32(8, msgId);
+        dv.setUint32(12, i);
+        dv.setUint32(16, count);
+        chunk.set(slice, WEBRTC_CHUNK_HEADER_BYTES);
+        webrtcDc.send(chunk);
+    }
+}
+
+function sendFrameBytes(buf) {
+    if (transport && transport.mode === 'webrtc') {
+        if (!webrtcDc || webrtcDc.readyState !== 'open') return;
+        const msgId = ++webrtcMsgId;
+        const bytes = new Uint8Array(buf);
+        const b64 = btoa(bytesToChunks(bytes));
+        const request = JSON.stringify({
+            kind: 'encode', msg_id: msgId,
+            sent_unix_ms: Date.now(), jpeg_b64: b64,
+        });
+        webRtcSendChunked(msgId, new TextEncoder().encode(request));
+    } else if (encodeWs && encodeWs.readyState === WebSocket.OPEN) {
+        encodeWs.send(buf);
+    }
+}
+
+function bytesToChunks(bytes) {
+    // Feed base64 conversion in safe slices (avoid call-stack overflow).
+    let s = '';
+    const STEP = 0x8000;
+    for (let i = 0; i < bytes.length; i += STEP) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
+    }
+    return s;
 }
 
 // ─── Message Handlers ─────────────────────────────────────────────────────────
@@ -755,15 +956,6 @@ function setupConfigControls() {
         });
     }
 
-    // Video transport dropdown (WebSocket ↔ WebRTC)
-    if (el.cfgTransport) {
-        el.cfgTransport.addEventListener('change', () => {
-            liveConfig.transport = el.cfgTransport.value;
-            pushConfigToServer();
-            // Reconnect the encode path with the newly selected transport.
-            connectEncode();
-        });
-    }
 
     updateStegoInfo();
 }
@@ -868,22 +1060,21 @@ async function fetchConfig() {
             el.footerResolutionValue.textContent = `${c.width}×${c.height}`;
             liveConfig.width = c.width; liveConfig.height = c.height;
         }
-        if (c.transport && c.transport !== liveConfig.transport) {
-            liveConfig.transport = c.transport;
-            if (el.cfgTransport) el.cfgTransport.value = c.transport;
-            // Reconnect the encode path with the server's transport choice.
-            connectEncode();
-        }
         updateStegoInfo();
     } catch (e) { }
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function updateConnectionStatus(connected) {
+function updateConnectionStatus(connected, label) {
     el.statusDot.classList.toggle('connected', connected);
     el.statusDot.classList.toggle('disconnected', !connected);
-    el.statusText.textContent = connected ? 'Connected' : 'Reconnecting...';
+    if (!connected) {
+        el.statusText.textContent = 'Reconnecting...';
+    } else {
+        const mode = transport && transport.mode === 'webrtc' ? 'Connected (WebRTC)' : 'Connected (WS)';
+        el.statusText.textContent = label || mode;
+    }
 }
 
 function fmtNum(n) {
@@ -1316,18 +1507,30 @@ function setupCameraSelector() {
     }
 }
 
+function setupTransportToggle() {
+    const sel = document.getElementById('cfg-transport');
+    if (!sel) return;
+    sel.value = resolveTransportPreference();
+    sel.addEventListener('change', () => {
+        try { localStorage.setItem(TRANSPORT_STORAGE_KEY, sel.value); } catch (e) { }
+        // Simplest acceptable behavior: reload so both connections come up on
+        // the newly selected transport.
+        location.reload();
+    });
+}
+
 function init() {
     ingestAuthToken();
     console.log('Steganographer Dashboard initializing...');
     initThemeToggle();
     fetchConfig();
-    connectEncode();
-    connectDecodeWs();
+    connectTransport();
     detectMetaMask();
     setupConfigControls();
     setupDiffViewer();
     setupPerformancePanel();
     setupCameraSelector();
+    setupTransportToggle();
     startMetricsPolling();
     el.startCameraBtn.addEventListener('click', startCamera);
     el.metamaskBtn.addEventListener('click', () => metamaskAccount ? disconnectMetaMask() : connectMetaMask());

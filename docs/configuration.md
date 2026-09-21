@@ -414,6 +414,57 @@ The web dashboard (`./run.sh` → `d`) provides real-time configuration controls
 | **QR Scale** | 5% – 100% | 10% | — |
 | **Resolution** | 320×240 – 1920×1080 | 640×480 | — |
 
+### Transport Policy
+
+The dashboard frame pipeline can run over a WebRTC DataChannel (requires the
+dashboard built with `--features webrtc`) or over WebSocket. The transport is
+selected by, in order of precedence:
+
+1. **URL query** — `?transport=webrtc|websocket|auto` on the dashboard URL.
+2. **Persisted choice** — the `stego-transport` localStorage key (set by the
+   *Transport* control in the dashboard settings, or automatically when the
+   client falls back).
+3. **Server default** — the `--transport` CLI flag (`auto` by default), which
+   populates `DashboardState::transport`.
+
+`TransportPolicy::Auto` tries the WebRTC DataChannel first; on any failure
+(501 from `/api/webrtc/offer` when the feature is not built in, SDP/ICE
+failure, DataChannel error or close, 5 s answer timeout) the client falls back
+to WebSocket permanently for the session and persists the resolved mode to
+localStorage so reloads skip the retry. `Websocket` and `WebRtc` pin the
+transport.
+
+### ICE Servers (WebRTC)
+
+By default the dashboard uses **no** ICE servers: peer connections gather
+loopback host candidates only and no traffic leaves the machine. For
+deployments on trusted networks, STUN/TURN URLs can be supplied to
+`DashboardState::ice_servers` (one URL per entry) and are mirrored to the
+browser via `GET /api/webrtc/config`.
+
+Supported forms:
+
+- `stun:host:port` / `stuns:host:port`
+- `turn:host:port` / `turns:host:port` — requires inline credentials
+  (`turn:user:cred@host:port`); they are hoisted into the
+  `username`/`credential` fields of the peer connection's ICE server entry.
+
+Entries with unsupported schemes, or TURN entries without credentials, are
+logged and skipped. Tests never contact external STUN/TURN servers; the
+plumbing is exercised by construction only. A `--ice-server <url>` CLI flag
+(repeatable) is the intended way to populate this list.
+
+### H.264 Media Track
+
+When the transport policy allows WebRTC (`auto` or `webrtc`) and the browser
+offer contains a video m-line, the server publishes the stego'd frames as a
+sendonly H.264 RTP track (OpenH264, 2.5 Mbps target @ 720p, IDR every
+~2 s). The browser shows the track as a media preview below the encode
+canvas with a Media fps counter in the footer; the DataChannel canvas view
+stays the primary verification surface and is unchanged when media is off.
+See `docs/api-reference.md` ("Media negotiation") for the wire-level
+details.
+
 ### QR Data Matrix Overlay
 
 The dashboard renders a QR-style data matrix on every video frame containing:

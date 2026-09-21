@@ -117,6 +117,9 @@ graph TD
 | `info_bar.rs` | Exoteric overlay (QR, barcode, hash, timestamp) | ~150 | 5 |
 | `metrics.rs` | Lock-free pipeline performance counters | ~120 | 5 |
 | `lib.rs` | Module declarations and re-exports | ~37 | — |
+| `learned/mod.rs`* | Learned watermarking: 8×8 DCT chip embedding with trained MLP decoder (opt-in `learned` feature) | ~860 | gated* |
+
+\* Feature-gated behind `learned`; gated tests do not run under default features.
 
 ### steganographer-gst
 

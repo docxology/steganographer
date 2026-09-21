@@ -105,9 +105,9 @@ steganographer-core (unit):   381 tests (packet/carrier incl. PCM S16 LSB, keyed
 steganographer-core (integ):  125 tests (E2E, pipeline, template, info_bar, signer_backend incl. ML-DSA, encryption, ECC, OTS, golden vectors, detector calibration)
 steganographer-cli (unit):     22 tests (media descriptors/I/O, canonical carrier binding, verify validation/revocation)
 steganographer-cli (integ):    46 tests (legacy/generic round trips, exit-code contract, config incl. limits/profiles, key files, encryption, Argon2id password path, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode + container findings, extract command)
-steganographer-dashboard:     58 tests (LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation; 8 doc-tests)
+steganographer-dashboard:     57 tests (LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation; 8 doc-tests)
 steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
 steganographer-wasm:           9 tests (packet encode/decode, RGB/PCM carriers, forensic scan, decode-limit overrides)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        665 tests, 0 failures
+Total:                        664 tests, 0 failures
 ```

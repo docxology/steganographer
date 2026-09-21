@@ -2620,3 +2620,33 @@ body[data-theme="light"] .toast.toast-info {
     background: var(--bg-card);
     color: var(--text-primary);
 }
+/* ═══ WebRTC H.264 Media Preview ═══ */
+
+.media-preview-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.media-preview-container.hidden {
+    display: none;
+}
+
+.media-preview-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.media-preview {
+    width: 100%;
+    max-width: 640px;
+    aspect-ratio: 4 / 3;
+    background: #000;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    object-fit: contain;
+}

@@ -35,6 +35,8 @@ pub mod forensics;
 pub mod hash_chain;
 pub mod info_bar;
 pub mod kdf;
+#[cfg(feature = "learned")]
+pub mod learned;
 pub mod lsb_audio;
 pub mod lsb_video;
 pub mod mdct_audio;

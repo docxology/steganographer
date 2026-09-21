@@ -14,6 +14,7 @@ default = ["ots"]
 # that also compiles for `wasm32-unknown-unknown`.
 ots = ["dep:reqwest"]
 ethereum = ["k256"]
+learned = ["dep:ndarray"]
 
 [dependencies]
 serde = { workspace = true }
@@ -39,6 +40,8 @@ flate2 = "1"
 reqwest = { workspace = true, optional = true }
 ml-dsa = { workspace = true }
 zeroize = { workspace = true }
+# Learned watermarking training/inference tensors (opt-in `learned` feature).
+ndarray = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
@@ -48,3 +51,7 @@ tokio = { workspace = true }
 [[bench]]
 name = "core_benchmarks"
 harness = false
+
+[[example]]
+name = "train_learned"
+required-features = ["learned"]
