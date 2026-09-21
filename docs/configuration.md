@@ -2,7 +2,7 @@
 
 ## Overview
 
-Steganographer uses TOML configuration files to define pipeline behavior. The configuration is hierarchical with four main sections: `global`, `video` (with `pipeline`, `input`, `output`, `stego`), and `audio`.
+Steganographer uses TOML configuration files to define pipeline behavior. The configuration is hierarchical with four main sections: `global`, `video` (with `pipeline`, `input`, `output`, `stego`), `audio`, and the optional `ots` (OpenTimestamps attestation).
 
 The `run.sh` interactive menu reads these values to construct GStreamer pipelines, and the Rust CLI uses them for module configuration.
 
@@ -189,6 +189,43 @@ Valid pipeline steps: `"lsb_signature"`
 | `key` | String | 64 hex chars | 32-byte hex key for pseudo-random index permutation |
 
 ---
+
+### `[ots]`
+
+Optional. Configures the OpenTimestamps (OTS) attestation integration. This
+feature is entirely **opt-in**: when the `[ots]` block is absent (or
+`enabled = false`), the project behaves exactly as before — no network calls,
+no proof files, no overhead.
+
+When enabled, the OTS client stamps the SHA-256 of the BLAKE3 Merkle root of
+each completed hash-chain segment (default: at most one stamp every 5
+minutes) against the chosen calendar server, writing `.ots` proof files to
+`proof_dir`. Only a small digest + method + timestamp reference is carried in
+packet envelope extension fields; the proofs themselves are not embedded in
+carrier media.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch |
+| `server_url` | String | `https://opentimestamps.org` | Stamping server base URL |
+| `method` | String | `"bitcoin"` | Blockchain attestation method: `"bitcoin"` or `"ethereum"` |
+| `interval_secs` | u64 | `300` | Minimum interval between stamps (seconds) |
+| `proof_dir` | String | `ots_proofs` | Directory for `.ots` proof files (created if missing) |
+| `timeout_secs` | u64 | `30` | HTTP request timeout for the OTS server |
+
+```toml
+[ots]
+enabled = true
+server_url = "https://opentimestamps.org"
+method = "bitcoin"
+interval_secs = 300
+proof_dir = "ots_proofs"
+timeout_secs = 30
+```
+
+The dashboard reads the same block: with `enabled = true` it serves an OTS
+panel (`/ots.js`, `/ots/status`) and Bearer-authenticated `/ots/stamp` and
+`/ots/verify` endpoints. See [OTS Integration](ots-integration.md).
 
 ## Complete Example
 

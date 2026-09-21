@@ -10,10 +10,11 @@
 //! - **Algorithm**: ChaCha20-Poly1305 (RFC 8439) — authenticated encryption
 //!   with associated data (AEAD).
 //! - **Key**: 32 bytes (256-bit), shared between encoder and verifier.
-//! - **Nonce**: 12 bytes, composed of a 4-byte random salt (unique per
-//!   invocation) + 8-byte frame index. The salt is prepended to the
-//!   ciphertext so the receiver can reconstruct the nonce. This prevents
-//!   nonce reuse across batch encodes that share a key.
+//! - **Nonce**: 12 bytes, derived as `BLAKE3(fresh 4-byte random salt ‖
+//!   16-byte packet identifier)[..12]`. The salt is prepended to the
+//!   ciphertext so the receiver can reconstruct the nonce. The nonce is never
+//!   derived from caller-controlled transport data (the public locator
+//!   nonce), and distinct packets derive distinct nonces under a shared key.
 //! - **Output**: `salt(4) || ciphertext || tag` (4 + plaintext.len() + 16 bytes).
 //!
 //! ## Security Notes
@@ -30,6 +31,7 @@ use chacha20poly1305::{
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
+use zeroize::Zeroize;
 
 /// Size of the encryption key in bytes (256-bit).
 pub const KEY_SIZE: usize = 32;
@@ -62,7 +64,7 @@ impl EncryptionKey {
 
     /// Create from a hex-encoded string.
     pub fn from_hex(hex: &str) -> anyhow::Result<Self> {
-        let bytes = hex_decode(hex)?;
+        let mut bytes = hex_decode(hex)?;
         if bytes.len() != KEY_SIZE {
             anyhow::bail!(
                 "Encryption key must be {} bytes ({} hex chars), got {} bytes",
@@ -73,6 +75,7 @@ impl EncryptionKey {
         }
         let mut arr = [0u8; KEY_SIZE];
         arr.copy_from_slice(&bytes);
+        bytes.zeroize();
         Ok(Self(arr))
     }
 
@@ -81,9 +84,24 @@ impl EncryptionKey {
         &self.0
     }
 
-    /// Export as hex string.
+    /// Export as a redacted hex preview (first two bytes only). Safe to log;
+    /// use [`EncryptionKey::expose_hex`] when the raw key material is genuinely
+    /// required.
     pub fn to_hex(&self) -> String {
+        format!("{:02x}{:02x}…", self.0[0], self.0[1])
+    }
+
+    /// Export the full hex string. Explicit opt-in: only call this when the
+    /// caller must print or store the raw key material (e.g. handing a newly
+    /// generated key to the user).
+    pub fn expose_hex(&self) -> String {
         self.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -93,30 +111,39 @@ impl std::fmt::Debug for EncryptionKey {
     }
 }
 
-/// Derive a 12-byte nonce from a random salt and frame index.
+/// Derive the 12-byte AEAD nonce from a fresh 4-byte random salt and the
+/// 16-byte packet identifier: `BLAKE3(salt ‖ packet_id)[..12]`.
 ///
-/// The nonce is `salt[0..4] || frame_index_be[0..8]` (12 bytes total).
-/// The salt ensures uniqueness across invocations with the same frame_index.
-fn derive_nonce(salt: &[u8; SALT_SIZE], frame_index: u64) -> [u8; NONCE_SIZE] {
+/// The caller never supplies transport-controlled bytes, so the nonce cannot
+/// be steered by public packet metadata. Distinct packets derive distinct
+/// nonces even under a shared key, and the fresh salt keeps re-encryptions of
+/// the same packet unique.
+fn derive_nonce(salt: &[u8; SALT_SIZE], packet_id: &[u8; 16]) -> [u8; NONCE_SIZE] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(salt);
+    hasher.update(packet_id);
+    let hash = hasher.finalize();
     let mut nonce = [0u8; NONCE_SIZE];
-    nonce[0..SALT_SIZE].copy_from_slice(salt);
-    nonce[SALT_SIZE..NONCE_SIZE].copy_from_slice(&frame_index.to_be_bytes());
+    nonce.copy_from_slice(&hash.as_bytes()[..NONCE_SIZE]);
     nonce
 }
 
 /// Encrypt a payload using ChaCha20-Poly1305.
 ///
 /// Returns `salt(4) || ciphertext || tag` (plaintext.len() + 4 + 16 bytes).
-/// The 4-byte random salt is prepended so the receiver can reconstruct the nonce.
+/// The 4-byte random salt is prepended so the receiver can reconstruct the
+/// nonce; the ciphertext layout is unchanged from previous versions.
 ///
 /// # Arguments
 /// * `key` — The 256-bit encryption key.
-/// * `frame_index` — Used as part of the nonce derivation.
+/// * `packet_id` — The 16-byte packet identifier the nonce is derived from;
+///   it must match between [`encrypt`] and [`decrypt`]. Never derived from
+///   public transport data such as the locator nonce.
 /// * `plaintext` — The data to encrypt.
 /// * `aad` — Optional additional authenticated data (authenticated but not encrypted).
 pub fn encrypt(
     key: &EncryptionKey,
-    frame_index: u64,
+    packet_id: &[u8; 16],
     plaintext: &[u8],
     aad: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
@@ -125,9 +152,8 @@ pub fn encrypt(
     // Generate a random salt for this invocation to prevent nonce reuse
     let mut salt = [0u8; SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
-    let nonce_bytes = derive_nonce(&salt, frame_index);
+    let nonce_bytes = derive_nonce(&salt, packet_id);
     let nonce = Nonce::from_slice(&nonce_bytes);
-
     let payload = match aad {
         Some(a) => Payload {
             msg: plaintext,
@@ -157,12 +183,12 @@ pub fn encrypt(
 ///
 /// # Arguments
 /// * `key` — The 256-bit encryption key.
-/// * `frame_index` — Must match the frame index used during encryption.
+/// * `packet_id` — Must match the packet identifier used during encryption.
 /// * `ciphertext` — The encrypted data (salt || ciphertext || tag).
 /// * `aad` — Optional additional authenticated data (must match encryption).
 pub fn decrypt(
     key: &EncryptionKey,
-    frame_index: u64,
+    packet_id: &[u8; 16],
     ciphertext: &[u8],
     aad: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
@@ -181,7 +207,7 @@ pub fn decrypt(
     salt.copy_from_slice(&ciphertext[..SALT_SIZE]);
     let actual_ciphertext = &ciphertext[SALT_SIZE..];
 
-    let nonce_bytes = derive_nonce(&salt, frame_index);
+    let nonce_bytes = derive_nonce(&salt, packet_id);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let payload = match aad {
@@ -218,13 +244,16 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    const PACKET_ID: [u8; 16] = *b"0123456789abcdef";
+    const OTHER_PACKET_ID: [u8; 16] = *b"fdecba9876543210";
+
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let key = EncryptionKey::generate();
         let plaintext = b"top secret steganographic payload";
-        let enc = encrypt(&key, 42, plaintext, None).unwrap();
+        let enc = encrypt(&key, &PACKET_ID, plaintext, None).unwrap();
         assert_ne!(&enc[SALT_SIZE..], plaintext);
-        let dec = decrypt(&key, 42, &enc, None).unwrap();
+        let dec = decrypt(&key, &PACKET_ID, &enc, None).unwrap();
         assert_eq!(dec, plaintext);
     }
 
@@ -233,8 +262,8 @@ mod tests {
         let key = EncryptionKey::generate();
         let plaintext = b"secret with AAD";
         let aad = b"associated data";
-        let enc = encrypt(&key, 1, plaintext, Some(aad)).unwrap();
-        let dec = decrypt(&key, 1, &enc, Some(aad)).unwrap();
+        let enc = encrypt(&key, &PACKET_ID, plaintext, Some(aad)).unwrap();
+        let dec = decrypt(&key, &PACKET_ID, &enc, Some(aad)).unwrap();
         assert_eq!(dec, plaintext);
     }
 
@@ -242,37 +271,39 @@ mod tests {
     fn test_wrong_key_fails() {
         let key1 = EncryptionKey::generate();
         let key2 = EncryptionKey::generate();
-        let enc = encrypt(&key1, 0, b"secret", None).unwrap();
-        assert!(decrypt(&key2, 0, &enc, None).is_err());
+        let enc = encrypt(&key1, &PACKET_ID, b"secret", None).unwrap();
+        assert!(decrypt(&key2, &PACKET_ID, &enc, None).is_err());
     }
 
     #[test]
-    fn test_wrong_frame_index_fails() {
+    fn test_wrong_packet_id_fails() {
+        // The packet identifier anchors the nonce: decrypting under a
+        // different identifier must fail closed.
         let key = EncryptionKey::generate();
-        let enc = encrypt(&key, 100, b"secret", None).unwrap();
-        assert!(decrypt(&key, 101, &enc, None).is_err());
+        let enc = encrypt(&key, &PACKET_ID, b"secret", None).unwrap();
+        assert!(decrypt(&key, &OTHER_PACKET_ID, &enc, None).is_err());
     }
 
     #[test]
     fn test_tamper_detection() {
         let key = EncryptionKey::generate();
-        let mut enc = encrypt(&key, 0, b"secret", None).unwrap();
+        let mut enc = encrypt(&key, &PACKET_ID, b"secret", None).unwrap();
         // Flip a bit in the ciphertext (after the salt)
         enc[SALT_SIZE] ^= 1;
-        assert!(decrypt(&key, 0, &enc, None).is_err());
+        assert!(decrypt(&key, &PACKET_ID, &enc, None).is_err());
     }
 
     #[test]
     fn test_wrong_aad_fails() {
         let key = EncryptionKey::generate();
-        let enc = encrypt(&key, 0, b"secret", Some(b"aad1")).unwrap();
-        assert!(decrypt(&key, 0, &enc, Some(b"aad2")).is_err());
+        let enc = encrypt(&key, &PACKET_ID, b"secret", Some(b"aad1")).unwrap();
+        assert!(decrypt(&key, &PACKET_ID, &enc, Some(b"aad2")).is_err());
     }
 
     #[test]
     fn test_key_hex_roundtrip() {
         let key = EncryptionKey::generate();
-        let hex = key.to_hex();
+        let hex = key.expose_hex();
         let restored = EncryptionKey::from_hex(&hex).unwrap();
         assert_eq!(key.as_bytes(), restored.as_bytes());
     }
@@ -287,41 +318,59 @@ mod tests {
     fn test_ciphertext_is_larger_than_plaintext() {
         let key = EncryptionKey::generate();
         let plaintext = b"payload data";
-        let enc = encrypt(&key, 0, plaintext, None).unwrap();
+        let enc = encrypt(&key, &PACKET_ID, plaintext, None).unwrap();
         // ciphertext = salt(4) + plaintext.len() + tag(16)
         assert_eq!(enc.len(), plaintext.len() + SALT_SIZE + TAG_SIZE);
     }
 
     #[test]
-    fn test_different_frame_indices_different_ciphertext() {
-        let key = EncryptionKey::generate();
-        let enc0 = encrypt(&key, 0, b"same data", None).unwrap();
-        let enc1 = encrypt(&key, 1, b"same data", None).unwrap();
-        assert_ne!(enc0, enc1);
+    fn test_different_packet_ids_derive_different_nonces() {
+        let salt = [1u8; SALT_SIZE];
+        let n1 = derive_nonce(&salt, &PACKET_ID);
+        let n2 = derive_nonce(&salt, &OTHER_PACKET_ID);
+        assert_ne!(n1, n2, "distinct packets must not share an AEAD nonce");
+        assert_ne!(n1, [0u8; NONCE_SIZE]);
     }
 
     #[test]
-    fn test_same_frame_index_different_salt() {
-        // Critical: encrypting the same data with the same frame_index
-        // must produce different ciphertexts due to the random salt.
-        // This is the fix for the nonce-reuse vulnerability in batch mode.
+    fn test_same_packet_id_different_salt() {
+        // Critical: encrypting the same data with the same packet_id must
+        // produce different ciphertexts due to the fresh random salt.
         let key = EncryptionKey::generate();
-        let enc0 = encrypt(&key, 0, b"same data", None).unwrap();
-        let enc1 = encrypt(&key, 0, b"same data", None).unwrap();
+        let enc0 = encrypt(&key, &PACKET_ID, b"same data", None).unwrap();
+        let enc1 = encrypt(&key, &PACKET_ID, b"same data", None).unwrap();
         assert_ne!(
             enc0, enc1,
-            "Same frame_index must produce different ciphertexts due to random salt"
+            "Same packet_id must produce different ciphertexts due to random salt"
         );
         // Both must still decrypt correctly
-        assert_eq!(decrypt(&key, 0, &enc0, None).unwrap(), b"same data");
-        assert_eq!(decrypt(&key, 0, &enc1, None).unwrap(), b"same data");
+        assert_eq!(
+            decrypt(&key, &PACKET_ID, &enc0, None).unwrap(),
+            b"same data"
+        );
+        assert_eq!(
+            decrypt(&key, &PACKET_ID, &enc1, None).unwrap(),
+            b"same data"
+        );
     }
 
     #[test]
-    fn test_debug_does_not_leak_key() {
-        let key = EncryptionKey::generate();
+    fn test_debug_and_to_hex_do_not_leak_key() {
+        let key = EncryptionKey::from_bytes(&[0xAA; KEY_SIZE]);
+        let full = key.expose_hex();
         let debug_str = format!("{:?}", key);
         assert!(debug_str.contains("redacted"));
-        assert!(!debug_str.contains(&key.to_hex()));
+        assert!(!debug_str.contains(&full));
+        assert_ne!(key.to_hex(), full, "to_hex must stay redacted");
+        assert!(!full.starts_with(&key.to_hex()));
+    }
+
+    #[test]
+    fn test_key_material_zeroizes() {
+        // Exercises the exact call the Drop impl makes; Drop itself cannot be
+        // observed after the fact without unsafe code.
+        let mut key = EncryptionKey::from_bytes(&[0xAA; KEY_SIZE]);
+        key.0.zeroize();
+        assert!(key.0.iter().all(|&b| b == 0));
     }
 }

@@ -51,6 +51,7 @@ pub mod signer_backend;
 pub mod spread_spectrum;
 pub mod steganalysis;
 pub mod transforms;
+pub mod unicode_text;
 pub mod video;
 pub mod wasm_inspector;
 
@@ -88,6 +89,7 @@ pub use steganalysis::{
     DetectionResult,
 };
 pub use transforms::{TransformContext, TransformError, DEFAULT_ECC_CHUNK_LEN, MAX_ECC_PARITY};
+pub use unicode_text::{analyze_bytes, analyze_text, TextFinding};
 pub use video::{VideoFormat, VideoFrame, VideoStegoModule};
 pub use wasm_inspector::{capacity_rgb8, extract_packet_rgb8, inspect_bytes, WasmInspectionReport};
 

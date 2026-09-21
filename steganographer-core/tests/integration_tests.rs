@@ -1715,9 +1715,9 @@ fn test_encryption_roundtrip() {
     use steganographer_core::encryption;
     let key = encryption::EncryptionKey::generate();
     let plaintext = b"top secret steganographic payload";
-    let enc = encryption::encrypt(&key, 42, plaintext, None).unwrap();
+    let enc = encryption::encrypt(&key, &[0u8; 16], plaintext, None).unwrap();
     assert_ne!(&enc[..], plaintext);
-    let dec = encryption::decrypt(&key, 42, &enc, None).unwrap();
+    let dec = encryption::decrypt(&key, &[0u8; 16], &enc, None).unwrap();
     assert_eq!(dec, plaintext);
 }
 
@@ -1725,9 +1725,9 @@ fn test_encryption_roundtrip() {
 fn test_encryption_tamper_detection() {
     use steganographer_core::encryption;
     let key = encryption::EncryptionKey::generate();
-    let mut enc = encryption::encrypt(&key, 0, b"secret", None).unwrap();
+    let mut enc = encryption::encrypt(&key, &[0u8; 16], b"secret", None).unwrap();
     enc[0] ^= 1;
-    assert!(encryption::decrypt(&key, 0, &enc, None).is_err());
+    assert!(encryption::decrypt(&key, &[0u8; 16], &enc, None).is_err());
 }
 
 #[test]
@@ -1735,8 +1735,8 @@ fn test_encryption_wrong_key_fails() {
     use steganographer_core::encryption;
     let key1 = encryption::EncryptionKey::generate();
     let key2 = encryption::EncryptionKey::generate();
-    let enc = encryption::encrypt(&key1, 0, b"secret", None).unwrap();
-    assert!(encryption::decrypt(&key2, 0, &enc, None).is_err());
+    let enc = encryption::encrypt(&key1, &[0u8; 16], b"secret", None).unwrap();
+    assert!(encryption::decrypt(&key2, &[0u8; 16], &enc, None).is_err());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

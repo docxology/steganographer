@@ -325,7 +325,7 @@
                 <div class="stego-info">
                     <div class="stego-info-row">
                         <span class="stego-info-label">Payload Size</span>
-                        <span class="stego-info-value" id="info-payload-size">104 bytes</span>
+                        <span class="stego-info-value" id="info-payload-size">109 bytes</span>
                     </div>
                     <div class="stego-info-row">
                         <span class="stego-info-label">Hash Algorithm</span>
@@ -494,7 +494,7 @@
                 <div class="config-controls">
                     <div class="stego-explainer">
                         <strong>Encode:</strong> PCM audio samples → BLAKE3 hash (32 B) → Ed25519 signature (64 B) →
-                        104-byte payload embedded in LSB of audio samples using keyed PRNG index selection.<br>
+                        109-byte payload embedded in LSB of audio samples using keyed PRNG index selection.<br>
                         <strong>Decode:</strong> Extract LSB payload from audio → deserialize frame_index + hash +
                         signature → verify signature matches the extracted hash.<br>
                         <strong>Round-trip:</strong> If the decoded hash + signature match, the audio chunk has not been
@@ -593,7 +593,7 @@
                     <div class="stego-info-row"
                         title="Size of the cryptographic payload (hash + signature + frame index) embedded in each signed audio chunk">
                         <span class="stego-info-label">Payload Size</span>
-                        <span class="stego-info-value" id="audio-info-payload-size">104 bytes</span>
+                        <span class="stego-info-value" id="audio-info-payload-size">109 bytes</span>
                     </div>
                     <div class="stego-info-row"
                         title="BLAKE3 produces a 256-bit hash of the raw PCM samples, ensuring any modification to the audio data is detected">
@@ -658,7 +658,7 @@
         </div>
         <div class="footer-section" id="footer-payload">
             <span class="footer-label">Payload:</span>
-            <span class="footer-value" id="footer-payload-value">104 bytes (BLAKE3 + Ed25519)</span>
+            <span class="footer-value" id="footer-payload-value">109 bytes (BLAKE3 + Ed25519)</span>
         </div>
         <div class="footer-section" id="footer-verified">
             <span class="footer-label">Verified:</span>
@@ -740,8 +740,18 @@
         </div>
     </section>
 
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <!-- CDN libs are version-pinned with subresource integrity so the
+         browser refuses any tampered/off-script payload. DOMPurify sanitizes
+         all markdown-derived HTML before it reaches innerHTML. -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@18.0.13/lib/marked.umd.min.js"
+            integrity="sha384-fEbCbgYlveuklciAJcUGGDesw/JVf6LkfURCfpbN8v2RIPZVOvjnN3ovPyniGaxL"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js"
+            integrity="sha384-uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js"
+            integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2"
+            crossorigin="anonymous"></script>
     <script>
         mermaid.initialize({
             startOnLoad: false,
@@ -758,7 +768,9 @@
                 fontFamily: '"JetBrains Mono", "Fira Code", monospace',
                 fontSize: '13px',
             },
-            securityLevel: 'loose',
+            // 'strict' disables click handlers, HTML labels and other
+            // script-injection vectors in user-supplied diagram text.
+            securityLevel: 'strict',
             flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
             sequence: { useMaxWidth: true },
             gantt: { useMaxWidth: true },

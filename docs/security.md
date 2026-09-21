@@ -54,12 +54,43 @@ Steganographer's LSB embedding at 1-bit with only 904 out of 921,600 bytes modif
 
 The generic packet alpha validates framing, canonical metadata, envelope CRC32C,
 declared resource limits, original length, and an unkeyed content digest. That
-detects accidental or malicious payload corruption, but it does **not** identify
-an author or prove carrier provenance. Payload signatures, AEAD transforms,
-keyed locator/placement, and transform downgrade protection remain disabled in
-generic CLI mode until their protocol work and security review are complete.
-Use legacy `encode` plus `verify --public-key` when signer authenticity and
-carrier binding are required.
+detects accidental or malicious payload corruption. It does **not** by itself
+identify an author or prove carrier provenance — for signer authenticity use
+legacy `encode` plus `verify --public-key`, or the payload-signature transform.
+
+Properties enforced by the current protocol work:
+
+- **AEAD nonce derivation**: the ChaCha20-Poly1305 nonce is derived as
+  `BLAKE3(random_salt ∥ packet_id)[..12]`, never from public transport data
+  (such as the locator nonce); distinct packets derive distinct nonces under a
+  shared key, and a fresh random salt per invocation keeps re-encryptions of
+  the same packet_id non-identical.
+- **Flags ⇔ transform consistency**: a locator flag set without a matching
+  envelope transform (or a transform recorded without its flag) is a hard
+  decode error — no silent downgrade from an encrypted/ECC packet to a
+  plaintext one.
+- **Unknown non-critical envelope fields are preserved**, not dropped: only
+  unknown *critical* fields (bit 15 set) reject the packet.
+- **Nesting scaffold**: the `FIELD_PARENT_ID` envelope field (id 19) records a
+  parent packet identifier; `DecodeLimits` bounds `max_nesting_depth` (3) and
+  `max_aggregate_nested_bytes` (64 MiB) for future recursive decoders.
+- **Keyed locator/placement** (`--embedding-key`): a keyed recognition tag at
+  the canonical bootstrap slots means key-less scanners see no `STG3` magic;
+  the keyed locator variant is flagged in the packet itself.
+- **Interleaved placement** (`PLACEMENT_INTERLEAVED`, PLC-001): an
+  `InterleavedSchedule` coprime-stride slot mapping spreads packet slots across
+  the carrier instead of the leading sequential slots.
+
+### Spread-Spectrum: Host-Canceling Differential Pairs
+
+Spread-spectrum video/audio embedding now uses **host-canceling differential
+modulation**: for each payload bit, the byte/sample at `2i` receives `+PN`
+and the byte/sample at `2i+1` receives `−PN` for bit 1 (inverted for bit 0).
+The detector sums `(carrier[i] − carrier[i+1]) · pn[i]`, so the un-modulated
+host contribution cancels to adjacent-pixel differences instead of dominating
+the correlation with a term of std ≈ σ_host·√spread (≈35% per-bit error at
+1280×720 under noise with the old scheme). Carriers embedded by the old
+absolute-correlation embeds are **no longer extractable** — re-embed.
 
 ---
 
@@ -81,8 +112,8 @@ We assume an adversary who can:
 | Bit-flip on frame data | ✅ | Hash mismatch detected |
 | Replace frame content | ✅ | Hash mismatch detected |
 | Reorder frames | ✅ | Frame index in hash domain |
-| Forge signature without key | ✅ | Ed25519 prevents forgery |
 | Strip LSB watermark | ❌ | Re-encoding destroys LSBs (use overlay or spread-spectrum/DCT as backup) |
+| Quantum computing | ⚠️ | Ed25519 is not post-quantum; real ML-DSA (`MlDsaBackend`, public-key-only `MlDsaVerifier`) and hybrid (`HybridBackend`/`HybridVerifier`) signing backends are available |
 | Statistical detection of LSB | ⚠️ | Audio uses keyed PRNG; video uses sequential (more detectable); spread-spectrum and DCT are more resistant |
 | Side-channel (timing) | ⚠️ | Depends on `ed25519-dalek` implementation |
 | Quantum computing | ❌ | Ed25519 is not post-quantum |

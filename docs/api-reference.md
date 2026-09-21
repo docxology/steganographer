@@ -15,6 +15,7 @@ pub struct Config {
     pub global: GlobalConfig,
     pub video: Option<VideoConfig>,
     pub audio: Option<AudioConfig>,
+    pub ots: Option<OtsConfig>,  // optional OpenTimestamps `[ots]` block
 }
 ```
 
@@ -476,18 +477,34 @@ Lock-free pipeline performance counters using atomic operations. Thread-safe for
 
 ```rust
 pub struct StegoMetrics {
-    pub frames_signed: AtomicU64,
-    pub frames_verified: AtomicU64,
-    pub frames_failed: AtomicU64,
-    pub last_sign_us: AtomicU64,
-    pub last_verify_us: AtomicU64,
+    frames_processed: AtomicU64,
+    frames_verified_ok: AtomicU64,
+    frames_verified_fail: AtomicU64,
+    total_sign_us: AtomicU64,
+    total_verify_us: AtomicU64,
+    total_embed_us: AtomicU64,
+    // OpenTimestamps counters
+    ots_proofs_generated: AtomicU64,
+    ots_verifications_passed: AtomicU64,
+    ots_verifications_failed: AtomicU64,
+    ots_last_timestamp: AtomicI64,   // Unix seconds, 0 = none
+    ots_last_verified: AtomicBool,
+    start_time: Instant,
 }
 ```
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
 | `new` | `fn new() -> Self` | Create zeroed counters |
-| `reset` | `fn reset(&self)` | Reset all counters to zero |
+| `reset` | `fn reset(&self)` | Reset all counters to zero (start time preserved) |
+| `record_frame` / `record_verify_ok` / `record_verify_fail` | `fn record_*(&self)` | Increment the respective counters |
+| `record_sign_duration` / `record_verify_duration` / `record_embed_duration` | `fn record_*_duration(&self, d: Duration)` | Accumulate microsecond timings |
+| `record_ots_proof` / `record_ots_verification` | `fn record_ots_*(&self, …)` | OTS counters (`record_ots_verification(verified, timestamp)`) |
+| `frames_processed` / `frames_verified_ok` / `frames_verified_fail` | `fn …(&self) -> u64` | Counter accessors |
+| `ots_proofs_generated` / `ots_verifications_passed` / `ots_verifications_failed` / `ots_last_timestamp` / `ots_last_verified` | `fn …(&self)` | OTS counter accessors |
+| `average_fps` | `fn average_fps(&self) -> f64` | Frames per second since start |
+| `avg_sign_latency_us` / `avg_verify_latency_us` | `fn …(&self) -> f64` | Average per-frame latencies |
+| `to_json` | `fn to_json(&self) -> String` | JSON serialization for the dashboard (frames_processed, frames_verified_ok/fail, fps, latencies, uptime, OTS counters) |
 
 ---
 
@@ -601,23 +618,31 @@ pub struct AudioFilterConfig {
 
 ### `LiveConfig`
 
-Live-updatable configuration from the dashboard UI, serialized with camelCase for JavaScript interop.
-
 ```rust
 pub struct LiveConfig {
-    pub opacity: f64,           // 0.0–1.0 overlay opacity
-    pub lsb_bits: u8,           // 1–4 LSB bits for embedding
-    pub signing_backend: String, // "ed25519" or "ethereum"
-    pub overlay_text: String,    // Text rendered on QR overlay
-    pub sign_rate_ms: u32,       // Signing interval in milliseconds
-    pub qr_scale: u32,           // QR overlay scale (5–100%)
-    pub resolution: String,      // Video resolution (e.g., "640x480")
+    pub opacity: f64,             // 0.0–1.0 overlay opacity
+    pub lsb_bits: u8,             // 1–4 LSB bits for embedding
+    pub signing_backend: String,  // "ed25519" or "ethereum" (camelCase: signingBackend)
+    pub overlay_text: String,     // Text rendered on QR overlay (camelCase: overlayText)
+    pub sign_rate_ms: u32,        // Signing interval in milliseconds (camelCase: signRateMs)
+    pub qr_scale: u32,            // QR overlay scale (5–100%) (camelCase: qrScale)
+    pub resolution: String,       // Video resolution (e.g., "640x480")
+    pub stego_type: String,       // "lsb", "spread_spectrum", "dct" (camelCase: stegoType)
+    pub hash_algorithm: String,   // "blake3", "sha256", "sha3-256" (camelCase: hashAlgorithm)
+    pub encrypt: bool,            // Enable payload encryption (camelCase: encrypt)
+    pub ecc: bool,                // Enable error correction (camelCase: ecc)
 }
 ```
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
-| `default` | `fn default() -> Self` | Default: opacity=1.0, lsb_bits=1, ed25519, "CONFIDENTIAL", 1000ms |
+| `default` | `fn default() -> Self` | opacity=1.0, lsb_bits=1, ed25519, "CONFIDENTIAL", 1000ms, qr_scale=10%, "640x480", "lsb", "blake3", no encryption, no ECC |
+
+`POST /api/config` validates a `LiveConfig` before applying it:
+`lsb_bits` must be 1–4, `opacity` must be within 0.0–1.0, and
+`sign_rate_ms` must be ≥ 50 (avoids a busy loop). The first violation
+returns HTTP 400 with a user-facing message; a wrong `Authorization`
+header returns HTTP 401.
 
 ### `DashboardState`
 
@@ -633,8 +658,20 @@ pub struct DashboardState {
     pub live_config: Mutex<LiveConfig>,
     pub session_start: std::time::Instant,
     pub auth_token: Option<String>,
+    pub ots_config: OtsConfig,
+    pub ots_client: Option<Arc<OTSClient>>,
+    /// Session-wide signing keypair: video/audio encode handlers sign with
+    /// this key and the decode handlers verify against its public half.
+    pub signer: Signer,
+    /// Session-wide 32-byte audio LSB key shared by the audio encode/decode handlers.
+    pub audio_key: [u8; 32],
 }
 ```
+
+Both `EncodedFrame` and `EncodedAudioChunk` keep the **pre-embed** snapshot
+(`signed_rgb` / `signed_samples`) alongside the post-embed data, so decode
+handlers verify the extracted signature against the exact bytes the
+signature covers — real verification, not a "payload found" echo.
 
 ### Top-Level Functions
 
@@ -645,11 +682,23 @@ pub struct DashboardState {
 
 ### HTTP Routes
 
-> **Security:** POST routes (`/api/config`, `/api/metrics/reset`) require a
-> `Authorization: Bearer <token>` header if `auth_token` is set in
-> `DashboardState`. If `auth_token` is `None` (local-only mode), auth is
-> disabled. The dashboard defaults to binding `127.0.0.1`; use `--host 0.0.0.0`
-> for network access (requires `--auth-token` for safety).
+> **Security:**
+>
+> - **POST routes** (`/api/config`, `/api/metrics/reset`, `/ots/stamp`,
+>   `/ots/verify`) require an `Authorization: Bearer <token>` header when
+>   `auth_token` is set in `DashboardState` (constant-time comparison). If
+>   `auth_token` is `None` (local-only mode), auth is disabled.
+> - **WebSocket upgrades** pass a dedicated gate (CORS does not apply to WS):
+>   cross-origin `Origin` headers are rejected with HTTP 403 unless the origin
+>   host is loopback (`127.0.0.1`, `::1`, `localhost`) or matches the request's
+>   `Host` header. When `auth_token` is set, the upgrade also needs
+>   `?token=<token>` in the query string **or** a
+>   `Sec-WebSocket-Protocol: bearer-<token>` subprotocol; otherwise HTTP 401.
+> - **Size caps**: decoded WS messages are capped at 4 MiB and WS frames at
+>   1 MiB; JPEG frames are additionally capped at 4096×4096 pixels and audio
+>   chunks at 10 s duration / 384 kHz sample rate.
+> - The dashboard defaults to binding `127.0.0.1`; use `--host 0.0.0.0` for
+>   network access (requires `--auth-token` for safety).
 
 | Method | Path | Handler | Description |
 | ------ | ---- | ------- | ----------- |
@@ -658,18 +707,22 @@ pub struct DashboardState {
 | GET | `/app.js` | `serve_js` | JavaScript application (video tab + recording + keyboard shortcuts) |
 | GET | `/audio_tab.js` | `serve_audio_js` | Audio tab JavaScript (microphone, waveform, recording) |
 | GET | `/docs_tab.js` | `serve_docs_js` | Documentation tab JavaScript |
+| GET | `/ots.js` | `serve_ots_js` | OpenTimestamps panel JavaScript |
 | GET | `/ws/encode` | `ws_encode_handler` | Video encode WebSocket (binary JPEG → signed frame) |
-| GET | `/ws/decode` | `ws_decode_handler` | Video decode WebSocket (poll for verification data) |
+| GET | `/ws/decode` | `ws_decode_handler` | Video decode WebSocket (extract + real signature verification) |
 | GET | `/ws/audio/encode` | `ws_audio_encode_handler` | Audio encode WebSocket (PCM → LSB signed chunk) |
-| GET | `/ws/audio/decode` | `ws_audio_decode_handler` | Audio decode WebSocket (extract + verify audio payload) |
-| GET | `/api/version` | `api_version` | Crate version and name as JSON |
+| GET | `/ws/audio/decode` | `ws_audio_decode_handler` | Audio decode WebSocket (extract + real signature verification) |
+| GET | `/api/version` | `api_version` | Version, crate name, and `signature_payload_size` as JSON |
 | GET | `/api/metrics` | `api_metrics` | Live pipeline metrics as JSON |
 | GET | `/api/config` | `api_config_get` | Current config + identity as JSON |
-| POST | `/api/config` | `api_config_post` | Update live config from dashboard UI |
-| POST | `/api/metrics/reset` | `api_metrics_reset` | Reset all metrics counters to zero |
+| POST | `/api/config` | `api_config_post` | Update live config from dashboard UI (Bearer auth; validated) |
+| POST | `/api/metrics/reset` | `api_metrics_reset` | Reset all metrics counters to zero (Bearer auth) |
 | GET | `/api/session` | `api_session` | Session stats: uptime, config, metrics, backend, identity |
 | GET | `/api/docs` | `api_docs_list` | List available documentation files |
 | GET | `/api/docs/{name}` | `api_docs_content` | Return raw markdown content of a doc file |
+| GET | `/ots/status` | `ots_status` | OTS configuration and readiness (HTTP 200 even when disabled; the JSON body carries the real status) |
+| POST | `/ots/stamp` | `ots_stamp` | Stamp the current Merkle root or an optional binary request body (Bearer auth) |
+| POST | `/ots/verify` | `ots_verify` | Verify a `.ots` proof file sent as the request body (Bearer auth) |
 
 #### Audio WebSocket Protocol
 
@@ -687,34 +740,60 @@ pub struct DashboardState {
 }
 ```
 
-Server responds with:
+Server responds with (the server assigns `chunk_index` itself; the
+client-sent `chunk_index` in the request is informational):
 
 ```json
 {
   "type": "audio_signed",
   "chunk_index": 42,
-  "sign_us": 125.3
+  "sign_us": 125,
+  "embed_us": 340,
+  "sample_count": 2048,
+  "backend": "ed25519"
 }
 ```
 
-**`/ws/audio/decode`** — Client sends `{"type": "decode_request"}`, server responds with:
+Client sanity caps enforced before embedding: `channels` must be 1–2,
+`sample_rate` 1–384 000 Hz, `lsb_bits` 1–4, and the chunk at most
+10 seconds of audio. Violations return a `{"type": "error", …}` message on
+the socket and skip the chunk without closing the connection.
+
+**`/ws/audio/decode`** — Client sends a text trigger — the literal `"poll"`
+or `{"type": "decode_request"}` (both video and audio decode handlers accept
+the same two triggers; other messages are ignored and never run a decode
+cycle). Queued triggers that arrive while a decode cycle is in flight are
+collapsed into the cycle that just completed, so a burst of polls triggers
+one decode. Server responds with:
 
 ```json
 {
   "type": "audio_verify",
   "verified": true,
   "payload": {
+    "payload_found": true,
     "chunk_index": 42,
     "hash": "a1b2c3d4...",
     "signature_preview": "e5f6a7b8...",
     "signature_full": "e5f6a7b8...complete hex..."
   },
   "backend": "ed25519",
-  "verify_us": 89.7,
+  "verify_us": 89,
   "timestamp": "12:34:56.789Z",
-  "lsb_bits": 1
+  "lsb_bits": 1,
+  "sample_count": 2048,
+  "sample_rate": 44100
 }
 ```
+
+When no chunk has been encoded yet, the response is
+`{"type": "audio_verify", "verified": false, "waiting": true, "backend": …}`.
+`verified` is a **real Ed25519 verification**: the extracted signature is
+checked against the pre-embed sample snapshot using the session-wide
+keypair's public half (`DashboardState.signer`), not merely a report that a
+payload was found. The video `/ws/decode` handler behaves the same way and
+also echoes `ots` metrics (`ots_proofs_count`, `ots_last_timestamp`,
+`ots_verified`) in every reply.
 
 #### `GET /api/config` Response
 
@@ -727,11 +806,17 @@ Server responds with:
   "opacity": 1.0,
   "lsb_bits": 1,
   "overlay_text": "CONFIDENTIAL",
-  "sign_rate_ms": 1000
+  "sign_rate_ms": 1000,
+  "stego_type": "lsb",
+  "hash_algorithm": "blake3",
+  "encrypt": false,
+  "ecc": false
 }
 ```
 
 #### `POST /api/config` Request Body
+
+CamelCase, deserialized into `LiveConfig`:
 
 ```json
 {
@@ -742,6 +827,18 @@ Server responds with:
   "signRateMs": 500
 }
 ```
+
+#### `GET /api/version` Response
+
+```json
+{
+  "version": "0.7.0",
+  "name": "steganographer-dashboard",
+  "signature_payload_size": 109
+}
+```
+
+`signature_payload_size` is `SignaturePayload::SERIALIZED_SIZE` (109 bytes).
 
 ---
 

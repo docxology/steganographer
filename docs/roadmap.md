@@ -44,20 +44,40 @@ path has an end-to-end fixture.
 ## v0.7.0 — Packet and placement alpha
 
 Status: in progress. The public locator, canonical bounded envelope, generic
-packet codec, legacy adapter, shared spatial-LSB carrier contract, and opt-in
-PNG/raw encode/decode vertical slice are implemented.
+packet codec, legacy adapter, shared spatial-LSB carrier contract, the opt-in
+PNG/raw encode/decode vertical slice, keyed + interleaved placement,
+transforms (AEAD/ECC/compression), the payload-signature transform, the
+key hierarchy, and the nesting scaffold are implemented.
 
 - [x] Add bounded generic packet and canonical envelope.
 - [x] Preserve v2 `SignaturePayload` through a legacy codec/adapter.
 - [x] Add the public locator and sequential spatial-LSB discovery.
 - [x] Add shared carrier descriptors and checked capacity for the first kernel.
 - [x] Prove the opt-in generic PNG/raw vertical slice at one through four bits.
-- [ ] Freeze immutable packet and placement vectors after alpha review.
-- Add keyed locator/discovery without changing public discovery semantics.
-- Add interleaved, keyed, and adaptive placement schedules.
+- [ ] Freeze immutable packet and placement vectors after alpha review — the
+  alpha-provisional golden-vector corpus lives in
+  `steganographer-core/tests/golden_vectors.rs` with
+  `steganographer-core/testdata/packets/` for the frozen byte fixtures;
+  the owner materializes them in one command
+  (`cargo test -p steganographer-core --test golden_vectors -- --ignored`),
+  after which regular runs (including CI) fail on byte drift.
+- [x] Add keyed locator/discovery without changing public discovery semantics —
+  implemented: `KeyedSpatialLsb`/`KeyedAudioSpatialLsb` keyed kernels,
+  `kdf::derive_locator_key` / `kdf::derive_placement_key`, and the CLI
+  `--embedding-key` option.
+- [x] Add interleaved, keyed, and adaptive placement schedules — implemented:
+  the keyed `KeyedPermutation` schedule (PLC-002), the interleaved
+  `InterleavedSchedule` (PLC-001, `PLACEMENT_INTERLEAVED`), and the
+  pre-existing adaptive module.
 - Expand carrier descriptors with component/channel policies.
 - Prove the generic WAV vertical slice.
-- Implement the transform, payload-signature, key-hierarchy, and nesting work.
+- [x] Implement the transform, payload-signature, key-hierarchy, and nesting
+  work — implemented: packet-identity-bound ChaCha20-Poly1305 AEAD
+  (nonce derived from `packet_id`, not the locator nonce), chunked
+  Reed-Solomon ECC, DEFLATE compression, the Ed25519 payload-signature
+  transform, `FLAG_KEYED_LOCATOR`/`FLAG_PAYLOAD_SIGNED` with enforced
+  flags⇔transform consistency, the `FIELD_PARENT_ID` nesting scaffold, and
+  derivation of locator/placement keys from a single embedding key.
 
 Exit gate: generic payload support is opt-in, legacy remains the default, and
 the protocol/key review is complete for alpha use.

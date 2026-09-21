@@ -8,10 +8,10 @@
 
 use crate::kdf;
 use crate::packet::{
-    DecodeLimits, GenericPacket, Locator, PacketError, KERNEL_SPATIAL_LSB, LOCATOR_SIZE,
-    PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
+    DecodeLimits, GenericPacket, Locator, PacketError, FLAG_KEYED_LOCATOR, KERNEL_SPATIAL_LSB,
+    LOCATOR_SIZE, PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
 };
-use crate::placement::KeyedPermutation;
+use crate::placement::{InterleavedSchedule, KeyedPermutation, PLACEMENT_INTERLEAVED};
 use thiserror::Error;
 
 /// Domain label for the keyed body-placement schedule. Distinct from the
@@ -20,6 +20,10 @@ const PLACEMENT_LABEL: &[u8] = b"steganographer-placement-v1";
 /// Recognition-tag context mixed with the locator key. A carrier with the
 /// wrong (or no) key produces a tag mismatch and reports "no packet".
 const RECOGNITION_CONTEXT: &[u8] = b"steganographer-recognition-v1";
+/// Domain label for the keyed interleaved (`PLC-001`) body-placement
+/// schedule. Distinct from [`PLACEMENT_LABEL`] so the Feistel keyed schedule
+/// and the interleaved coprime-stride schedule never share slot orders.
+const PLACEMENT_INTERLEAVED_LABEL: &[u8] = b"steganographer-placement-interleaved-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CarrierKind {
@@ -390,6 +394,103 @@ impl CarrierExtractor for KeyedAudioSpatialLsb {
     }
 }
 
+/// Keyed interleaved (`PLC-001`) spatial-LSB carrier over byte units. Framing
+/// matches [`KeyedSpatialLsb`] — a keyed recognition tag at the canonical
+/// bootstrap slots — but the packet body is spread with the even-spread
+/// coprime-stride [`InterleavedSchedule`] instead of the Feistel permutation,
+/// and the packet envelope must declare `PLACEMENT_INTERLEAVED`.
+#[derive(Debug, Clone)]
+pub struct KeyedInterleavedSpatialLsb {
+    keys: KeyedLsbKeys,
+}
+
+impl KeyedInterleavedSpatialLsb {
+    /// Derive the locator/placement subkeys from a 32-byte embedding key.
+    pub fn new(embedding_key: [u8; 32]) -> Self {
+        Self {
+            keys: KeyedLsbKeys::new(embedding_key),
+        }
+    }
+}
+
+impl CarrierEmbedder for KeyedInterleavedSpatialLsb {
+    fn capacity(
+        &self,
+        carrier: &CarrierDescriptor,
+        config: &EmbeddingConfig,
+    ) -> Result<CapacityReport, CarrierError> {
+        keyed_capacity(carrier, config)
+    }
+
+    fn embed_packet(
+        &self,
+        carrier: &mut [u8],
+        packet: &[u8],
+        config: &EmbeddingConfig,
+    ) -> Result<EmbedReport, CarrierError> {
+        embed_keyed_interleaved_lsb(&self.keys, carrier, 1, packet, config)
+    }
+}
+
+impl CarrierExtractor for KeyedInterleavedSpatialLsb {
+    fn extract_packet(
+        &self,
+        carrier: &[u8],
+        config: &EmbeddingConfig,
+        limits: &DecodeLimits,
+    ) -> Result<ExtractReport, CarrierError> {
+        extract_keyed_interleaved_lsb(&self.keys, carrier, 1, config, limits)
+    }
+}
+
+/// Keyed interleaved (`PLC-001`) spatial-LSB carrier over interleaved
+/// little-endian 16-bit PCM samples.
+#[derive(Debug, Clone)]
+pub struct KeyedInterleavedAudioSpatialLsb {
+    keys: KeyedLsbKeys,
+}
+
+impl KeyedInterleavedAudioSpatialLsb {
+    /// Derive the locator/placement subkeys from a 32-byte embedding key.
+    pub fn new(embedding_key: [u8; 32]) -> Self {
+        Self {
+            keys: KeyedLsbKeys::new(embedding_key),
+        }
+    }
+}
+
+impl CarrierEmbedder for KeyedInterleavedAudioSpatialLsb {
+    fn capacity(
+        &self,
+        carrier: &CarrierDescriptor,
+        config: &EmbeddingConfig,
+    ) -> Result<CapacityReport, CarrierError> {
+        keyed_capacity(carrier, config)
+    }
+
+    fn embed_packet(
+        &self,
+        carrier: &mut [u8],
+        packet: &[u8],
+        config: &EmbeddingConfig,
+    ) -> Result<EmbedReport, CarrierError> {
+        ensure_aligned(carrier.len(), 2)?;
+        embed_keyed_interleaved_lsb(&self.keys, carrier, 2, packet, config)
+    }
+}
+
+impl CarrierExtractor for KeyedInterleavedAudioSpatialLsb {
+    fn extract_packet(
+        &self,
+        carrier: &[u8],
+        config: &EmbeddingConfig,
+        limits: &DecodeLimits,
+    ) -> Result<ExtractReport, CarrierError> {
+        ensure_aligned(carrier.len(), 2)?;
+        extract_keyed_interleaved_lsb(&self.keys, carrier, 2, config, limits)
+    }
+}
+
 /// Reject a byte buffer whose length is not a multiple of the unit stride, so
 /// the last partial unit is never silently dropped.
 fn ensure_aligned(byte_len: usize, stride: usize) -> Result<(), CarrierError> {
@@ -441,12 +542,54 @@ fn keyed_capacity(
     })
 }
 
+/// Embed-side packet descriptor validation, mirroring the extract-side checks
+/// in [`extract_sequential_lsb`] / [`extract_keyed_lsb`]: the envelope must
+/// declare the placement and kernel the embedding kernel implements (at
+/// version 1) and the kernel parameters must match the embedding strength. A
+/// packet described for a different placement is rejected up front instead of
+/// producing an artifact no extractor accepts.
+///
+/// The keyed locator flag is only enforced on the sequential side: a packet
+/// flagged `FLAG_KEYED_LOCATOR` but describing sequential placement is
+/// self-contradictory. Keyed extraction keys off the placement descriptor and
+/// never required the flag, so keyed embedding stays symmetric with it.
+fn validate_embed_descriptor(
+    packet: &[u8],
+    bits: u8,
+    placement: u16,
+    placement_params_must_be_empty: bool,
+    keyed_locator_flag: Option<bool>,
+) -> Result<(), CarrierError> {
+    let decoded = GenericPacket::decode(packet, &DecodeLimits::default())?;
+    let descriptor_ok = decoded.envelope.placement.algorithm == placement
+        && decoded.envelope.placement.version == 1
+        && (!placement_params_must_be_empty || decoded.envelope.placement.parameters.is_empty())
+        && decoded.envelope.kernel.algorithm == KERNEL_SPATIAL_LSB
+        && decoded.envelope.kernel.version == 1
+        && decoded.envelope.kernel.parameters == [bits];
+    let flag_ok = match keyed_locator_flag {
+        Some(expected) => (decoded.locator.flags & FLAG_KEYED_LOCATOR != 0) == expected,
+        None => true,
+    };
+    if !descriptor_ok || !flag_ok {
+        return Err(CarrierError::DescriptorMismatch);
+    }
+    Ok(())
+}
+
 fn embed_sequential_lsb(
     carrier: &mut [u8],
     stride: usize,
     packet: &[u8],
     config: &EmbeddingConfig,
 ) -> Result<EmbedReport, CarrierError> {
+    validate_embed_descriptor(
+        packet,
+        config.bits_per_unit,
+        PLACEMENT_SEQUENTIAL,
+        true,
+        Some(false),
+    )?;
     let unit_count = carrier.len() / stride;
     let capacity = sequential_capacity(&descriptor_from_stride(stride, unit_count), config)?;
     let needed_bits = packet
@@ -537,6 +680,7 @@ fn embed_keyed_lsb(
 ) -> Result<EmbedReport, CarrierError> {
     let bits = config.bits_per_unit;
     EmbeddingConfig::new(bits)?;
+    validate_embed_descriptor(packet, bits, PLACEMENT_KEYED, false, None)?;
     let unit_count = carrier.len() / stride;
     let tag_units = KeyedLsbKeys::tag_units(bits);
     if unit_count < tag_units {
@@ -549,6 +693,18 @@ fn embed_keyed_lsb(
         });
     }
     let body_units = unit_count - tag_units;
+    // A carrier whose whole capacity is consumed by the recognition tag has
+    // no body units left for any packet; report typed insufficient capacity
+    // instead of building a zero-length keyed schedule (which would panic).
+    if body_units == 0 {
+        return Err(CarrierError::InsufficientCapacity {
+            needed_bits: 64 + bits as usize,
+            available_bits: unit_count.saturating_mul(bits as usize),
+            needed_units: tag_units + 1,
+            available_units: unit_count,
+            bits_per_unit: bits,
+        });
+    }
     let needed_bits = packet
         .len()
         .checked_mul(8)
@@ -617,6 +773,12 @@ fn extract_keyed_lsb(
     }
 
     let body_units = unit_count - tag_units;
+    // Exactly tag_units units: no body space remains for even a locator, so
+    // report no packet rather than building a zero-length keyed schedule
+    // (which would panic).
+    if body_units == 0 {
+        return Err(CarrierError::NoPacket);
+    }
     let perm = KeyedPermutation::new(body_units, keys.placement_key, PLACEMENT_LABEL);
 
     let locator_bytes = read_bytes_keyed(carrier, stride, tag_units, &perm, LOCATOR_SIZE, bits)?;
@@ -639,6 +801,170 @@ fn extract_keyed_lsb(
     let packet_bytes = read_bytes_keyed(carrier, stride, tag_units, &perm, packet_len, bits)?;
     let packet = GenericPacket::decode(&packet_bytes, limits)?;
     if packet.envelope.placement.algorithm != PLACEMENT_KEYED
+        || packet.envelope.placement.version != 1
+        || packet.envelope.kernel.algorithm != KERNEL_SPATIAL_LSB
+        || packet.envelope.kernel.version != 1
+        || packet.envelope.kernel.parameters != [bits]
+    {
+        return Err(CarrierError::DescriptorMismatch);
+    }
+
+    Ok(ExtractReport {
+        packet,
+        consumed_units: tag_units + needed_units,
+        bits_per_unit: bits,
+    })
+}
+
+/// Keyed interleaved (`PLC-001`) embed: identical framing to the keyed path
+/// (recognition tag at the canonical bootstrap slots) but the packet body is
+/// spread with the coprime-stride [`InterleavedSchedule`]. The packet
+/// envelope must declare `PLACEMENT_INTERLEAVED`.
+fn embed_keyed_interleaved_lsb(
+    keys: &KeyedLsbKeys,
+    carrier: &mut [u8],
+    stride: usize,
+    packet: &[u8],
+    config: &EmbeddingConfig,
+) -> Result<EmbedReport, CarrierError> {
+    let bits = config.bits_per_unit;
+    EmbeddingConfig::new(bits)?;
+    validate_embed_descriptor(packet, bits, PLACEMENT_INTERLEAVED, false, None)?;
+    let unit_count = carrier.len() / stride;
+    let tag_units = KeyedLsbKeys::tag_units(bits);
+    if unit_count < tag_units {
+        return Err(CarrierError::InsufficientCapacity {
+            needed_bits: 64,
+            available_bits: unit_count.saturating_mul(bits as usize),
+            needed_units: tag_units,
+            available_units: unit_count,
+            bits_per_unit: bits,
+        });
+    }
+    let body_units = unit_count - tag_units;
+    if body_units == 0 {
+        return Err(CarrierError::InsufficientCapacity {
+            needed_bits: 64 + bits as usize,
+            available_bits: unit_count.saturating_mul(bits as usize),
+            needed_units: tag_units + 1,
+            available_units: unit_count,
+            bits_per_unit: bits,
+        });
+    }
+    let needed_bits = packet
+        .len()
+        .checked_mul(8)
+        .ok_or(CarrierError::CapacityOverflow)?;
+    let needed_units = needed_bits.div_ceil(bits as usize);
+    if needed_units > body_units {
+        return Err(CarrierError::InsufficientCapacity {
+            needed_bits,
+            available_bits: body_units.saturating_mul(bits as usize),
+            needed_units,
+            available_units: body_units,
+            bits_per_unit: bits,
+        });
+    }
+
+    // Recognition tag at the canonical bootstrap slots.
+    let tag = keys.recognition_tag(unit_count, bits);
+    write_bits_sequential(carrier, stride, &tag, bits);
+
+    // Packet bits at even-spread keyed positions over the remaining units.
+    let schedule =
+        InterleavedSchedule::new(body_units, keys.placement_key, PLACEMENT_INTERLEAVED_LABEL);
+    let mask = !((1u8 << bits) - 1);
+    let mut bit_index = 0usize;
+    for logical_unit in 0..needed_units {
+        let physical = (tag_units + schedule.slot(logical_unit)) * stride;
+        let mut low_bits = 0u8;
+        for shift in (0..bits).rev() {
+            if bit_index < needed_bits {
+                low_bits |= packet_bit(packet, bit_index) << shift;
+                bit_index += 1;
+            }
+        }
+        carrier[physical] = (carrier[physical] & mask) | low_bits;
+    }
+
+    Ok(EmbedReport {
+        packet_bytes: packet.len(),
+        modified_units: tag_units + needed_units,
+        remaining_capacity_bytes: body_units
+            .saturating_mul(bits as usize)
+            .saturating_div(8)
+            .saturating_sub(packet.len()),
+    })
+}
+
+/// Keyed interleaved (`PLC-001`) extract: the tag must match under the
+/// locator key, then locator and packet are read back through the same
+/// coprime-stride schedule the embedder used.
+fn extract_keyed_interleaved_lsb(
+    keys: &KeyedLsbKeys,
+    carrier: &[u8],
+    stride: usize,
+    config: &EmbeddingConfig,
+    limits: &DecodeLimits,
+) -> Result<ExtractReport, CarrierError> {
+    let bits = config.bits_per_unit;
+    EmbeddingConfig::new(bits)?;
+    let unit_count = carrier.len() / stride;
+    let tag_units = KeyedLsbKeys::tag_units(bits);
+    if unit_count < tag_units {
+        return Err(CarrierError::NoPacket);
+    }
+
+    // Recognition tag must match before we trust any keyed positions.
+    let observed = extract_bytes(carrier, stride, 8, bits)?;
+    let expected = keys.recognition_tag(unit_count, bits);
+    if !constant_time_eq(&observed, &expected) {
+        return Err(CarrierError::NoPacket);
+    }
+
+    let body_units = unit_count - tag_units;
+    if body_units == 0 {
+        return Err(CarrierError::NoPacket);
+    }
+    let schedule =
+        InterleavedSchedule::new(body_units, keys.placement_key, PLACEMENT_INTERLEAVED_LABEL);
+
+    let locator_bytes = read_bytes_at(
+        carrier,
+        stride,
+        tag_units,
+        |logical| schedule.slot(logical),
+        schedule.len(),
+        LOCATOR_SIZE,
+        bits,
+    )?;
+    let locator = Locator::from_bytes(&locator_bytes, limits)?;
+    let packet_len = locator.packet_len()?;
+    let needed_units = packet_len
+        .checked_mul(8)
+        .map(|bit_count| bit_count.div_ceil(bits as usize))
+        .ok_or(CarrierError::CapacityOverflow)?;
+    if needed_units > body_units {
+        return Err(CarrierError::InsufficientCapacity {
+            needed_bits: packet_len.saturating_mul(8),
+            available_bits: body_units.saturating_mul(bits as usize),
+            needed_units,
+            available_units: body_units,
+            bits_per_unit: bits,
+        });
+    }
+
+    let packet_bytes = read_bytes_at(
+        carrier,
+        stride,
+        tag_units,
+        |logical| schedule.slot(logical),
+        schedule.len(),
+        packet_len,
+        bits,
+    )?;
+    let packet = GenericPacket::decode(&packet_bytes, limits)?;
+    if packet.envelope.placement.algorithm != PLACEMENT_INTERLEAVED
         || packet.envelope.placement.version != 1
         || packet.envelope.kernel.algorithm != KERNEL_SPATIAL_LSB
         || packet.envelope.kernel.version != 1
@@ -683,16 +1009,41 @@ fn read_bytes_keyed(
     byte_count: usize,
     bits: u8,
 ) -> Result<Vec<u8>, CarrierError> {
+    read_bytes_at(
+        carrier,
+        stride,
+        offset,
+        |logical| perm.permute(logical),
+        perm.len(),
+        byte_count,
+        bits,
+    )
+}
+
+/// Read `byte_count` bytes from keyed slot positions: logical unit `i` is
+/// mapped through `slot` to its physical carrier unit.
+fn read_bytes_at<F>(
+    carrier: &[u8],
+    stride: usize,
+    offset: usize,
+    slot: F,
+    total_units: usize,
+    byte_count: usize,
+    bits: u8,
+) -> Result<Vec<u8>, CarrierError>
+where
+    F: Fn(usize) -> usize,
+{
     let bit_count = byte_count
         .checked_mul(8)
         .ok_or(CarrierError::CapacityOverflow)?;
     let required_units = bit_count.div_ceil(bits as usize);
-    if required_units > perm.len() {
+    if required_units > total_units {
         return Err(CarrierError::InsufficientCapacity {
             needed_bits: bit_count,
-            available_bits: perm.len().saturating_mul(bits as usize),
+            available_bits: total_units.saturating_mul(bits as usize),
             needed_units: required_units,
-            available_units: perm.len(),
+            available_units: total_units,
             bits_per_unit: bits,
         });
     }
@@ -700,7 +1051,7 @@ fn read_bytes_keyed(
     let mut output = vec![0u8; byte_count];
     let mut bit_index = 0usize;
     for logical_unit in 0..required_units {
-        let physical = (offset + perm.permute(logical_unit)) * stride;
+        let physical = (offset + slot(logical_unit)) * stride;
         let unit = carrier[physical];
         for shift in (0..bits).rev() {
             if bit_index >= bit_count {
@@ -856,13 +1207,9 @@ mod tests {
         .encode(&limits)
         .unwrap();
         let mut carrier = vec![0; wrong_version.len() * 8];
-        SpatialLsb
-            .embed_packet(
-                &mut carrier,
-                &wrong_version,
-                &EmbeddingConfig::new(3).unwrap(),
-            )
-            .unwrap();
+        // The embed side now rejects the mismatched descriptor up front, so
+        // write the bytes directly to exercise the extract-side check.
+        write_bits_sequential(&mut carrier, 1, &wrong_version, 3);
         assert_eq!(
             SpatialLsb
                 .extract_packet(&carrier, &EmbeddingConfig::new(3).unwrap(), &limits)
@@ -1082,5 +1429,197 @@ mod tests {
         let capacity = AudioSpatialLsb.capacity(&descriptor, &config).unwrap();
         assert_eq!(capacity.usable_units, 4800);
         assert_eq!(capacity.available_bits, 4800);
+    }
+    // PLC-001 keyed-interleaved packets declare the interleaved placement.
+    fn interleaved_packet(bits: u8, payload: &[u8]) -> Vec<u8> {
+        let limits = DecodeLimits::default();
+        let mut packet = GenericPacket::new_untransformed(
+            payload.to_vec(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(PLACEMENT_INTERLEAVED, 1, Vec::new()),
+            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
+            &limits,
+        )
+        .unwrap();
+        packet.locator.flags |= FLAG_KEYED_LOCATOR;
+        packet.encode(&limits).unwrap()
+    }
+
+    #[test]
+    fn carrier_of_exactly_tag_units_reports_no_packet() {
+        for bits in [1u8, 2, 4] {
+            let tag_units = KeyedLsbKeys::tag_units(bits);
+            let keyed = KeyedSpatialLsb::new([0x11; 32]);
+            let config = EmbeddingConfig::new(bits).unwrap();
+
+            // A carrier holding exactly the recognition tag (written by the
+            // rightful key holder): a valid keyed bootstrap with no body
+            // units left for any packet. Extract must report typed NoPacket,
+            // never panic on the zero-length keyed schedule.
+            let mut exact = vec![0u8; tag_units];
+            let tag = keyed.keys.recognition_tag(tag_units, bits);
+            write_bits_sequential(&mut exact, 1, &tag, bits);
+            assert_eq!(
+                keyed
+                    .extract_packet(&exact, &config, &DecodeLimits::default())
+                    .unwrap_err(),
+                CarrierError::NoPacket,
+                "extract on a tag-only carrier must be typed NoPacket (bits={bits})"
+            );
+
+            // The embed side is typed InsufficientCapacity for the same
+            // degenerate carrier.
+            let packet = keyed_packet(bits, b"payload");
+            assert!(matches!(
+                keyed.embed_packet(&mut exact, &packet, &config),
+                Err(CarrierError::InsufficientCapacity { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn keyed_embed_rejects_mismatched_packet_descriptors() {
+        // A sequential-described packet must not be silently keyed-embedded:
+        // the artifact would be rejected by both extractors.
+        let sequential = packet(2, b"payload");
+        let config = EmbeddingConfig::new(2).unwrap();
+        let mut keyed_carrier = vec![0u8; sequential.len() * 8 + 512];
+        assert_eq!(
+            KeyedSpatialLsb::new([0x11; 32])
+                .embed_packet(&mut keyed_carrier, &sequential, &config)
+                .unwrap_err(),
+            CarrierError::DescriptorMismatch
+        );
+        assert_eq!(
+            KeyedInterleavedSpatialLsb::new([0x11; 32])
+                .embed_packet(&mut keyed_carrier, &sequential, &config)
+                .unwrap_err(),
+            CarrierError::DescriptorMismatch
+        );
+
+        // A keyed-described packet must not be silently sequential-embedded.
+        let keyed = keyed_packet(2, b"payload");
+        let mut sequential_carrier = vec![0u8; keyed.len() * 8];
+        assert_eq!(
+            SpatialLsb
+                .embed_packet(&mut sequential_carrier, &keyed, &config)
+                .unwrap_err(),
+            CarrierError::DescriptorMismatch
+        );
+
+        // FLAG_KEYED_LOCATOR with a sequential placement descriptor is
+        // self-contradictory and rejected by the sequential embedder.
+        let limits = DecodeLimits::default();
+        let mut flagged = GenericPacket::new_untransformed(
+            b"payload".to_vec(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new()),
+            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![2]),
+            &limits,
+        )
+        .unwrap();
+        flagged.locator.flags |= FLAG_KEYED_LOCATOR;
+        let flagged = flagged.encode(&limits).unwrap();
+        assert_eq!(
+            SpatialLsb
+                .embed_packet(&mut sequential_carrier, &flagged, &config)
+                .unwrap_err(),
+            CarrierError::DescriptorMismatch
+        );
+    }
+
+    #[test]
+    fn keyed_interleaved_roundtrip_at_every_supported_strength() {
+        for bits in 1..=4 {
+            let packet = interleaved_packet(bits, b"interleaved carrier payload");
+            let config = EmbeddingConfig::new(bits).unwrap();
+            let mut carrier = vec![0x5A; (packet.len() * 8).div_ceil(bits as usize) + 512];
+            let carrier_key = KeyedInterleavedSpatialLsb::new([0x21; 32]);
+            carrier_key
+                .embed_packet(&mut carrier, &packet, &config)
+                .unwrap();
+            let extracted = carrier_key
+                .extract_packet(&carrier, &config, &DecodeLimits::default())
+                .unwrap();
+            assert_eq!(extracted.packet.body, b"interleaved carrier payload");
+            assert_eq!(
+                extracted.packet.envelope.placement.algorithm,
+                PLACEMENT_INTERLEAVED
+            );
+            assert_eq!(extracted.bits_per_unit, bits);
+        }
+    }
+
+    #[test]
+    fn keyed_interleaved_wrong_key_fails_closed() {
+        let packet = interleaved_packet(2, b"secret");
+        let config = EmbeddingConfig::new(2).unwrap();
+        let mut carrier = vec![0; (packet.len() * 8).div_ceil(2) + 512];
+        KeyedInterleavedSpatialLsb::new([0xAA; 32])
+            .embed_packet(&mut carrier, &packet, &config)
+            .unwrap();
+        assert_eq!(
+            KeyedInterleavedSpatialLsb::new([0xBB; 32])
+                .extract_packet(&carrier, &config, &DecodeLimits::default())
+                .unwrap_err(),
+            CarrierError::NoPacket
+        );
+    }
+
+    #[test]
+    fn interleaved_and_keyed_carriers_reject_each_others_extractors() {
+        // The envelope placement labels differ, so each extractor fails
+        // closed on the other family's carriers (no cross-acceptance).
+        let packet = interleaved_packet(2, b"cross");
+        let config = EmbeddingConfig::new(2).unwrap();
+        let mut interleaved_carrier = vec![0u8; (packet.len() * 8).div_ceil(2) + 512];
+        KeyedInterleavedSpatialLsb::new([0x91; 32])
+            .embed_packet(&mut interleaved_carrier, &packet, &config)
+            .unwrap();
+        assert!(KeyedSpatialLsb::new([0x91; 32])
+            .extract_packet(&interleaved_carrier, &config, &DecodeLimits::default())
+            .is_err());
+
+        let keyed = keyed_packet(2, b"cross");
+        let mut keyed_carrier = vec![0u8; (keyed.len() * 8).div_ceil(2) + 512];
+        KeyedSpatialLsb::new([0x91; 32])
+            .embed_packet(&mut keyed_carrier, &keyed, &config)
+            .unwrap();
+        assert!(KeyedInterleavedSpatialLsb::new([0x91; 32])
+            .extract_packet(&keyed_carrier, &config, &DecodeLimits::default())
+            .is_err());
+    }
+
+    #[test]
+    fn keyed_interleaved_audio_roundtrip_and_wrong_label_rejected() {
+        let packet = interleaved_packet(2, b"interleaved audio secret");
+        let config = EmbeddingConfig::new(2).unwrap();
+        let sample_count = (packet.len() * 8).div_ceil(2) + 512;
+        let mut carrier = audio_bytes(&vec![0x0F0Fi16; sample_count]);
+        let key = KeyedInterleavedAudioSpatialLsb::new([0x81; 32]);
+        key.embed_packet(&mut carrier, &packet, &config).unwrap();
+        let extracted = key
+            .extract_packet(&carrier, &config, &DecodeLimits::default())
+            .unwrap();
+        assert_eq!(extracted.packet.body, b"interleaved audio secret");
+
+        // The keyed Feistel extractor must not accept an interleaved carrier.
+        assert!(KeyedAudioSpatialLsb::new([0x81; 32])
+            .extract_packet(&carrier, &config, &DecodeLimits::default())
+            .is_err());
+
+        // ... and the interleaved extractor must not accept a keyed carrier.
+        let keyed = keyed_packet(2, b"keyed audio secret");
+        let mut keyed_carrier = audio_bytes(&vec![0x0F0Fi16; (keyed.len() * 8).div_ceil(2) + 512]);
+        KeyedAudioSpatialLsb::new([0x81; 32])
+            .embed_packet(&mut keyed_carrier, &keyed, &config)
+            .unwrap();
+        assert!(KeyedInterleavedAudioSpatialLsb::new([0x81; 32])
+            .extract_packet(&keyed_carrier, &config, &DecodeLimits::default())
+            .is_err());
     }
 }

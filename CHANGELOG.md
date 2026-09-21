@@ -7,7 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Added (2026-09-20 deep-review round)
+
+- **Real FIPS 204 ML-DSA (security incident fixed).** `MlDsaBackend` and the
+  ML-DSA half of `HybridBackend` previously did NOT implement ML-DSA despite
+  advertising FIPS 204: `sign()` produced a keyed BLAKE3-XOF expansion of the
+  32-byte private seed and `verify()` re-derived that value — a symmetric MAC
+  requiring the *private* seed, with a decorative "public key" that could not
+  verify anything. The backends now perform real ML-DSA via the RustCrypto
+  `ml-dsa` crate (v0.1.1, pure Rust, not independently audited) with
+  deterministic Sign/Verify and seed-based key generation; key derivation was
+  validated against 75 NIST ACVP keyGen vectors and 45 sigVer vectors.
+  New `MlDsaVerifier` / `HybridVerifier` provide public-key-only verification.
+  **Impact:** payloads signed with the pre-0.8 fake "ML-DSA" scheme are MACs
+  over the private seed and cannot be verified publicly — re-sign them.
+  Ed25519-only payloads are unaffected; ML-DSA signature/public-key layouts
+  now follow the FIPS 204 encoded sizes (2,420/1,312, 3,309/1,952, 4,627/2,592).
+- **`extract` CLI subcommand (`SUR-002` slice).** Recovers the generic packet
+  payload from a carrier to `--output`, with overwrite refusal (`--force`
+  overrides), output-filename sanitization, keyless transform reversal, and a
+  BLAKE3 digest report. Closes the roadmap v0.8.0 "separate decode, verify,
+  scan, and extract semantics" item together with the new exit-code contract.
+- **Semantic exit codes (roadmap v0.8.0 contract).** `verify` reports status
+  `invalid` as exit 3; decode/extract report "no valid generic packet found"
+  as exit 2; usage errors (unknown `--stego-type`, `--hash-algorithm`,
+  `--log-level`, `--method`, `--bits`, unavailable `--backend`, bad scan
+  `--input` shape) exit 2; runtime/I-O errors exit 1. `verify --format json`
+  now emits exactly one JSON document (OTS verification folded into the
+  result), and JSON output never serializes secret key material
+  (`encryption_key_hex` / `embedding_key_hex` are omitted; plain mode still
+  hands the user their keys).
+- **Unicode/text steganography detectors (`FOR-005`).** New
+  `steganographer_core::unicode_text` adds zero-width, variation-selector,
+  bidi-control, whitespace-anomaly, and homoglyph-suspect detectors with
+  stable IDs and evidence offsets; `forensics::scan_bytes` surfaces
+  `text_findings`, and the `scan` CLI includes them in plain/JSON output.
+- **Interleaved keyed placement (`PLC-001`).** New `InterleavedSchedule`
+  (coprime-stride affine map, O(1) memory) plus `KeyedInterleavedSpatialLsb` /
+  `KeyedInterleavedAudioSpatialLsb` carriers with `PLACEMENT_INTERLEAVED=3`;
+  keyed and interleaved slot orders never coincide (distinct domain labels).
+- **Alpha golden-vector corpus (`QUA-003` partial).** `steganographer-core/
+  tests/golden_vectors.rs` + `testdata/packets/` pin packet/placement/carrier
+  vectors (untransformed, AEAD, keyed, keyed-interleaved, deflate+sign) with
+  SHA-256 sidecars and an immutability drift gate; fixtures are labeled
+  alpha-provisional and materializable via
+  `cargo test -p steganographer-core --test golden_vectors -- --ignored`.
+- **Nesting scaffold (`PKT-009` partial).** Envelopes gain the optional
+  `FIELD_PARENT_ID` field and `DecodeLimits` gains `max_nesting_depth` (3) /
+  `max_aggregate_nested_bytes` (64 MiB) plus a `check_nesting` entry point for
+  a future recursive decoder.
+
+### Changed (2026-09-20 deep-review round)
+
+- **Spread-spectrum modulation is now deterministic differential QIM.**
+  Every adjacent pixel/sample pair's difference is forced to
+  `sign × 2 × amplitude` along the pair's PN direction, so extraction noise
+  cancels exactly instead of merely to adjacent-pixel differences — bit
+  recovery is now exact on arbitrary-texture carriers (the previous additive
+  scheme misread ~20-35% of bits on non-constant carriers).
+  **Compatibility:** carriers embedded with the pre-0.8 absolute-correlation
+  or additive-pair modulation no longer extract — re-embed.
+- **AEAD nonce derivation hardened.** The generic-packet ChaCha20-Poly1305
+  nonce is now derived from the packet id (`BLAKE3(salt ‖ packet_id)[..12]`)
+  instead of trusting the public locator nonce, eliminating the 32-bit-salt
+  collision risk for a key reused across packets. Wire layout is unchanged;
+  ciphertext bytes for identical inputs differ (no frozen vectors existed).
+- **Key hygiene.** `EncryptionKey` / `DerivedKeys` zeroize on drop
+  (`zeroize` crate); `EncryptionKey::to_hex` is redacted by default with an
+  explicit opt-in `expose_hex()`.
+- **Protocol consistency.** `GenericPacket` decode/encode now enforce
+  flag ⇔ transform-descriptor consistency (`FLAG_ENCRYPTED` ⇔ AEAD,
+  `FLAG_PAYLOAD_SIGNED` ⇔ signature transform); unknown non-critical TLV
+  fields are preserved on decode→encode round-trip instead of silently
+  dropped; the packet codec enforces caller-configured limits on encode
+  symmetric with decode.
+
+### Fixed (2026-09-20 deep-review round)
+
+- **Transform-pipeline DoS bounds.** `ecc_decode` no longer eagerly
+  allocates from unauthenticated ECC descriptor sizes (geometry must match
+  the encoded stream before any allocation — kills the 4 GiB allocation);
+  `original_len` is bounded by `DecodeLimits::max_original_len` before
+  transform reversal (kills the DEFLATE 2^40-expansion bomb);
+  `deflate_decompress` enforces a 64 MiB hard output ceiling.
+- **Keyed-carrier panic on hostile carriers.** A carrier of exactly the
+  recognition-tag length no longer panics in `KeyedPermutation::new(0)` —
+  both keyed and interleaved embed/extract return typed `NoPacket` /
+  `InsufficientCapacity`.
+- **Embed-side descriptor validation.** `SpatialLsb` / keyed carrier embeds
+  now validate the packet's placement/kernel descriptors symmetrically with
+  extraction, so a sequential-described packet can no longer be keyed-embedded
+  into an artifact no extractor accepts.
+- **Legacy kernel component policy (`FMT-002`).** `adaptive` and `lsb_video`
+  no longer treat the alpha channel of RGBA8/BGRA8 carriers as embedding
+  candidates; alpha bytes stay untouched (round-trip tests pin this).
+- **Dashboard hardening.** All four WebSocket upgrades now gate on Origin
+  (cross-origin → 403) and, when an auth token is configured, on
+  `?token=` / `Sec-WebSocket-Protocol: bearer-<token>` (→ 401); decode
+  handlers perform REAL signature verification against a session-wide signer
+  (previously any extracted payload rendered "Signature Verified");
+  `POST /api/config` validates `lsb_bits`/`opacity`/`sign_rate_ms` (400);
+  audio WS inputs are sanity-capped; WS messages are capped at 4 MiB / 1 MiB
+  frames with 4096×4096 image decode limits; `POST /ots/verify` requires auth
+  like every other mutating endpoint; the UI sends the Bearer token it
+  ingests from `?token=`; docs-tab markdown is sanitized with DOMPurify,
+  mermaid runs at `securityLevel: 'strict'`, and CDN scripts carry SRI.
+- **GStreamer element fixes.** `stegovideo` embeds stride-safely (packet bits
+  land only in pixel bytes, never row padding; wire format identical to the
+  CLI pixel-only stream); pad templates are restricted (video: packed
+  RGB/BGR/RGBx/BGRx/XRGB/XBGR; audio: S16LE interleaved) so unsupported caps
+  fail loudly at negotiation instead of silently passing through unembedded;
+  invalid `packet-hex` warns instead of silently disabling embedding;
+  `audio_filter` validates S16LE/interleaved caps, sets AppSrc caps, and no
+  longer deadlocks on pipeline errors; `video_filter` no longer drops frames
+  or stalls on unsupported formats; property changes reset the frame counter
+  with per-reason once-only warnings.
+- **CLI argument validation.** Unknown `--hash-algorithm`, `--stego-type`,
+  `ots --method`, `--log-level`, and `verify --bits` values now error (exit 2)
+  instead of silently falling back (a `--hash-algorithm` typo between encode
+  and verify previously produced nondeterministic verification failures);
+  `verify` rejects unknown stego types instead of reporting `no_signature`
+  with exit 0; `ots verify --proof` defaults to `<input>.ots` as documented;
+  `verify` gained `--revoked-list <PATH>`; multi-frame verify shard-length
+  truncation behavior documented.
+- **status.sh portability.** The subcommand-count grep used `\s`, which BSD
+  grep (macOS) does not support in ERE — the count could print 0 and the
+  `--check` gate could claim doc drift that did not exist. Now
+  `[[:space:]]`.
+
+
+### Added (2026-09-02 round)
 
 - **Native GStreamer plugin packaging + `stegoaudio` element + keyed placement
   (2026-09-02 round).** `steganographer-gst` now builds as a loadable plugin:

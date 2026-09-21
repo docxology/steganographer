@@ -61,6 +61,8 @@ pub fn run_audio_filter(
     log::info!("Audio pipelines started, processing buffers...");
 
     let mut buffer_index: u64 = 0;
+    let mut consecutive_misses: u32 = 0;
+
     loop {
         if let Some(max) = max_buffers {
             if buffer_index >= max {
@@ -69,11 +71,69 @@ pub fn run_audio_filter(
             }
         }
 
-        let sample = match appsink.pull_sample() {
-            Ok(s) => s,
-            Err(_) => {
-                log::info!("AppSink EOS after {} buffers", buffer_index);
-                break;
+        // Check source bus for errors/EOS (mirrors run_video_filter_internal:
+        // a blocking pull_sample would deadlock on a pipeline error since
+        // there is no bus watch).
+        if let Some(bus) = source_bin.bus() {
+            while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
+                use gstreamer::MessageView;
+                match msg.view() {
+                    MessageView::Error(err) => {
+                        let src_name = err.src().map(|s| s.name().to_string()).unwrap_or_default();
+                        log::error!(
+                            "GStreamer error from '{}': {} (debug: {:?})",
+                            src_name,
+                            err.error(),
+                            err.debug()
+                        );
+                        source_bin.set_state(gstreamer::State::Null).ok();
+                        sink_bin.set_state(gstreamer::State::Null).ok();
+                        anyhow::bail!("Pipeline error: {}", err.error());
+                    }
+                    MessageView::Eos(_) => {
+                        log::info!("End of stream");
+                        source_bin.set_state(gstreamer::State::Null).ok();
+                        sink_bin.set_state(gstreamer::State::Null).ok();
+                        log::info!(
+                            "Audio filter pipeline complete: {} buffers processed",
+                            buffer_index
+                        );
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let pull_timeout = if buffer_index == 0 {
+            // Longer timeout for the first buffer: the source needs time to
+            // start.
+            gstreamer::ClockTime::from_seconds(10)
+        } else {
+            gstreamer::ClockTime::from_mseconds(500)
+        };
+
+        let sample = match appsink.try_pull_sample(pull_timeout) {
+            Some(s) => {
+                consecutive_misses = 0;
+                s
+            }
+            None => {
+                consecutive_misses += 1;
+                if consecutive_misses >= 6 {
+                    log::warn!(
+                        "No buffers after {} attempts. Stopping.",
+                        consecutive_misses
+                    );
+                    break;
+                }
+                if buffer_index == 0 {
+                    log::warn!(
+                        "Waiting for first buffer (attempt {})...",
+                        consecutive_misses
+                    );
+                }
+                continue;
             }
         };
 
@@ -81,42 +141,68 @@ pub fn run_audio_filter(
             .buffer()
             .ok_or_else(|| anyhow::anyhow!("Sample has no buffer"))?;
 
+        let caps = sample.caps().ok_or_else(|| anyhow::anyhow!("No caps"))?;
+        let audio_info = gstreamer_audio::AudioInfo::from_caps(caps)
+            .map_err(|_| anyhow::anyhow!("Cannot parse audio caps"))?;
+        // Only interleaved S16LE is addressed as little-endian 16-bit
+        // samples; anything else would silently corrupt the PCM stream.
+        if audio_info.format() != gstreamer_audio::AudioFormat::S16le
+            || audio_info.layout() != gstreamer_audio::AudioLayout::Interleaved
+        {
+            source_bin.set_state(gstreamer::State::Null).ok();
+            sink_bin.set_state(gstreamer::State::Null).ok();
+            anyhow::bail!(
+                "audio filter requires interleaved S16LE input; got format {:?} layout {:?}",
+                audio_info.format(),
+                audio_info.layout()
+            );
+        }
+
         let mut buffer = buffer.copy();
+        let caps_owned = caps.to_owned();
+
+        // CRITICAL: Drop the sample NOW (mirrors the video path) so source
+        // resources are released before processing.
+        drop(sample);
+
+        if buffer_index == 0 {
+            log::info!(
+                "First audio buffer: {} bytes, {:?} {} ch @ {} Hz",
+                buffer.size(),
+                audio_info.format(),
+                audio_info.channels(),
+                audio_info.rate()
+            );
+            appsrc.set_caps(Some(&caps_owned));
+        }
+
         let mut map = buffer
             .make_mut()
             .map_writable()
             .map_err(|_| anyhow::anyhow!("Cannot map buffer writable"))?;
 
-        let caps = sample.caps().ok_or_else(|| anyhow::anyhow!("No caps"))?;
-        let audio_info = gstreamer_audio::AudioInfo::from_caps(caps)
-            .map_err(|_| anyhow::anyhow!("Cannot parse audio caps"))?;
+        let sig = signer.map(|s| s.sign_frame(buffer_index, map.as_ref(), None));
 
-        // Convert raw bytes to i16 samples
-        let sample_bytes = map.as_mut();
-        let samples: &mut [i16] = unsafe {
-            std::slice::from_raw_parts_mut(
-                sample_bytes.as_mut_ptr() as *mut i16,
-                sample_bytes.len() / 2,
-            )
-        };
-
-        let sig = signer.map(|s| {
-            let raw: &[u8] = unsafe {
-                std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2)
-            };
-            s.sign_frame(buffer_index, raw, None)
-        });
+        // Safe little-endian reinterpretation via as_chunks (no unsafe
+        // pointer cast); a trailing byte, impossible for S16LE caps, would
+        // surface as `_remainder` and is left untouched.
+        let (chunks, _remainder) = map.as_mut().as_chunks_mut::<2>();
+        let mut samples: Vec<i16> = chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
 
         let mut audio_buf = AudioBuffer {
             channels: audio_info.channels() as u16,
             sample_rate: audio_info.rate(),
-            samples,
+            samples: &mut samples,
             frame_index: buffer_index,
         };
 
         stego
             .embed(&mut audio_buf, sig.as_ref())
             .context("Audio stego embed failed")?;
+
+        for (chunk, sample16) in chunks.iter_mut().zip(&samples) {
+            chunk.copy_from_slice(&sample16.to_le_bytes());
+        }
 
         drop(map);
 

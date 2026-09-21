@@ -15,9 +15,10 @@
 //!    shrinks the payload.
 //! 3. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
 //!    [`crate::encryption`]. The ciphertext is bound to the packet identity
-//!    (packet id + payload kind + original length) as associated data, and the
-//!    packet nonce supplies 8 bytes of the encryption nonce so a fresh packet
-//!    never reuses a nonce.
+//!    (packet id + payload kind + original length) as associated data. The
+//!    AEAD nonce is derived from the 16-byte packet identifier plus a fresh
+//!    per-invocation salt, so it never depends on public transport data and a
+//!    fresh packet never reuses a nonce.
 //! 4. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
 //!    [`crate::error_correction`], so payloads larger than the 255-symbol RS
 //!    codeword ceiling are covered by independent per-chunk codewords.
@@ -54,15 +55,13 @@ pub const SIGN_PARAMS_SIZE: usize = 32 + 64;
 pub const DEFAULT_ECC_CHUNK_LEN: usize = 239;
 /// Reed-Solomon parity upper bound (also the `error_correction` ceiling).
 pub const MAX_ECC_PARITY: usize = 16;
-
 /// Identity material shared between encode and decode so transforms bind to a
 /// specific packet and are reproducible.
 #[derive(Debug, Clone, Copy)]
 pub struct TransformContext<'a> {
-    /// The 16-byte packet identifier (from the envelope).
+    /// The 16-byte packet identifier (from the envelope). Also anchors the
+    /// AEAD nonce derivation, so the public locator nonce is never trusted.
     pub packet_id: &'a [u8; 16],
-    /// The 8-byte locator nonce.
-    pub nonce: &'a [u8; 8],
     /// The raw `u16` payload-kind discriminant.
     pub payload_kind: u16,
     /// The logical (untransformed) payload length in bytes.
@@ -77,11 +76,6 @@ impl TransformContext<'_> {
         aad.extend_from_slice(&self.payload_kind.to_be_bytes());
         aad.extend_from_slice(&self.original_len.to_be_bytes());
         aad
-    }
-
-    /// Encryption nonce seed derived from the packet nonce.
-    fn frame_index(&self) -> u64 {
-        u64::from_be_bytes(*self.nonce)
     }
 }
 
@@ -173,7 +167,7 @@ pub fn apply(
     }
 
     if let Some(key) = encrypt_key {
-        body = encryption::encrypt(key, context.frame_index(), &body, Some(&context.aad()))
+        body = encryption::encrypt(key, context.packet_id, &body, Some(&context.aad()))
             .map_err(|e| TransformError::EncryptionFailed(e.to_string()))?;
         transforms.push(TransformDescriptor {
             algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
@@ -220,7 +214,7 @@ pub fn reverse(
         match transform.algorithm {
             TRANSFORM_AEAD_CHACHA20_POLY1305 => {
                 let key = encrypt_key.ok_or(TransformError::MissingKey { what: "decryption" })?;
-                body = encryption::decrypt(key, context.frame_index(), &body, Some(&context.aad()))
+                body = encryption::decrypt(key, context.packet_id, &body, Some(&context.aad()))
                     .map_err(|e| TransformError::DecryptionFailed(e.to_string()))?;
             }
             TRANSFORM_ECC_REED_SOLOMON => {
@@ -279,6 +273,16 @@ fn ecc_encode(body: &[u8], parity: usize, chunk_len: usize) -> Result<Vec<u8>, T
 /// Chunked Reed-Solomon decode. `data_len` is the pre-ECC byte length and
 /// `chunk_len` the per-chunk data ceiling, both recorded in the transform
 /// descriptor.
+///
+/// The descriptor is unauthenticated, so before ANY allocation the claimed
+/// geometry must account for every byte of the codeword stream exactly:
+///
+/// `full_chunks * (chunk_len + parity) + trailing(last_len + parity) ==
+/// encoded.len()`
+///
+/// A hostile descriptor (e.g. `data_len = 0xFFFF_FFFF` against a tiny body)
+/// is therefore rejected with a typed error instead of a multi-gigabyte
+/// `Vec::with_capacity(data_len)`.
 fn ecc_decode(
     encoded: &[u8],
     data_len: usize,
@@ -286,28 +290,31 @@ fn ecc_decode(
     chunk_len: usize,
 ) -> Result<Vec<u8>, TransformError> {
     validate_ecc_params(parity, chunk_len)?;
+
+    let full_chunks = data_len / chunk_len;
+    let last_len = data_len % chunk_len;
+    let expected_codeword_len = full_chunks
+        .checked_mul(chunk_len + parity)
+        .and_then(|total| total.checked_add(if last_len > 0 { last_len + parity } else { 0 }))
+        .ok_or(TransformError::LengthOverflow)?;
+    if expected_codeword_len != encoded.len() {
+        return Err(TransformError::InvalidDescriptor(
+            "ECC descriptor geometry is inconsistent with the codeword stream",
+        ));
+    }
     if parity == 0 {
-        if encoded.len() < data_len {
-            return Err(TransformError::InvalidDescriptor("ECC data is truncated"));
-        }
         return Ok(encoded[..data_len].to_vec());
     }
     if data_len == 0 {
         return Ok(Vec::new());
     }
 
-    let full_chunks = data_len / chunk_len;
-    let last_len = data_len % chunk_len;
+    // Geometry is proven consistent above, so every offset below is in range
+    // and the output allocation is bounded by `encoded.len()`.
     let mut output = Vec::with_capacity(data_len);
     let mut offset = 0usize;
     for _ in 0..full_chunks {
-        let codeword_len = chunk_len + parity;
-        let end = offset
-            .checked_add(codeword_len)
-            .ok_or(TransformError::LengthOverflow)?;
-        if end > encoded.len() {
-            return Err(TransformError::InvalidDescriptor("ECC data is truncated"));
-        }
+        let end = offset + chunk_len + parity;
         output.extend(
             error_correction::decode(&encoded[offset..end], chunk_len, parity)
                 .map_err(|e| TransformError::ErrorCorrectionFailed(e.to_string()))?,
@@ -315,13 +322,7 @@ fn ecc_decode(
         offset = end;
     }
     if last_len > 0 {
-        let codeword_len = last_len + parity;
-        let end = offset
-            .checked_add(codeword_len)
-            .ok_or(TransformError::LengthOverflow)?;
-        if end > encoded.len() {
-            return Err(TransformError::InvalidDescriptor("ECC data is truncated"));
-        }
+        let end = offset + last_len + parity;
         output.extend(
             error_correction::decode(&encoded[offset..end], last_len, parity)
                 .map_err(|e| TransformError::ErrorCorrectionFailed(e.to_string()))?,
@@ -359,9 +360,22 @@ fn deflate_compress(data: &[u8]) -> Result<Vec<u8>, TransformError> {
         .map_err(|e| TransformError::CompressionFailed(e.to_string()))
 }
 
+/// Hard ceiling on any single DEFLATE expansion, checked before reading so a
+/// hostile envelope that claims a huge `original_len` cannot expand a small
+/// stream into a decompression bomb. Generous relative to the protocol's
+/// default body ceiling (16 MiB); legitimate envelopes are additionally
+/// bounded by `DecodeLimits::max_original_len` in `packet.rs` before
+/// [`reverse`] is ever invoked.
+pub const MAX_DECOMPRESS_OUTPUT: usize = 64 * 1024 * 1024;
+
 /// DEFLATE-decompress a byte slice, bounded to `limit` bytes (inclusive) so a
 /// malicious or corrupt stream cannot expand into a decompression bomb.
 fn deflate_decompress(data: &[u8], limit: usize) -> Result<Vec<u8>, TransformError> {
+    if limit > MAX_DECOMPRESS_OUTPUT {
+        return Err(TransformError::InvalidDescriptor(
+            "declared decompressed length exceeds the transform output ceiling",
+        ));
+    }
     let decoder = flate2::read::DeflateDecoder::new(data);
     let mut output = Vec::new();
     decoder
@@ -421,7 +435,6 @@ mod tests {
     fn context(packet: &GenericPacket) -> TransformContext<'_> {
         TransformContext {
             packet_id: &packet.envelope.packet_id,
-            nonce: &packet.locator.nonce,
             payload_kind: packet.envelope.payload_kind as u16,
             original_len: packet.envelope.original_len,
         }
@@ -832,5 +845,75 @@ mod tests {
             (8, 12345, DEFAULT_ECC_CHUNK_LEN)
         );
         assert!(parse_ecc_params(&[0u8; 6]).is_err());
+    }
+
+    #[test]
+    fn hostile_ecc_data_len_is_rejected_before_allocation() {
+        // The descriptor is unauthenticated: a 4 GiB `data_len` claim against
+        // a tiny codeword stream must fail the geometry precheck (typed
+        // error) instead of attempting `Vec::with_capacity(0xFFFF_FFFF)`.
+        let params = ecc_params(1, 0xFFFF_FFFF, DEFAULT_ECC_CHUNK_LEN);
+        let transforms = vec![TransformDescriptor {
+            algorithm: TRANSFORM_ECC_REED_SOLOMON,
+            version: 1,
+            critical: true,
+            parameters: params,
+        }];
+        let payload = b"tiny".to_vec();
+        let packet = GenericPacket::new_untransformed(
+            payload.clone(),
+            *b"0123456789abcdef",
+            *b"nonce123",
+            crate::packet::PayloadKind::Bytes,
+            crate::packet::AlgorithmDescriptor::new(1, 1, Vec::new()),
+            crate::packet::AlgorithmDescriptor::new(1, 1, vec![1]),
+            &crate::packet::DecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            reverse(
+                b"only-32-bytes-here!!!!!!!!!!!!!!!",
+                &context(&packet),
+                None,
+                &transforms,
+                4
+            ),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+
+        // Same rejection directly at the decode layer.
+        assert!(matches!(
+            ecc_decode(&[0u8; 32], 0xFFFF_FFFF, 1, DEFAULT_ECC_CHUNK_LEN),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+    }
+
+    #[test]
+    fn ecc_geometry_mismatch_is_rejected() {
+        // data_len + parity overhead must equal the stream length exactly.
+        // 8 data bytes + 1 parity = 9 expected, but 10 provided.
+        assert!(matches!(
+            ecc_decode(&[0u8; 10], 8, 1, DEFAULT_ECC_CHUNK_LEN),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+        // Consistent geometry still decodes.
+        let body = b"abcdefgh";
+        let codeword = error_correction::encode(body, 1).unwrap();
+        assert_eq!(
+            ecc_decode(&codeword, body.len(), 1, DEFAULT_ECC_CHUNK_LEN).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn decompression_bomb_is_capped_by_the_output_ceiling() {
+        // 1 MiB of zeros compresses to a few hundred bytes; claiming a 2^40
+        // expansion must be rejected by the ceiling before any read loop.
+        let bomb = deflate_compress(&vec![0u8; 1024 * 1024]).unwrap();
+        assert!(bomb.len() < 4096);
+        assert!(matches!(
+            deflate_decompress(&bomb, (1u64 << 40) as usize),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
     }
 }

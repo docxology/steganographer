@@ -24,6 +24,38 @@ const QR_MARGIN = 8;          // px margin from corner
 const QR_GRID_CELLS = 15;     // data matrix grid dimension (for 20-byte payload)
 const TOAST_DURATION_MS = 2500; // default toast auto-dismiss time
 
+// ─── Auth Token ───────────────────────────────────────────────────────────────
+// The dashboard may be started with --auth-token. The UI ingests the token
+// exactly once from ?token=<t> (stripped from the URL so it doesn't leak into
+// referrers/history), stores it in sessionStorage, and then attaches
+// `Authorization: Bearer <t>` to every mutating request and `?token=` to
+// every WebSocket URL (WS upgrades cannot carry custom headers).
+
+function ingestAuthToken() {
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get('token');
+    if (token) {
+        sessionStorage.setItem('auth_token', token);
+        url.searchParams.delete('token');
+        history.replaceState(null, '', url);
+    }
+}
+
+function getAuthToken() {
+    return sessionStorage.getItem('auth_token');
+}
+
+function authHeaders() {
+    const t = getAuthToken();
+    return t ? { 'Authorization': 'Bearer ' + t } : {};
+}
+
+function wsUrl(path) {
+    const t = getAuthToken();
+    const tokenPart = t ? `?token=${encodeURIComponent(t)}` : '';
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}${tokenPart}`;
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let encodeWs = null;
@@ -412,9 +444,8 @@ function sendFrameForSigning() {
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
-
 function connectEncodeWs() {
-    const url = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/encode`;
+    const url = wsUrl('/ws/encode');
     encodeWs = new WebSocket(url);
     encodeWs.binaryType = 'arraybuffer';
     let heartbeatId = null;
@@ -431,7 +462,7 @@ function connectEncodeWs() {
 }
 
 function connectDecodeWs() {
-    const url = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/decode`;
+    const url = wsUrl('/ws/decode');
     decodeWs = new WebSocket(url);
     decodeWs.onopen = () => {
         decodePollInterval = setInterval(() => {
@@ -486,6 +517,12 @@ function handleDecodeMessage(msg) {
             el.verifyStatusBanner.className = 'verify-status-banner status-ok';
             el.verifyStatusIcon.textContent = '✅';
             el.verifyStatusText.textContent = 'Signature Verified';
+        } else if (msg.payload?.payload_found) {
+            // Extraction found a payload but the signature does not check
+            // out — the data has been altered or is not from our signer.
+            el.verifyStatusBanner.className = 'verify-status-banner status-fail';
+            el.verifyStatusIcon.textContent = '❌';
+            el.verifyStatusText.textContent = 'Payload extracted, signature INVALID';
         } else {
             el.verifyStatusBanner.className = 'verify-status-banner status-fail';
             el.verifyStatusIcon.textContent = '❌';
@@ -607,7 +644,9 @@ function updateStegoInfo() {
     const capacityBytes = Math.floor(capacityBits / 8);
 
     const isEth = liveConfig.signingBackend === 'ethereum';
-    const payloadSize = isEth ? 97 : 104;
+    // Ed25519 payload size: steganographer_core SignaturePayload::SERIALIZED_SIZE
+    // (4 magic + 1 version + 8 frame index + 32 BLAKE3 hash + 64 Ed25519 sig).
+    const payloadSize = 109;
     const utilization = capacityBits > 0 ? ((payloadSize * 8 / capacityBits) * 100).toFixed(3) : 0;
 
     el.infoPayloadSize.textContent = payloadSize + ' bytes';
@@ -620,7 +659,7 @@ function updateStegoInfo() {
 function pushConfigToServer() {
     fetch('/api/config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(liveConfig),
     })
         .then(r => { if (r.ok) showToast('Config saved', 'success'); else showToast('Config save failed', 'error'); })
@@ -794,14 +833,13 @@ function initThemeToggle() {
             const currentTheme = document.body.getAttribute('data-theme') || 'dark';
             const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
             document.body.setAttribute('data-theme', newTheme);
-            localStorage.setItem('stego-theme', newTheme);
 
             // Update mermaid theme if diagrams are present
             if (window.mermaid) {
                 window.mermaid.initialize({
                     startOnLoad: false,
                     theme: newTheme === 'light' ? 'default' : 'dark',
-                    securityLevel: 'loose',
+                    securityLevel: 'strict',
                 });
             }
 
@@ -1136,13 +1174,13 @@ function setupCameraSelector() {
                 startCamera();
             }
         });
-
-        // Try initial enumeration (labels may be empty before permission)
         enumerateCameras();
     }
 }
 
+
 function init() {
+    ingestAuthToken();
     console.log('Steganographer Dashboard initializing...');
     initThemeToggle();
     fetchConfig();

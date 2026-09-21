@@ -45,6 +45,12 @@ const FIELD_CREATED_VERSION: u16 = 8;
 const FIELD_MIME_TYPE: u16 = 16;
 const FIELD_FILENAME: u16 = 17;
 const FIELD_CREATED_AT: u16 = 18;
+/// Envelope field: the 16-byte packet identifier of the parent packet that
+/// carried this one (PKT-009 nesting scaffold). Reserved as the first
+/// non-critical identifier in the 19..128 gap so nested packets stay
+/// forward-compatible.
+pub const FIELD_PARENT_ID: u16 = 19;
+
 const FIRST_EXTENSION_FIELD: u16 = 128;
 
 /// Extension field: the 32-byte SHA-256 digest that was stamped with the
@@ -70,6 +76,16 @@ pub struct DecodeLimits {
     pub max_extensions: usize,
     pub max_filename_len: usize,
     pub max_mime_len: usize,
+    /// Ceiling on the declared logical payload length (`original_len`).
+    /// Enforced in envelope validation before any transform is reversed, so a
+    /// hostile envelope cannot aim a DEFLATE bomb at `transforms::reverse`.
+    pub max_original_len: usize,
+    /// PKT-009 nesting scaffold: maximum parent-id chain depth a future
+    /// recursive decoder may expand.
+    pub max_nesting_depth: usize,
+    /// PKT-009 nesting scaffold: maximum aggregate bytes across every nested
+    /// packet expanded in one parent-id chain.
+    pub max_aggregate_nested_bytes: usize,
 }
 
 impl Default for DecodeLimits {
@@ -84,6 +100,9 @@ impl Default for DecodeLimits {
             max_extensions: 64,
             max_filename_len: 255,
             max_mime_len: 127,
+            max_original_len: 16 * 1024 * 1024,
+            max_nesting_depth: 3,
+            max_aggregate_nested_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -104,6 +123,12 @@ pub enum PacketError {
         actual: usize,
         maximum: usize,
     },
+    #[error("locator flag {flag:#06x} is set but the envelope records no matching transform")]
+    MissingTransformForFlag { flag: u16 },
+    #[error("envelope transform {algorithm} is recorded but locator flag {flag:#06x} is not set")]
+    MissingFlagForTransform { algorithm: u16, flag: u16 },
+    #[error("packet nesting depth {depth} exceeds the configured maximum {maximum}")]
+    NestingDepthExceeded { depth: usize, maximum: usize },
     #[error("packet length arithmetic overflow")]
     LengthOverflow,
     #[error("envelope CRC32C mismatch")]
@@ -472,6 +497,13 @@ pub struct PacketEnvelope {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
     pub created_at_unix: Option<u64>,
+    /// Optional parent packet identifier ([`FIELD_PARENT_ID`], PKT-009
+    /// nesting scaffold).
+    pub parent_id: Option<[u8; 16]>,
+    /// Unknown non-critical envelope fields (identifiers 9-15 and 20-127),
+    /// preserved from the wire and re-emitted on encode so decode→encode
+    /// round-trips stay byte-exact across forward-compatible minor versions.
+    pub unknown_fields: Vec<ExtensionField>,
     pub extensions: Vec<ExtensionField>,
 }
 
@@ -496,18 +528,22 @@ impl PacketEnvelope {
             mime_type: None,
             filename: None,
             created_at_unix: None,
+            parent_id: None,
+            unknown_fields: Vec::new(),
             extensions: Vec::new(),
         }
     }
 
     pub fn encode(&self, limits: &DecodeLimits) -> Result<Vec<u8>, PacketError> {
         validate_envelope(self, limits)?;
-        let field_count = 8usize
+        let field_count = 9usize
             .checked_add(self.transforms.len())
             .and_then(|count| count.checked_add(self.extensions.len()))
+            .and_then(|count| count.checked_add(self.unknown_fields.len()))
             .and_then(|count| count.checked_add(usize::from(self.mime_type.is_some())))
             .and_then(|count| count.checked_add(usize::from(self.filename.is_some())))
             .and_then(|count| count.checked_add(usize::from(self.created_at_unix.is_some())))
+            .and_then(|count| count.checked_add(usize::from(self.parent_id.is_some())))
             .ok_or(PacketError::LengthOverflow)?;
         check_limit("envelope field count", field_count, limits.max_fields)?;
         let mut output = Vec::new();
@@ -564,6 +600,13 @@ impl PacketEnvelope {
             &[self.created_version.0, self.created_version.1],
             limits,
         )?;
+        // Preserved unknown fields with identifiers below the optional
+        // metadata block (9-15) sit between created version and MIME type.
+        for field in &self.unknown_fields {
+            if field.id < FIELD_MIME_TYPE {
+                push_tlv(&mut output, field.id, false, &field.value, limits)?;
+            }
+        }
         if let Some(value) = &self.mime_type {
             push_tlv(
                 &mut output,
@@ -584,6 +627,16 @@ impl PacketEnvelope {
                 &encode_minimal_u64(value),
                 limits,
             )?;
+        }
+        if let Some(parent) = &self.parent_id {
+            push_tlv(&mut output, FIELD_PARENT_ID, false, parent, limits)?;
+        }
+        // Preserved unknown fields between the parent identifier and the
+        // extension registry (20-127).
+        for field in &self.unknown_fields {
+            if field.id > FIELD_PARENT_ID {
+                push_tlv(&mut output, field.id, false, &field.value, limits)?;
+            }
         }
 
         let mut extensions = self.extensions.clone();
@@ -612,6 +665,8 @@ impl PacketEnvelope {
         let mut mime_type = None;
         let mut filename = None;
         let mut created_at_unix = None;
+        let mut parent_id = None;
+        let mut unknown_fields = Vec::new();
         let mut extensions = Vec::new();
 
         while cursor < input.len() {
@@ -731,6 +786,13 @@ impl PacketEnvelope {
                     set_once(&created_at_unix, field_id)?;
                     created_at_unix = Some(decode_minimal_u64(value, field_id)?);
                 }
+                FIELD_PARENT_ID => {
+                    set_once(&parent_id, field_id)?;
+                    parent_id = Some(value.try_into().map_err(|_| PacketError::InvalidField {
+                        field_id,
+                        reason: "parent packet identifier must be 16 bytes",
+                    })?);
+                }
                 unknown if unknown >= FIRST_EXTENSION_FIELD && !critical => {
                     check_limit(
                         "extension count",
@@ -745,9 +807,20 @@ impl PacketEnvelope {
                 unknown if critical => {
                     return Err(PacketError::UnknownCriticalField { field_id: unknown });
                 }
-                _ => {
-                    // Unknown non-critical fields below the extension registry
-                    // range are ignored for forward-compatible minor versions.
+                other => {
+                    // Unknown non-critical field in the reserved gaps
+                    // (identifiers 9-15 and 20-127): preserve the raw bytes so
+                    // encode re-emits them and decode→encode round-trips stay
+                    // byte-exact across forward-compatible minor versions.
+                    check_limit(
+                        "unknown field count",
+                        unknown_fields.len() + 1,
+                        limits.max_extensions,
+                    )?;
+                    unknown_fields.push(ExtensionField {
+                        id: other,
+                        value: value.to_vec(),
+                    });
                 }
             }
         }
@@ -778,6 +851,8 @@ impl PacketEnvelope {
             mime_type,
             filename,
             created_at_unix,
+            parent_id,
+            unknown_fields,
             extensions,
         };
         validate_envelope(&envelope, limits)?;
@@ -798,6 +873,13 @@ fn validate_envelope(envelope: &PacketEnvelope, limits: &DecodeLimits) -> Result
             reason: "initial digest profiles require 32 digest bytes",
         });
     }
+    // Bound the declared logical payload length before any transform is
+    // reversed: a hostile envelope with a 60-byte body and
+    // `original_len = 2^40` would otherwise expand toward 1 TiB inside
+    // `transforms::reverse`.
+    let original_len =
+        usize::try_from(envelope.original_len).map_err(|_| PacketError::LengthOverflow)?;
+    check_limit("original length", original_len, limits.max_original_len)?;
     check_limit(
         "transform count",
         envelope.transforms.len(),
@@ -853,6 +935,27 @@ fn validate_envelope(envelope: &PacketEnvelope, limits: &DecodeLimits) -> Result
             extension.value.len(),
             limits.max_field_len,
         )?;
+    }
+    check_limit(
+        "unknown field count",
+        envelope.unknown_fields.len(),
+        limits.max_extensions,
+    )?;
+    let mut previous_unknown = 0u16;
+    for field in &envelope.unknown_fields {
+        let in_lower_gap = (FIELD_CREATED_VERSION + 1..FIELD_MIME_TYPE).contains(&field.id);
+        let in_upper_gap = (FIELD_PARENT_ID + 1..FIRST_EXTENSION_FIELD).contains(&field.id);
+        if !(in_lower_gap || in_upper_gap) {
+            return Err(PacketError::InvalidField {
+                field_id: field.id,
+                reason: "unknown field identifier is not a reserved non-critical identifier",
+            });
+        }
+        if field.id <= previous_unknown {
+            return Err(PacketError::NonCanonicalOrder { field_id: field.id });
+        }
+        previous_unknown = field.id;
+        check_limit("envelope field", field.value.len(), limits.max_field_len)?;
     }
     Ok(())
 }
@@ -990,6 +1093,7 @@ impl GenericPacket {
             });
         }
         validate_flags(self.locator.flags)?;
+        validate_flag_transform_consistency(self.locator.flags, &self.envelope.transforms)?;
         let envelope = self.envelope.encode(limits)?;
         validate_lengths(envelope.len(), self.body.len(), limits)?;
         if self.locator.envelope_len as usize != envelope.len()
@@ -1028,6 +1132,7 @@ impl GenericPacket {
             return Err(PacketError::EnvelopeChecksum);
         }
         let envelope = PacketEnvelope::decode(envelope_bytes, limits)?;
+        validate_flag_transform_consistency(locator.flags, &envelope.transforms)?;
         let body = input[envelope_end..body_end].to_vec();
         validate_untransformed_body(&envelope, &body)?;
 
@@ -1042,7 +1147,6 @@ impl GenericPacket {
         self.locator.packet_len()
     }
 }
-
 fn validate_untransformed_body(envelope: &PacketEnvelope, body: &[u8]) -> Result<(), PacketError> {
     if !envelope.transforms.is_empty() {
         return Ok(());
@@ -1056,6 +1160,72 @@ fn validate_untransformed_body(envelope: &PacketEnvelope, body: &[u8]) -> Result
     Ok(())
 }
 
+/// Locator flags must mirror the recorded transform descriptors exactly:
+/// `FLAG_ENCRYPTED` ⇔ an AEAD transform is present, `FLAG_PAYLOAD_SIGNED` ⇔
+/// a payload-signature transform is present. Either mismatch is a protocol
+/// violation — it would let a decoder skip or misapply a transform.
+fn validate_flag_transform_consistency(
+    flags: u16,
+    transforms: &[TransformDescriptor],
+) -> Result<(), PacketError> {
+    use crate::transforms::{TRANSFORM_AEAD_CHACHA20_POLY1305, TRANSFORM_PAYLOAD_SIGN_ED25519};
+
+    let has_aead = transforms
+        .iter()
+        .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305);
+    let has_sign = transforms
+        .iter()
+        .any(|t| t.algorithm == TRANSFORM_PAYLOAD_SIGN_ED25519);
+
+    if flags & FLAG_ENCRYPTED != 0 && !has_aead {
+        return Err(PacketError::MissingTransformForFlag {
+            flag: FLAG_ENCRYPTED,
+        });
+    }
+    if flags & FLAG_PAYLOAD_SIGNED != 0 && !has_sign {
+        return Err(PacketError::MissingTransformForFlag {
+            flag: FLAG_PAYLOAD_SIGNED,
+        });
+    }
+    if has_aead && flags & FLAG_ENCRYPTED == 0 {
+        return Err(PacketError::MissingFlagForTransform {
+            algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
+            flag: FLAG_ENCRYPTED,
+        });
+    }
+    if has_sign && flags & FLAG_PAYLOAD_SIGNED == 0 {
+        return Err(PacketError::MissingFlagForTransform {
+            algorithm: TRANSFORM_PAYLOAD_SIGN_ED25519,
+            flag: FLAG_PAYLOAD_SIGNED,
+        });
+    }
+    Ok(())
+}
+
+/// PKT-009 nesting scaffold. A future recursive decoder following
+/// [`FIELD_PARENT_ID`] chains will call this before expanding each nested
+/// packet, tracking the current chain depth and the aggregate decoded bytes.
+/// The full recursive decoder is intentionally not implemented yet; this
+/// entry point pins the contract and the typed rejections.
+pub fn check_nesting(
+    depth: usize,
+    aggregate_bytes: u64,
+    limits: &DecodeLimits,
+) -> Result<(), PacketError> {
+    if depth > limits.max_nesting_depth {
+        return Err(PacketError::NestingDepthExceeded {
+            depth,
+            maximum: limits.max_nesting_depth,
+        });
+    }
+    let aggregate = usize::try_from(aggregate_bytes).map_err(|_| PacketError::LengthOverflow)?;
+    check_limit(
+        "aggregate nested bytes",
+        aggregate,
+        limits.max_aggregate_nested_bytes,
+    )
+}
+
 /// Byte-oriented codec contract used by generic and legacy payload adapters.
 pub trait PacketCodec {
     type Value;
@@ -1065,8 +1235,13 @@ pub trait PacketCodec {
     fn decode(&self, input: &[u8], limits: &DecodeLimits) -> Result<Self::Value, PacketError>;
 }
 
+/// Byte codec for protocol-v1 generic packets. The configured limits are
+/// enforced on encode, symmetric with the limits passed to decode.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct GenericPacketCodec;
+pub struct GenericPacketCodec {
+    /// Ceilings applied when encoding; decode callers pass their own limits.
+    pub limits: DecodeLimits,
+}
 
 impl PacketCodec for GenericPacketCodec {
     type Value = GenericPacket;
@@ -1076,7 +1251,7 @@ impl PacketCodec for GenericPacketCodec {
     }
 
     fn encode(&self, value: &Self::Value, output: &mut Vec<u8>) -> Result<(), PacketError> {
-        output.extend_from_slice(&value.encode(&DecodeLimits::default())?);
+        output.extend_from_slice(&value.encode(&self.limits)?);
         Ok(())
     }
 
@@ -1274,5 +1449,272 @@ mod tests {
         codec.encode(&payload, &mut bytes).unwrap();
         let decoded = codec.decode(&bytes, &DecodeLimits::default()).unwrap();
         assert_eq!(decoded.to_bytes(), payload.to_bytes());
+    }
+
+    #[test]
+    fn unknown_noncritical_fields_round_trip_byte_exact() {
+        let mut envelope = PacketEnvelope::for_payload(
+            *b"0123456789abcdef",
+            PayloadKind::Bytes,
+            b"payload",
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+        );
+        envelope.unknown_fields.push(ExtensionField {
+            id: 9,
+            value: vec![1, 2, 3],
+        });
+        envelope.unknown_fields.push(ExtensionField {
+            id: 42,
+            value: b"preserve me".to_vec(),
+        });
+        let encoded = envelope.encode(&DecodeLimits::default()).unwrap();
+        let decoded = PacketEnvelope::decode(&encoded, &DecodeLimits::default()).unwrap();
+        assert_eq!(decoded.unknown_fields, envelope.unknown_fields);
+        assert_eq!(decoded.encode(&DecodeLimits::default()).unwrap(), encoded);
+    }
+
+    #[test]
+    fn oversized_original_len_is_rejected_before_transforms() {
+        // Hostile envelope: 60-byte body plus a DEFLATE descriptor, claiming
+        // original_len = 2^40. The envelope ceiling must reject it before
+        // transforms::reverse is ever reached, with no allocation.
+        let limits = DecodeLimits::default();
+        let mut raw = Vec::new();
+        push_tlv(
+            &mut raw,
+            FIELD_PACKET_ID,
+            true,
+            b"0123456789abcdef",
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut raw,
+            FIELD_PAYLOAD_KIND,
+            true,
+            &encode_minimal_u64(PayloadKind::Bytes as u16 as u64),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut raw,
+            FIELD_ORIGINAL_LENGTH,
+            true,
+            &encode_minimal_u64(1u64 << 40),
+            &limits,
+        )
+        .unwrap();
+        let mut digest = vec![DigestAlgorithm::Blake3 as u8];
+        digest.extend_from_slice(&[0u8; 32]);
+        push_tlv(&mut raw, FIELD_CONTENT_DIGEST, true, &digest, &limits).unwrap();
+        // Algorithm 3 = TRANSFORM_COMPRESS_DEFLATE.
+        push_tlv(
+            &mut raw,
+            FIELD_TRANSFORM,
+            true,
+            &encode_algorithm(3, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut raw,
+            FIELD_PLACEMENT,
+            true,
+            &encode_algorithm(1, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut raw,
+            FIELD_KERNEL,
+            true,
+            &encode_algorithm(1, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut raw,
+            FIELD_CREATED_VERSION,
+            true,
+            &[PROTOCOL_MAJOR, PROTOCOL_MINOR],
+            &limits,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            PacketEnvelope::decode(&raw, &DecodeLimits::default()),
+            Err(PacketError::LimitExceeded {
+                what: "original length",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn flag_without_matching_transform_is_rejected_on_decode() {
+        let mut bytes = packet(b"payload").encode(&DecodeLimits::default()).unwrap();
+        bytes[6..8].copy_from_slice(&FLAG_ENCRYPTED.to_be_bytes());
+        assert!(matches!(
+            GenericPacket::decode(&bytes, &DecodeLimits::default()),
+            Err(PacketError::MissingTransformForFlag {
+                flag: FLAG_ENCRYPTED
+            })
+        ));
+
+        let mut bytes = packet(b"payload").encode(&DecodeLimits::default()).unwrap();
+        bytes[6..8].copy_from_slice(&FLAG_PAYLOAD_SIGNED.to_be_bytes());
+        assert!(matches!(
+            GenericPacket::decode(&bytes, &DecodeLimits::default()),
+            Err(PacketError::MissingTransformForFlag {
+                flag: FLAG_PAYLOAD_SIGNED
+            })
+        ));
+    }
+
+    #[test]
+    fn transform_without_matching_flag_is_rejected() {
+        // Encode direction: AEAD transform recorded, locator flag cleared.
+        let mut p = packet(b"payload");
+        p.envelope.transforms.push(TransformDescriptor {
+            algorithm: 1, // TRANSFORM_AEAD_CHACHA20_POLY1305
+            version: 1,
+            critical: true,
+            parameters: Vec::new(),
+        });
+        p.locator.flags = 0;
+        assert!(matches!(
+            p.encode(&DecodeLimits::default()),
+            Err(PacketError::MissingFlagForTransform {
+                algorithm: 1,
+                flag: FLAG_ENCRYPTED
+            })
+        ));
+
+        // Decode direction: hand-build a packet whose envelope carries an
+        // AEAD transform while the locator flag is clear.
+        let limits = DecodeLimits::default();
+        let mut envelope = Vec::new();
+        push_tlv(
+            &mut envelope,
+            FIELD_PACKET_ID,
+            true,
+            b"0123456789abcdef",
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut envelope,
+            FIELD_PAYLOAD_KIND,
+            true,
+            &encode_minimal_u64(PayloadKind::Bytes as u16 as u64),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(&mut envelope, FIELD_ORIGINAL_LENGTH, true, &[7], &limits).unwrap();
+        let mut digest = vec![DigestAlgorithm::Blake3 as u8];
+        digest.extend_from_slice(&[0u8; 32]);
+        push_tlv(&mut envelope, FIELD_CONTENT_DIGEST, true, &digest, &limits).unwrap();
+        push_tlv(
+            &mut envelope,
+            FIELD_TRANSFORM,
+            true,
+            &encode_algorithm(1, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut envelope,
+            FIELD_PLACEMENT,
+            true,
+            &encode_algorithm(1, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut envelope,
+            FIELD_KERNEL,
+            true,
+            &encode_algorithm(1, 1, &[]),
+            &limits,
+        )
+        .unwrap();
+        push_tlv(
+            &mut envelope,
+            FIELD_CREATED_VERSION,
+            true,
+            &[PROTOCOL_MAJOR, PROTOCOL_MINOR],
+            &limits,
+        )
+        .unwrap();
+
+        let locator = Locator::new(
+            0,
+            envelope.len(),
+            7,
+            crc32c(&envelope),
+            *b"nonce123",
+            &limits,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&locator.to_bytes());
+        bytes.extend_from_slice(&envelope);
+        bytes.extend_from_slice(b"payload");
+        assert!(matches!(
+            GenericPacket::decode(&bytes, &DecodeLimits::default()),
+            Err(PacketError::MissingFlagForTransform {
+                algorithm: 1,
+                flag: FLAG_ENCRYPTED
+            })
+        ));
+    }
+
+    #[test]
+    fn parent_id_roundtrips_and_nesting_scaffold_rejects() {
+        let limits = DecodeLimits::default();
+        let mut p = packet(b"nested payload");
+        p.envelope.parent_id = Some(*b"parentpacketid12");
+        let envelope_bytes = p.envelope.encode(&limits).unwrap();
+        p.locator.envelope_len = envelope_bytes.len() as u32;
+        p.locator.envelope_crc32c = crc32c(&envelope_bytes);
+
+        let bytes = p.encode(&limits).unwrap();
+        let decoded = GenericPacket::decode(&bytes, &limits).unwrap();
+        assert_eq!(decoded.envelope.parent_id, Some(*b"parentpacketid12"));
+        assert_eq!(decoded.encode(&limits).unwrap(), bytes);
+
+        // Nesting scaffold: depth within the limit passes, beyond fails.
+        assert!(check_nesting(3, 0, &limits).is_ok());
+        assert!(matches!(
+            check_nesting(4, 0, &limits),
+            Err(PacketError::NestingDepthExceeded {
+                depth: 4,
+                maximum: 3
+            })
+        ));
+        assert!(matches!(
+            check_nesting(1, 64 * 1024 * 1024 + 1, &limits),
+            Err(PacketError::LimitExceeded {
+                what: "aggregate nested bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn generic_codec_uses_configured_limits_for_encode() {
+        let p = packet(b"payload");
+        let codec = GenericPacketCodec {
+            limits: DecodeLimits {
+                max_body_len: 4,
+                ..DecodeLimits::default()
+            },
+        };
+        let mut out = Vec::new();
+        assert!(matches!(
+            codec.encode(&p, &mut out),
+            Err(PacketError::LimitExceeded { what: "body", .. })
+        ));
     }
 }

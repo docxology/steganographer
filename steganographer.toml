@@ -127,3 +127,16 @@ bits = 1
 key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 # Alternatively, load key from file:
 # key_file = "keys/audio_stego.key"
+
+# ─── OpenTimestamps Attestation (opt-in) ─────────────────────────────────────
+#
+# Stamps the SHA-256 of the BLAKE3 Merkle root of each completed hash-chain
+# segment against the OpenTimestamps calendar and writes .ots proof files.
+# Entirely disabled unless enabled = true.
+# [ots]
+# enabled = false
+# server_url = "https://opentimestamps.org"
+# method = "bitcoin"              # "bitcoin" | "ethereum"
+# interval_secs = 300             # minimum seconds between stamps
+# proof_dir = "ots_proofs"        # directory for .ots proof files
+# timeout_secs = 30               # HTTP request timeout

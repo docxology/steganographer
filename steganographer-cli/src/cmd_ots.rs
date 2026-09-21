@@ -47,6 +47,18 @@ pub struct OtsVerifyResult {
     pub status: String,
 }
 
+/// Validate a user-supplied `--method` value. Unknown names are a usage-class
+/// error rather than a silent fall-back to [`OTSMethod::Bitcoin`] stamping.
+pub fn validate_method(method: &str) -> anyhow::Result<()> {
+    match method.to_ascii_lowercase().as_str() {
+        "bitcoin" | "ethereum" | "eth" => Ok(()),
+        _ => anyhow::bail!(
+            "unknown OTS method '{}': expected 'bitcoin' or 'ethereum'",
+            method
+        ),
+    }
+}
+
 /// Run the `ots stamp` subcommand.
 pub fn stamp(
     config_path: &str,
@@ -71,6 +83,9 @@ pub fn stamp(
     });
 
     let ots_cfg = cfg.ots_config();
+    if let Some(m) = method {
+        validate_method(m)?;
+    }
     let method_name = method.unwrap_or(&ots_cfg.method);
     let ots_method = OTSMethod::parse(method_name);
 

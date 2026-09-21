@@ -5,7 +5,7 @@
 Steganographer uses a two-layer cryptographic scheme to produce tamper-evident signatures for each media frame:
 
 1. **Hashing** — Configurable hash function (BLAKE3 default, also SHA-256, SHA-3-256) producing a 256-bit digest
-2. **Signing** — Ed25519 (default) or secp256k1/Ethereum (EIP-191) digital signature scheme
+2. **Signing** — Ed25519 (default), secp256k1/Ethereum (EIP-191), or post-quantum ML-DSA / hybrid signatures
 
 The combination provides both **integrity** (hash detects any modification) and **authenticity** (signature proves the frame was signed by the holder of the private key).
 
@@ -192,16 +192,48 @@ signing_backend = "ed25519"   # default
 
 ### Backend Comparison
 
-| Property              | Ed25519 (default)              | Ethereum (secp256k1)                    |
-| --------------------- | ------------------------------ | --------------------------------------- |
-| Curve                 | Curve25519 (twisted Edwards)   | secp256k1 (Koblitz)                     |
-| Hash function         | BLAKE3 (for frame hash)        | Keccak-256 (EIP-191 personal_sign)      |
-| Signature size        | 64 bytes                       | 64 bytes (r, s)                         |
-| Signing speed         | ~50 μs                         | ~50 μs                                  |
-| Key format            | 32-byte raw                    | 32-byte raw (SEC1)                      |
-| Identity format       | Hex public key (64 chars)      | Ethereum address (0x + 40 hex chars)    |
-| Standard              | RFC 8032                       | EIP-191 / SEC 2                         |
-| Feature flag          | (default, always available)    | `--features ethereum`                   |
+| Property              | Ed25519 (default)              | Ethereum (secp256k1)                    | ML-DSA (FIPS 204)                          | Hybrid (Ed25519 + ML-DSA) |
+| --------------------- | ------------------------------ | --------------------------------------- | ------------------------------------------ | ------------------------- |
+| Curve/scheme          | Curve25519 (twisted Edwards)   | secp256k1 (Koblitz)                     | Module-Lattice (ML-DSA-44/65/87)           | Both of the adjacent halves |
+| Hash function         | BLAKE3 (for frame hash)        | Keccak-256 (EIP-191 personal_sign)      | FIPS 204 internal (SHAKE)                  | Per-half                  |
+| Signature size        | 64 bytes                       | 64 bytes (r, s)                         | 2,420 / 3,309 / 4,627 bytes (44/65/87)     | 64 + ML-DSA size          |
+| Public key size       | 32 bytes                       | 33 bytes (SEC1)                         | 1,312 / 1,952 / 2,592 bytes                | 32 + ML-DSA size          |
+| Signing speed         | ~50 μs                         | ~50 μs                                  | Slower (lattice operations)                | Sum of both halves        |
+| Key format            | 32-byte raw                    | 32-byte raw (SEC1)                      | 32-byte seed (FIPS 204 Algorithm 6)        | Concatenated `pk ∥ mldsa_pk` |
+| Identity format       | Hex public key (64 chars)      | Ethereum address (0x + 40 hex chars)    | `ml-dsa-<level>:<16-byte-pk-hex-prefix>`   | `hybrid:<ed25519>/<mldsa>` |
+| Standard              | RFC 8032                       | EIP-191 / SEC 2                         | FIPS 204                                   | Combination               |
+| Feature flag          | (default, always available)    | `--features ethereum`                   | (always available)                         | (always available)        |
+
+### ML-DSA (FIPS 204) — Real Post-Quantum Signatures
+
+The `MlDsaBackend` implements **real FIPS 204 ML-DSA** via the RustCrypto
+[`ml-dsa` crate](https://crates.io/crates/ml-dsa) (pure Rust; note that the
+crate has **not** been independently audited):
+
+- **Parameter sets**: `MlDsaLevel::MlDsa44` / `MlDsa65` / `MlDsa87` map 1:1 to
+  the crate's `MlDsa44` / `MlDsa65` / `MlDsa87`; signature and public-key
+  sizes are the exact FIPS 204 encoded sizes (see table above).
+- **Key generation**: `from_seed` passes the caller's 32 bytes directly as the
+  ml-dsa `Seed` — FIPS 204 Algorithm 6 (`ML-DSA.KeyGen_internal`), where
+  SHAKE-256 expands the seed into ρ, ρ′ and K. The same seed always yields
+  the same key pair.
+- **Signing**: deterministic ML-DSA (FIPS 204 Algorithm 2, deterministic
+  variant, empty context string). Same seed + same message ⇒ byte-identical
+  signature.
+- **Verification**: real public-key verification (FIPS 204 Algorithm 3,
+  `ML-DSA.Verify`, empty context string), available without any private key
+  material via `MlDsaVerifier` (from raw FIPS 204 public-key bytes or a typed
+  `ml_dsa::VerifyingKey`).
+
+`HybridBackend` produces concatenated signatures `(Ed25519_sig ∥ ML-DSA_sig)`
+and public keys `(Ed25519_pk(32) ∥ ML-DSA_pk)`; `HybridVerifier` verifies from
+public keys only and requires **both** halves to be valid.
+
+> **Migration note (pre-0.8 payloads are NOT verifiable):** signatures
+> produced by the pre-0.8 placeholder "ML-DSA" scheme — keyed BLAKE3-XOF MACs
+> over the private seed, whose "public key" could not verify anything — are
+> **not verifiable** by `MlDsaBackend` or `MlDsaVerifier`. Payloads signed
+> with that scheme must be **re-signed** with the real implementation.
 
 ### Ethereum / EIP-191 Signing
 
@@ -324,7 +356,7 @@ sequenceDiagram
 | Limitation | Notes |
 | --- | --- |
 | Side-channel attacks | Hash comparison uses constant-time `ct_eq`; no constant-time guarantees for signing beyond what `ed25519-dalek` provides |
-| Quantum adversaries | Ed25519 is not post-quantum (consider ML-DSA for future) |
+| Quantum adversaries | Ed25519 is not post-quantum, but real ML-DSA and hybrid (Ed25519 + ML-DSA) signing backends are available (`MlDsaBackend`, `HybridBackend`, and public-key-only `MlDsaVerifier`/`HybridVerifier`) |
 | Key compromise | If the private key leaks, all signatures can be forged |
 | Frame removal | Missing frames are detectable only by frame index gaps |
 | Re-encoding attacks | Lossy transcoding destroys LSB-embedded data |
@@ -367,11 +399,12 @@ Ed25519 relies on the hardness of the Elliptic Curve Discrete Logarithm Problem 
 
 | Component | Current | Post-Quantum Replacement | Status |
 | --- | --- | --- | --- |
-| Signing | Ed25519 (64B sig) | ML-DSA-65 / Dilithium3 (3,309B sig) | FIPS 204 standardized |
+| Signing | Ed25519 (64B sig) | `MlDsaBackend` — ML-DSA-44/65/87 via the RustCrypto `ml-dsa` crate | **Implemented** (FIPS 204; see the backend table above) |
+| Signing (belt-and-braces) | — | `HybridBackend` — Ed25519 + ML-DSA dual signature | **Implemented** (`HybridVerifier` verifies both halves) |
 | Hashing | BLAKE3 (32B) | BLAKE3 (unchanged) | Quantum-resistant (Grover: 128→64 bit, still safe) |
 | Key generation | `OsRng` | `OsRng` (unchanged) | N/A |
 
-**Impact on Steganography**: ML-DSA signatures are ~50× larger than Ed25519 (3,309 bytes vs 64 bytes). The payload would grow from 109 bytes to ~3,354 bytes, requiring ~26,832 pixel bytes at LSB-1 (still easily fits in a 640×480 frame with 921,600 bytes).
+**Impact on Steganography**: ML-DSA signatures are ~50× larger than Ed25519 (3,309 bytes for ML-DSA-65 vs 64 bytes). A legacy v2 frame payload carrying one would grow from 109 bytes to ~3,354 bytes, requiring ~26,832 pixel bytes at LSB-1 (still easily fits in a 640×480 frame with 921,600 bytes).
 
 ---
 
@@ -387,6 +420,7 @@ Ed25519 relies on the hardness of the Elliptic Curve Discrete Logarithm Problem 
 | `chacha20poly1305` | 0.10.x | Payload encryption (AEAD) | Audited, RFC 8439 |
 | `subtle` | 2.x | Constant-time comparison | Audited, anti-timing-attack |
 | `rand` | 0.8.x | Key generation (OsRng) | Widely reviewed |
+| `ml-dsa` | 0.1.1 | FIPS 204 ML-DSA post-quantum signing/verification | **Not audited** — RustCrypto, pure Rust; used for real ML-DSA and hybrid backends |
 
 All dependencies use the standard Ed25519 specification (SHA-512 internal prehash per RFC 8032). The configurable hash algorithm (BLAKE3/SHA-256/SHA-3) is used **only** for hashing frame data, not as a replacement for Ed25519's internal hash.
 
@@ -396,5 +430,4 @@ All dependencies use the standard Ed25519 specification (SHA-512 internal prehas
 
 - [Steganography Theory](steganography-theory.md) — Information-theoretic foundations and steganalysis
 - [Security](security.md) — Threat analysis and steganalysis resistance
-- [Threat Model](threat-model.md) — Adversary types, attack scenarios, and residual risks
 - [Algorithms](algorithms.md) — Implementation details of LSB embedding protocols

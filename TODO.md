@@ -165,3 +165,49 @@ re-run clean).
 - [ ] WebRTC streaming and learned watermarking encoder: owner intent
       required per backlog (unchanged).
 
+---
+
+## 🔁 2026-09-20 Deep-Review Round — orchestrated across all six surfaces
+
+Six parallel review agents audited core/CLI/dashboard/GST/docs/security; the
+findings were then implemented by eight parallel task agents plus fix-ups.
+Workspace 484 → 602 tests (`./scripts/status.sh --check` clean at 602 == 602);
+clippy `-D warnings` clean across the workspace.
+
+- [x] **Real ML-DSA** — `MlDsaBackend` was a keyed BLAKE3-XOF MAC masquerading
+      as FIPS 204 (verify required the private seed; the "public key" could
+      not verify anything). Replaced with real ML-DSA via the RustCrypto
+      `ml-dsa` crate, ACVP-validated (75 keyGen + 45 sigVer vectors), with
+      public-key-only `MlDsaVerifier`/`HybridVerifier`. Pre-0.8 "ML-DSA"
+      payloads are unverifiable — re-sign.
+- [x] **Transform-pipeline DoS bounds** — ECC geometry validated before
+      allocation; DEFLATE output bounded by `DecodeLimits::max_original_len`
+      + a 64 MiB hard ceiling.
+- [x] **Hostile-carrier panic** — tag-only keyed carriers return typed
+      `NoPacket` instead of panicking in `KeyedPermutation::new(0)`.
+- [x] **Protocol consistency** — flags⇔transform consistency, unknown-field
+      preservation, encode-side limits, packet-id-derived AEAD nonce,
+      zeroized key material, `FIELD_PARENT_ID` + nesting limits (PKT-009
+      scaffold).
+- [x] **PLC-001 interleaved placement** + embed-side descriptor validation.
+- [x] **Deterministic differential spread-spectrum modulation** — bit
+      recovery now exact on textured carriers (old additive scheme: ~20-35%
+      BER); old-format carriers must re-embed.
+- [x] **FOR-005 Unicode text detectors** (zero-width, variation selectors,
+      bidi, whitespace, homoglyphs) wired into `scan`.
+- [x] **CLI contract (v0.8.0)** — exit codes 0/1/2/3, single-JSON-document
+      verify, no secrets in JSON, `extract` subcommand, strict argument
+      validation, `--revoked-list`, ots `--proof` default.
+- [x] **Dashboard hardening** — WS origin/token gates, REAL signature
+      verification, config validation, WS/image size caps, `/ots/verify`
+      auth, UI Bearer token, DOMPurify + mermaid strict + SRI.
+- [x] **GST fixes** — stride-safe pixel-only embedding, restricted pad
+      templates, packet-hex validation, audio_filter caps/deadlock,
+      video_filter frame-drop/stall, per-reason warnings, element tests.
+- [x] **Alpha golden vectors** — `tests/golden_vectors.rs` +
+      `testdata/packets/` with SHA-256 drift gate (owner freeze command:
+      `cargo test -p steganographer-core --test golden_vectors -- --ignored`).
+- [ ] WebRTC streaming and learned watermarking encoder: owner intent
+      required per backlog (unchanged).
+
+

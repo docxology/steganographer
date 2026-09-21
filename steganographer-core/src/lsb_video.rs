@@ -7,7 +7,7 @@
 //! The number of LSBs used per byte is configurable (1–4).
 
 use crate::crypto::SignaturePayload;
-use crate::video::{VideoFrame, VideoStegoModule};
+use crate::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
 /// LSB-based video steganography module.
 pub struct LsbVideo {
@@ -120,14 +120,24 @@ impl VideoStegoModule for LsbVideo {
 
         let bits = Self::payload_to_bits(sig);
         let total_bits = bits.len();
-        let capacity = frame.data.len() * self.bits as usize;
+        // FMT-002: the alpha channel of BGRA8 is never an embedding target.
+        // Core `VideoFrame` data is packed (`stride == width * bpp`), so
+        // alpha bytes are exactly every 4th byte; there is no row padding to
+        // exclude. RGB8 (and other) carriers are unchanged.
+        let alpha_last = frame.format == VideoFormat::Bgra8;
+        let eligible_bytes = if alpha_last {
+            frame.data.len() - frame.data.len() / 4
+        } else {
+            frame.data.len()
+        };
+        let capacity = eligible_bytes * self.bits as usize;
 
         if total_bits > capacity {
             anyhow::bail!(
-                "Not enough LSB capacity in frame: need {} bits, have {} (frame has {} bytes × {} bits)",
+                "Not enough LSB capacity in frame: need {} bits, have {} ({} eligible bytes × {} bits)",
                 total_bits,
                 capacity,
-                frame.data.len(),
+                eligible_bytes,
                 self.bits
             );
         }
@@ -141,9 +151,12 @@ impl VideoStegoModule for LsbVideo {
 
         let mut bit_idx = 0usize;
         let mask = !((1u8 << self.bits) - 1); // e.g., bits=2 → mask = 0b11111100
-        for byte in frame.data.iter_mut() {
+        for (idx, byte) in frame.data.iter_mut().enumerate() {
             if bit_idx >= total_bits {
                 break;
+            }
+            if alpha_last && idx % 4 == 3 {
+                continue;
             }
             let mut new_lsb: u8 = 0;
             for shift in (0..self.bits).rev() {
@@ -165,7 +178,20 @@ impl VideoStegoModule for LsbVideo {
             frame.data.len(),
             frame.frame_index
         );
-        Self::bits_to_payload(frame.data, self.bits)
+        // FMT-002: mirror the embed side — skip BGRA8 alpha bytes so the bit
+        // stream stays aligned with what was written.
+        if frame.format == VideoFormat::Bgra8 {
+            let visible: Vec<u8> = frame
+                .data
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| idx % 4 != 3)
+                .map(|(_, b)| *b)
+                .collect();
+            Self::bits_to_payload(&visible, self.bits)
+        } else {
+            Self::bits_to_payload(frame.data, self.bits)
+        }
     }
 }
 
@@ -294,5 +320,61 @@ mod tests {
         lsb.embed(&mut frame, None).unwrap();
         // Data should be unchanged (limited to the portion that the frame covers)
         assert_eq!(&frame_data[..1024], &original[..1024]);
+    }
+    #[test]
+    fn test_bgra8_alpha_bytes_untouched() {
+        // FMT-002: BGRA8 alpha bytes must never be modified by embedding,
+        // and the bit stream must skip them on extraction too.
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(5, b"bgra8 alpha test", None);
+
+        let w = 64usize;
+        let h = 64usize;
+        let bpp = 4usize;
+        let stride = w * bpp;
+        let mut frame_data = vec![0u8; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                let off = y * stride + x * bpp;
+                frame_data[off] = ((x * 7 + y * 3) % 251) as u8;
+                frame_data[off + 1] = ((x * 11 + y) % 199) as u8;
+                frame_data[off + 2] = ((x + y * 5) % 173) as u8;
+                frame_data[off + 3] = ((x * 2 + y * 7) % 256) as u8; // alpha
+            }
+        }
+        let alpha_before: Vec<u8> = frame_data.iter().skip(3).step_by(4).copied().collect();
+
+        let mut lsb = LsbVideo::new(1);
+        {
+            let mut frame = VideoFrame {
+                width: w as u32,
+                height: h as u32,
+                stride: stride as u32,
+                format: VideoFormat::Bgra8,
+                data: &mut frame_data,
+                frame_index: 0,
+            };
+            lsb.embed(&mut frame, Some(&payload)).unwrap();
+        }
+
+        let alpha_after: Vec<u8> = frame_data.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(alpha_before, alpha_after, "alpha bytes must be untouched");
+
+        let frame = VideoFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: stride as u32,
+            format: VideoFormat::Bgra8,
+            data: &mut frame_data,
+            frame_index: 0,
+        };
+        let extracted = lsb.extract(&frame).unwrap();
+        assert!(
+            extracted.is_some(),
+            "Bgra8 roundtrip should recover payload"
+        );
+        let ext = extracted.unwrap();
+        assert_eq!(ext.frame_index, payload.frame_index);
+        assert_eq!(ext.hash, payload.hash);
     }
 }

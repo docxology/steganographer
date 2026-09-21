@@ -24,7 +24,7 @@ printf 'workspace version: %s  (source: Cargo.toml)\n' "$ver"
 
 # CLI subcommand count (source of truth: enum Commands in the CLI binary)
 subs=$(awk '/^enum Commands/,/^}/' steganographer-cli/src/main.rs \
-        | grep -cE '^    [A-Z][a-zA-Z]+\s*\{' || true)
+        | grep -cE '^    [A-Z][a-zA-Z]+[[:space:]]*\{' || true)
 printf 'cli subcommands: %s  (source: steganographer-cli/src/main.rs enum Commands)\n' "$subs"
 
 # Docs count
@@ -52,8 +52,8 @@ if [ "$CHECK" = "1" ] && [ "$tcount" != "0" ] && [ "$tcount" != "$canon" ]; then
     fail=1
 fi
 
-if [ "$CHECK" = "1" ] && [ "$subs" != "14" ]; then
-    printf 'NOTE: subcommand count is %s — docs that say "All 14 commands" may be stale.\n' "$subs"
+if [ "$CHECK" = "1" ] && [ "$subs" != "15" ]; then
+    printf 'NOTE: subcommand count is %s — docs that say "All 15 commands" may be stale.\n' "$subs"
 fi
 
 exit $fail

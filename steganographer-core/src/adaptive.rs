@@ -15,7 +15,7 @@
 //! regions where statistical anomalies are harder to spot.
 
 use crate::crypto::SignaturePayload;
-use crate::video::{VideoFrame, VideoStegoModule};
+use crate::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
 /// Window size for local variance computation (window is `WINDOW x WINDOW`).
 const WINDOW: usize = 3;
@@ -40,9 +40,23 @@ impl AdaptiveLsbVideo {
     /// # Arguments
     /// * `threshold` — Minimum local variance for embedding eligibility.
     /// * `bits` — Number of LSBs per byte (1–4).
+    ///
+    /// # Panics
+    /// Panics if `bits` is not in 1..=4. For fallible construction, use
+    /// [`try_new`](Self::try_new).
     pub fn new(threshold: u32, bits: u8) -> Self {
-        assert!((1..=4).contains(&bits), "bits must be 1–4");
-        Self { threshold, bits }
+        Self::try_new(threshold, bits).expect("bits must be 1–4")
+    }
+
+    /// Create a new adaptive LSB video module, returning an error on
+    /// invalid bits.
+    ///
+    /// Use this when `bits` comes from untrusted input (config, CLI args).
+    pub fn try_new(threshold: u32, bits: u8) -> anyhow::Result<Self> {
+        if !(1..=4).contains(&bits) {
+            anyhow::bail!("bits must be 1–4, got {}", bits);
+        }
+        Ok(Self { threshold, bits })
     }
 
     /// Get the configured threshold.
@@ -95,9 +109,17 @@ impl AdaptiveLsbVideo {
 
                 let variance = compute_variance(&values);
 
-                // Emit an entry for each byte of this pixel
+                // Emit an entry for each embeddable byte of this pixel.
                 let base_offset = y * stride + x * bpp;
+                // Emit an entry for each embeddable byte of this pixel.
+                // FMT-002: the last channel of BGRA8 is the alpha byte and is
+                // never an embedding candidate. (Row padding does not exist
+                // in core `VideoFrame` data, which is packed —
+                // `stride == width * bpp` — so nothing else is excluded.)
                 for b in 0..bpp {
+                    if frame.format == VideoFormat::Bgra8 && b + 1 == bpp {
+                        continue;
+                    }
                     let off = base_offset + b;
                     if off < data.len() {
                         result.push((off, variance));
@@ -619,5 +641,94 @@ mod tests {
             .map(|(_, v)| *v)
             .unwrap_or(0);
         assert!(center_var > 0, "center pixel should have non-zero variance");
+    }
+    #[test]
+    fn test_bgra8_alpha_bytes_untouched() {
+        // FMT-002: BGRA8 alpha bytes must never be modified by embedding.
+        let w = 64usize;
+        let h = 64usize;
+        let bpp = 4usize;
+        let stride = w * bpp;
+        let mut data = vec![0u8; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                let off = y * stride + x * bpp;
+                data[off] = ((x * 7 + y * 3) % 251) as u8;
+                data[off + 1] = ((x * 11 + y) % 199) as u8;
+                data[off + 2] = ((x + y * 5) % 173) as u8;
+                data[off + 3] = ((x * 2 + y * 7) % 256) as u8; // alpha
+            }
+        }
+        let alpha_before: Vec<u8> = data.iter().skip(3).step_by(4).copied().collect();
+
+        let mut module = AdaptiveLsbVideo::try_new(0, 1).unwrap();
+        let payload = make_payload(0);
+
+        {
+            let mut frame = VideoFrame {
+                width: w as u32,
+                height: h as u32,
+                stride: stride as u32,
+                format: VideoFormat::Bgra8,
+                data: &mut data,
+                frame_index: 0,
+            };
+            module.embed(&mut frame, Some(&payload)).unwrap();
+        }
+
+        let alpha_after: Vec<u8> = data.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(alpha_before, alpha_after, "alpha bytes must be untouched");
+
+        let frame = VideoFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: stride as u32,
+            format: VideoFormat::Bgra8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        let extracted = module.extract(&frame).unwrap();
+        assert!(
+            extracted.is_some(),
+            "Bgra8 roundtrip should recover payload"
+        );
+        let ext = extracted.unwrap();
+        assert_eq!(ext.frame_index, payload.frame_index);
+        assert_eq!(ext.hash, payload.hash);
+    }
+
+    #[test]
+    fn test_variance_map_excludes_bgra8_alpha() {
+        let w = 4usize;
+        let h = 2usize;
+        let bpp = 4usize;
+        let stride = w * bpp;
+        let mut data = vec![7u8; stride * h];
+        let frame = VideoFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: stride as u32,
+            format: VideoFormat::Bgra8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        let variances = AdaptiveLsbVideo::compute_variance_map(&frame, 1);
+        // One entry per non-alpha byte: w * h * (bpp - 1).
+        assert_eq!(variances.len(), w * h * (bpp - 1));
+        // No alpha offset (byte index % 4 == 3) may appear.
+        assert!(
+            variances.iter().all(|(off, _)| off % 4 != 3),
+            "alpha offsets must be excluded from candidates"
+        );
+    }
+
+    #[test]
+    fn test_try_new_rejects_invalid_bits() {
+        assert!(AdaptiveLsbVideo::try_new(10, 0).is_err());
+        assert!(AdaptiveLsbVideo::try_new(10, 5).is_err());
+        assert!(AdaptiveLsbVideo::try_new(10, 1).is_ok());
+        assert!(AdaptiveLsbVideo::try_new(10, 4).is_ok());
+        // new() still works for valid input.
+        assert_eq!(AdaptiveLsbVideo::new(10, 3).bits(), 3);
     }
 }

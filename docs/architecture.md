@@ -143,7 +143,7 @@ graph TD
 
 | Module | Purpose | Lines |
 | --- | --- | --- |
-| `main.rs` | Clap CLI entry point, 14 subcommands including generic packet `decode`, forensic `scan`, and OpenTimestamps `ots` | — |
+| `main.rs` | Clap CLI entry point, 15 subcommands incl. generic packet `decode`, forensic `scan`, and OpenTimestamps `ots` | — |
 | `cmd_video.rs` | Live video pipeline command | ~130 |
 | `cmd_audio.rs` | Live audio pipeline command | ~90 |
 | `cmd_encode.rs` | Correctness-preserving legacy offline encode, capacity, info, and analysis | ~1330 |

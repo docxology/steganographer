@@ -24,6 +24,14 @@ let audioMicActive = false;
 let audioAwaitingSigning = false;
 let audioStartTime = 0;
 
+// Auth token (ingested by app.js from ?token= into sessionStorage); WS
+// upgrades cannot carry headers, so the token travels as ?token=.
+function wsUrl(path) {
+    const t = sessionStorage.getItem('auth_token');
+    const tokenPart = t ? `?token=${encodeURIComponent(t)}` : '';
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}${tokenPart}`;
+}
+
 let audioConfig = {
     lsbBits: 1,
     signingBackend: 'ed25519',
@@ -340,7 +348,7 @@ function connectAudioWebSockets() {
     const wsBase = `${wsProto}//${location.host}`;
 
     // Encode WebSocket
-    audioEncodeWs = new WebSocket(`${wsBase}/ws/audio/encode`);
+    audioEncodeWs = new WebSocket(wsUrl('/ws/audio/encode'));
     audioEncodeWs.onopen = () => console.log('[audio-ws] Encode connected');
     audioEncodeWs.onmessage = handleAudioEncodeMessage;
     audioEncodeWs.onclose = () => {
@@ -349,7 +357,7 @@ function connectAudioWebSockets() {
     };
 
     // Decode WebSocket
-    audioDecodeWs = new WebSocket(`${wsBase}/ws/audio/decode`);
+    audioDecodeWs = new WebSocket(wsUrl('/ws/audio/decode'));
     audioDecodeWs.onopen = () => {
         console.log('[audio-ws] Decode connected');
         startAudioDecodePolling();
@@ -471,7 +479,8 @@ function updateAudioStegoInfo() {
     const capacityBytes = Math.floor(capacityBits / 8);
 
     const isEth = audioConfig.signingBackend === 'ethereum';
-    const payloadSize = isEth ? 97 : 104;
+    // Ed25519 payload size: steganographer_core SignaturePayload::SERIALIZED_SIZE.
+    const payloadSize = 109;
     const utilization = capacityBits > 0 ? ((payloadSize * 8 / capacityBits) * 100).toFixed(3) : 0;
 
     audioEl.infoPayloadSize.textContent = payloadSize + ' bytes';
