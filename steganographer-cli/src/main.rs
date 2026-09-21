@@ -410,6 +410,18 @@ enum Commands {
         /// If set, clients must send `Authorization: Bearer <token>`. If omitted, auth is disabled.
         #[arg(long)]
         auth_token: Option<String>,
+        /// Transport policy for the dashboard client: "auto" (try WebRTC,
+        /// fall back to WebSocket on failure), "websocket", or "webrtc".
+        /// The server advertises this default; the browser can still override
+        /// per-session via ?transport= and the settings toggle.
+        #[arg(long, default_value = "auto")]
+        transport: String,
+        /// ICE server URL for WebRTC (repeatable), e.g.
+        /// "stun:stun.l.google.com:19302" or "turn:user:cred@host:port".
+        /// Empty by default (loopback host candidates only). Unsupported
+        /// schemes and TURN without credentials are warned and skipped.
+        #[arg(long = "ice-server")]
+        ice_server: Vec<String>,
     },
 
     /// Revoke a signing key (add to revoked-keys list)
@@ -1058,9 +1070,24 @@ fn main() -> anyhow::Result<()> {
             backend,
             host,
             auth_token,
+            transport,
+            ice_server,
         } => {
             use std::sync::Arc;
             use steganographer_core::StegoMetrics;
+
+            // The ICE list is consumed by the WebRTC media path; without
+            // that feature the flag is parsed but has no effect. Say so
+            // instead of failing the default clippy gate on an unused
+            // binding.
+            #[cfg(not(feature = "webrtc"))]
+            if !ice_server.is_empty() {
+                log::warn!(
+                    "--ice-server requires building with --features webrtc; \
+                    ignoring {} server(s)",
+                    ice_server.len()
+                );
+            }
 
             if host == "0.0.0.0" && auth_token.is_none() {
                 log::warn!(
@@ -1111,6 +1138,7 @@ fn main() -> anyhow::Result<()> {
                 live_config: std::sync::Mutex::new(steganographer_dashboard::LiveConfig::default()),
                 session_start: std::time::Instant::now(),
                 auth_token,
+                transport: steganographer_dashboard::TransportPolicy::from(transport.as_str()),
                 ots_config,
                 ots_client,
                 signer: steganographer_core::Signer::generate(),
@@ -1120,6 +1148,12 @@ fn main() -> anyhow::Result<()> {
                     rand::rngs::OsRng.fill_bytes(&mut k);
                     k
                 },
+                #[cfg(feature = "webrtc")]
+                webrtc_sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+                #[cfg(feature = "webrtc")]
+                ice_servers: ice_server,
+                #[cfg(feature = "webrtc")]
+                media_publishers: std::sync::Mutex::new(std::collections::HashMap::new()),
             });
 
             log::info!(

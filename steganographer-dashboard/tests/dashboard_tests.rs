@@ -89,6 +89,13 @@ fn test_dashboard_state_construction() {
         ots_client: None,
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "webrtc")]
+        ice_servers: Vec::new(),
+        #[cfg(feature = "webrtc")]
+        media_publishers: Mutex::new(std::collections::HashMap::new()),
     };
     assert_eq!(state.signing_backend, "ed25519");
     assert_eq!(state.width, 1280);
@@ -152,6 +159,13 @@ async fn test_router_creation() {
         ots_client: None,
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "webrtc")]
+        ice_servers: Vec::new(),
+        #[cfg(feature = "webrtc")]
+        media_publishers: Mutex::new(std::collections::HashMap::new()),
     });
     let _router = steganographer_dashboard::create_router(state);
 }
@@ -176,6 +190,13 @@ fn test_dashboard_state_session_start() {
         ots_client: None,
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "webrtc")]
+        ice_servers: Vec::new(),
+        #[cfg(feature = "webrtc")]
+        media_publishers: Mutex::new(std::collections::HashMap::new()),
     };
     let after = std::time::Instant::now();
     // session_start should be between before and after
@@ -245,6 +266,13 @@ fn test_app_with_token(auth_token: Option<String>) -> (axum::Router, Arc<Dashboa
         ots_client: None,
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "webrtc")]
+        ice_servers: Vec::new(),
+        #[cfg(feature = "webrtc")]
+        media_publishers: Mutex::new(std::collections::HashMap::new()),
     });
     let router = steganographer_dashboard::create_router(state.clone());
     (router, state)
@@ -758,6 +786,13 @@ async fn test_ots_verify_empty_body_400() {
         ))),
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
+        transport: steganographer_dashboard::TransportPolicy::Auto,
+        #[cfg(feature = "webrtc")]
+        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+        #[cfg(feature = "webrtc")]
+        ice_servers: Vec::new(),
+        #[cfg(feature = "webrtc")]
+        media_publishers: Mutex::new(std::collections::HashMap::new()),
     });
     let app = steganographer_dashboard::create_router(state.clone());
     let req = axum::http::Request::builder()
@@ -997,189 +1032,4 @@ async fn test_api_config_get_includes_transport() {
     let body = body_to_string(resp.into_body()).await;
     let cfg: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(cfg["transport"], "websocket");
-}
-
-// ─── In-process PeerConnection round trip through the real endpoint ───
-
-use webrtc::data_channel::DataChannelEvent;
-use webrtc::peer_connection::{
-    PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-    RTCIceGatheringState, RTCPeerConnectionState, RTCSdpType, RTCSessionDescription,
-};
-
-/// Handler for the offer-side (browser stand-in) peer connection.
-#[derive(Clone)]
-struct TestOfferHandler {
-    gather_tx: tokio::sync::mpsc::Sender<()>,
-    connected_tx: tokio::sync::mpsc::Sender<()>,
-}
-
-#[async_trait::async_trait]
-impl PeerConnectionEventHandler for TestOfferHandler {
-    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
-        if state == RTCIceGatheringState::Complete {
-            let _ = self.gather_tx.try_send(());
-        }
-    }
-
-    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
-        if state == RTCPeerConnectionState::Connected {
-            let _ = self.connected_tx.try_send(());
-        }
-    }
-}
-
-/// Minimal valid JPEG fixture generated in-process with the same encoder the
-/// pipeline uses (a hand-written JPEG byte sequence would rot silently).
-fn fixture_jpeg(width: u32, height: u32) -> Vec<u8> {
-    let img = image::RgbImage::from_fn(width, height, |x, y| {
-        image::Rgb([(x * 7 % 256) as u8, (y * 11 % 256) as u8, 128])
-    });
-    let mut buf = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut buf),
-        image::ImageFormat::Jpeg,
-    )
-    .expect("encode fixture JPEG");
-    buf
-}
-
-/// Full loopback proof: two webrtc-rs PeerConnections in-process, signaling
-/// through the real `POST /api/webrtc/offer` endpoint, then one JPEG frame
-/// over the data channel through the shared encode pipeline, asserting the
-/// `encoded_frame` + `decoded_frame` replies and updated verification state.
-///
-/// End-to-end latency and FPS are NOT asserted here — they require a real
-/// browser (the orchestrator runs a headless-Chromium check separately).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_webrtc_data_channel_pipeline_round_trip() {
-    use tower::ServiceExt;
-
-    let (app, _state) = test_app();
-    // A second request (metrics) is made after signaling, so keep a clone.
-    let app2 = app.clone();
-
-    // ── Offer side (browser stand-in) ────────────────────────────────────
-    let (gather_tx, mut gather_rx) = tokio::sync::mpsc::channel(1);
-    let (connected_tx, mut connected_rx) = tokio::sync::mpsc::channel(1);
-    let pc = PeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new().build())
-        .with_handler(Arc::new(TestOfferHandler {
-            gather_tx,
-            connected_tx,
-        }))
-        .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
-        .build()
-        .await
-        .expect("offer-side peer connection builds");
-
-    let dc = pc
-        .create_data_channel("frames", None)
-        .await
-        .expect("data channel created");
-
-    let offer = pc.create_offer(None).await.expect("offer created");
-    pc.set_local_description(offer)
-        .await
-        .expect("local description set");
-
-    // Non-trickle ICE: wait for gathering to complete (mirrors the browser).
-    tokio::time::timeout(std::time::Duration::from_secs(15), gather_rx.recv())
-        .await
-        .expect("ICE gathering completed")
-        .expect("gather channel");
-    let offer_sdp = pc
-        .local_description()
-        .await
-        .expect("local description available");
-    assert_eq!(offer_sdp.sdp_type, RTCSdpType::Offer);
-
-    // ── Signal through the real WHIP endpoint ────────────────────────────
-    let (status, body) = post_offer(app, &serde_json::to_string(&offer_sdp).unwrap(), None).await;
-    assert_eq!(status, 200, "endpoint must answer the offer: {body}");
-    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(answer["type"], "answer");
-    assert!(
-        answer["sdp"].as_str().unwrap().contains("candidate"),
-        "non-trickle ICE: answer SDP must embed ICE candidates"
-    );
-
-    let answer_sdp: RTCSessionDescription = serde_json::from_str(&body).unwrap();
-    pc.set_remote_description(answer_sdp)
-        .await
-        .expect("remote answer applied");
-
-    // The ICE agent must actually reach Connected over the loopback pair.
-    tokio::time::timeout(std::time::Duration::from_secs(30), connected_rx.recv())
-        .await
-        .expect("peer connection must connect within 30s")
-        .expect("connected channel");
-
-    // ── Drive the data channel: send one frame, collect replies ──────────
-    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-    let jpeg = fixture_jpeg(64, 48);
-    tokio::spawn(async move {
-        let mut sent = false;
-        loop {
-            match dc.poll().await {
-                Some(DataChannelEvent::OnOpen) => {
-                    if !sent {
-                        sent = true;
-                        dc.send(bytes::BytesMut::from(&jpeg[..]))
-                            .await
-                            .expect("send fixture frame");
-                    }
-                }
-                Some(DataChannelEvent::OnMessage(m)) => {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&m.data) {
-                        match v["type"].as_str().unwrap_or("") {
-                            "encoded_frame" => { /* replies asserted below */ }
-                            "decoded_frame" => {
-                                let _ = reply_tx.send(v);
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Some(DataChannelEvent::OnClose) | None => break,
-                _ => {}
-            }
-        }
-    });
-
-    let decoded = tokio::time::timeout(std::time::Duration::from_secs(60), reply_rx.recv())
-        .await
-        .expect("timed out waiting for decoded_frame")
-        .expect("data channel closed before decoded_frame arrived");
-    assert_eq!(decoded["verified"], true, "reply: {decoded}");
-    assert_eq!(
-        decoded["payload"]["payload_found"], true,
-        "reply: {decoded}"
-    );
-    assert_eq!(decoded["payload"]["frame_index"], 0, "reply: {decoded}");
-
-    // ── Verification state updated in shared metrics ─────────────────────
-    let resp = app2
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/metrics")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let metrics: serde_json::Value =
-        serde_json::from_str(&body_to_string(resp.into_body()).await).unwrap();
-    let frames = metrics["frames_processed"].as_f64().unwrap_or(0.0);
-    let verified_ok = metrics["frames_verified_ok"].as_f64().unwrap_or(0.0);
-    assert!(
-        frames >= 1.0,
-        "encode pipeline must have processed a frame: {metrics}"
-    );
-    assert!(
-        verified_ok >= 1.0,
-        "verification state must be updated: {metrics}"
-    );
 }

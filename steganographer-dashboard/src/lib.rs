@@ -11,8 +11,15 @@
 
 pub mod webrtc;
 pub mod ws_handler;
+#[cfg(feature = "webrtc")]
+use std::collections::HashMap;
 
-use axum::{extract::State, response::Html, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    response::{Html, IntoResponse},
+    routing::get,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use steganographer_core::ots_handler;
@@ -127,6 +134,42 @@ pub enum Transport {
     Webrtc,
 }
 
+/// Transport policy for the dashboard frame pipeline.
+///
+/// `Auto` tries WebRTC first (when the feature is built in) and falls back
+/// to WebSocket; `Websocket` and `WebRtc` pin the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TransportPolicy {
+    /// Try WebRTC DataChannel, fall back to WebSocket.
+    #[default]
+    Auto,
+    /// Always use the WebSocket transport.
+    Websocket,
+    /// Always use the WebRTC DataChannel transport.
+    WebRtc,
+}
+
+impl TransportPolicy {
+    /// Canonical lowercase CLI/URL name for this policy.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TransportPolicy::Auto => "auto",
+            TransportPolicy::Websocket => "websocket",
+            TransportPolicy::WebRtc => "webrtc",
+        }
+    }
+}
+
+impl From<&str> for TransportPolicy {
+    fn from(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "webrtc" => TransportPolicy::WebRtc,
+            "websocket" | "ws" => TransportPolicy::Websocket,
+            _ => TransportPolicy::Auto,
+        }
+    }
+}
+
 /// Shared dashboard state accessible by all handlers.
 pub struct DashboardState {
     /// Pipeline metrics collector.
@@ -162,6 +205,23 @@ pub struct DashboardState {
     /// Session-wide 32-byte key for audio LSB embedding/derivation, shared
     /// between the audio encode and decode handlers.
     pub audio_key: [u8; 32],
+    /// Transport policy for the dashboard client (resolved from CLI or config).
+    pub transport: TransportPolicy,
+    /// Live WebRTC DataChannel sessions, keyed by session id.
+    /// Present only when the `webrtc` cargo feature is enabled.
+    #[cfg(feature = "webrtc")]
+    pub webrtc_sessions: Mutex<HashMap<String, webrtc::WebrtcSession>>,
+    /// STUN/TURN server URLs (e.g. `stun:stun.l.google.com:19302`,
+    /// `turn:user:cred@host:port`) offered to WebRTC peer connections.
+    /// Empty by default: the dashboard is a local-only tool and needs no
+    /// external ICE infrastructure.
+    #[cfg(feature = "webrtc")]
+    pub ice_servers: Vec<String>,
+    /// Per-session H.264 media publishers keyed by session id. Each publisher
+    /// owns the `TrackLocalStaticSample` that carries the stego'd frames as an
+    /// RTP video track back to the browser.
+    #[cfg(feature = "webrtc")]
+    pub media_publishers: Mutex<HashMap<String, std::sync::Arc<webrtc::MediaPublisher>>>,
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -238,6 +298,11 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/ws/decode", get(ws_handler::ws_decode_handler))
         .route("/ws/audio/encode", get(ws_handler::ws_audio_encode_handler))
         .route("/ws/audio/decode", get(ws_handler::ws_audio_decode_handler))
+        .route(
+            "/api/webrtc/offer",
+            axum::routing::post(api_webrtc_offer_gate),
+        )
+        .route("/api/webrtc/config", get(webrtc::api_webrtc_config))
         .route("/api/metrics", get(api_metrics))
         .route("/api/metrics/reset", axum::routing::post(api_metrics_reset))
         .route("/api/config", get(api_config_get).post(api_config_post))
@@ -248,12 +313,62 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/ots/status", get(ots_status))
         .route("/ots/stamp", axum::routing::post(ots_stamp))
         .route("/ots/verify", axum::routing::post(ots_verify))
-        .route(
-            "/api/webrtc/offer",
-            axum::routing::post(webrtc::api_webrtc_offer),
-        )
         .layer(cors)
         .with_state(state)
+}
+
+/// `POST /api/webrtc/offer` gate: enforces the hardened contract before
+/// delegating to the webrtc module — whose disabled-feature stub would
+/// otherwise return 501 without any auth or request validation.
+async fn api_webrtc_offer_gate(
+    State(state): State<Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> axum::response::Response {
+    if !check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            serde_json::json!({"status": "error", "message": "Unauthorized"}).to_string(),
+        )
+            .into_response();
+    }
+    let kind = req.get("type").and_then(|t| t.as_str());
+    if kind != Some("offer") {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "status": "error",
+                "message": format!("expected an SDP offer, got {:?}", kind.unwrap_or("missing")),
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
+    let sdp = req.get("sdp").and_then(|s| s.as_str());
+    if !sdp.is_some_and(is_well_formed_offer_sdp) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "status": "error",
+                "message": "malformed SDP offer",
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
+    let offer = webrtc::OfferRequest {
+        sdp: sdp.unwrap_or_default().to_owned(),
+        kind: "offer".to_owned(),
+    };
+    webrtc::api_webrtc_offer(State(state), axum::Json(offer)).await
+}
+
+/// Minimal structural SDP check (full parsing happens in the webrtc module
+/// under the `webrtc` feature): a session description starts with `v=0` and
+/// carries an `o=` line.
+fn is_well_formed_offer_sdp(sdp: &str) -> bool {
+    let mut lines = sdp.lines();
+    lines.next() == Some("v=0") && lines.any(|l| l.starts_with("o="))
 }
 
 /// Check the Authorization header against the configured auth token.

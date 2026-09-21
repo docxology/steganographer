@@ -21,7 +21,7 @@
 ## File Counts
 
 - **Source files**: 70 Rust files (55 `src/` modules + 9 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 11 static web assets across 5 crates
-- **Tests**: 381 core unit + 125 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs` + 2 in `calibration.rs`) + 22 CLI unit + 46 CLI integration (39 in `cli_integration_tests.rs` + 7 in `cli_packet_tests.rs`) + 50 dashboard tests + 8 dashboard doc-tests + 14 GStreamer unit + 9 GStreamer integration + 1 GStreamer doc-test + 9 WASM integration = **665 passing tests** — **canonical count home is this line** (as of 2026-09-21; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
+- **Tests**: 381 core unit + 125 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs` + 2 in `calibration.rs`) + 22 CLI unit + 46 CLI integration (39 in `cli_integration_tests.rs` + 7 in `cli_packet_tests.rs`) + 49 dashboard tests + 8 dashboard doc-tests + 14 GStreamer unit + 9 GStreamer integration + 1 GStreamer doc-test + 9 WASM integration = **664 passing tests** — **canonical count home is this line** (as of 2026-09-21; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
 - **Doc files**: 27 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications + `manuscript/MANUSCRIPT_STATUS.md`) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -30,7 +30,7 @@
 ```bash
 cargo build --workspace
 cargo test -p steganographer-core              # core crate only (count: canonical Tests line above)
-cargo test --workspace                         # 665 total tests
+cargo test --workspace                         # 664 total tests
 ./run.sh                                       # Interactive menu
 ./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
 ./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo

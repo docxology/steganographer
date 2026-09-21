@@ -6,8 +6,8 @@
 //! - `pipeline` — AppSink/AppSrc helper utilities for building GStreamer pipelines
 //! - [`video_filter`] — Video buffer processing with `VideoStegoModule`
 //! - [`audio_filter`] — Audio buffer processing with `AudioStegoModule`
-//! - [`plugin`] — GStreamer plugin registration skeleton
-//! - [`elements`] — native `BaseTransform` elements (`stegovideo`)
+//! - [`plugin`] — GStreamer plugin registration (loadable `steganographer_gst` cdylib)
+//! - [`elements`] — native `BaseTransform` elements (`stegovideo`, `stegoaudio`)
 //!
 //! ## Usage Pattern
 //!

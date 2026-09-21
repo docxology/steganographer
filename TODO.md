@@ -63,10 +63,55 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
   the registry refuse the factories). Also fixed in the same pass:
   `clear-payload` was a no-op (empty-packet embed writes zero bits); gst
   suite 7 → 15, workspace 472 → 480.
-- [ ] **WebRTC streaming** — replace WebSocket frame-by-frame with WebRTC.
-  Acceptance: dashboard Video tab streams at ≥ 15 fps 720p over `whep`/whip-style signaling with end-to-end latency < 500 ms on localhost; verification round-trip still passes on the rendered frames; fallback to WebSocket retained behind a config flag. Owner intent needed: target browsers and signaling stack.
-- [ ] **Learned watermarking encoder** — neural network-based watermarking resistant to re-encoding/cropping.
-  Acceptance: trained model embeds a 64-bit payload surviving H.264 re-encode at CRF 28 with bit error rate < 5 percent on a fixed eval set; embed/extract runs ≤ 50 ms/frame on CPU; ships as an opt-in cargo feature with no new mandatory deps. Owner intent needed: training data licensing and model size budget.
+- [x] **WebRTC streaming (DataChannel + H.264 media track)** — replace WebSocket frame-by-frame with WebRTC.
+  Status: **core slice complete (2026-09-07)**. WHEP-shaped HTTP SDP
+  signaling (`POST /api/webrtc/offer`), ordered+reliable `frames`
+  DataChannel carrying the SAME per-frame pipeline as WebSocket (shared
+  `process_encode_frame`/`process_decode_poll`), 16 KiB chunk framing with
+  reassembly + backpressure, 60 s idle sweep, `--transport
+  {auto,websocket,webrtc}` (default auto) with browser-side fallback
+  (501/timeout/error → WebSocket, persisted). Measured: 18.1 fps at true
+  720p (175 KB JPEG, release profile), p95 one-way 54 ms; verified from a
+  real headless Chrome (signaling, DataChannel open, app-path encode
+  round-trip, 501→WS fallback). Interpretation notes: (1) media rides the
+  DataChannel (SCTP/DTLS), not RTP media streams — avoids a mandatory
+  media-encoder dependency; (2) the ≥15 fps@720p figure is a
+  release-profile measurement — the debug test profile sustains ~14.3 fps
+  at 150 KB, so the interop test pins the acceptance at dashboard-default
+  payload sizes in debug. **Media track (2026-09-07, same day)**: real
+  H.264 MediaStreamTrack now completes the feature — stego'd pixels
+  (pre-JPEG buffer, zero extra decode) → RGB→I420 → openh264 (2.5 Mbps,
+  30-frame IDR; transparent encoder recreation on resolution change) →
+  Annex-B → `TrackLocalStaticSample` over a Sendonly transceiver matched
+  to the browser's recvonly video m-line; `--ice-server` (repeatable,
+  stun/turn forms) + `GET /api/webrtc/config` share one ICE list between
+  browser and server; `ontrack` renders a media-preview `<video>` with a
+  Media-fps stat while the DataChannel canvas path stays the default
+  verification view. Measured (release): DataChannel loop 18.1 fps / p95
+  22 ms; media loopback 272 RTP packets, PT 125, 13.6 fps (release floors
+  ≥15 DC / ≥12 media enforced; debug builds assert stall guards only —
+  both fps floors profile-gated after the debug throughput assertion
+  flaked twice under load). Real-browser verified: Connected (WebRTC) +
+  media preview rendering the stego'd frames (640×480) while the same
+  frames pass signature verification. Remaining (owner-gated): real-camera
+  soak and NAT deployments (STUN/TURN plumbing shipped; needs live
+  network validation). Known limit: PLI→keyframe unreachable through the
+  event-handler API — keyframe recovery rides the IDR interval
+  (documented in docs/api-reference.md).
+- [ ] **Learned watermarking encoder (framework landed; CRF-28 gate open)** — neural network-based watermarking resistant to re-encoding/cropping.
+  Status: **framework complete (2026-09-07)**: opt-in `learned` cargo
+  feature (ndarray only, no new mandatory deps), 64-bit payload, trained
+  MLP decoder over keyed DCT-chip spread-spectrum, committed reproducible
+  weights, majority-vote baseline, block-aligned shift robustness.
+  Measured: clean/gauss σ4/sim-CRF28-quant/block-aligned-shift BER 0.0%;
+  PSNR 42.8 dB @640; embed+extract ≤ ~21 ms @640 (release). **Open gate:**
+  real libx264 CRF-28 re-encode measures BER 48.4% (simulator is
+  necessary-but-not-sufficient: RGB green-channel DCT grid vs libx264
+  luma/chroma integer transforms + limited-range YUV clamp). Closing the
+  <5% BER acceptance needs luma-domain embedding or codec-in-the-loop
+  training plus the full training run — **owner intent still needed**:
+  training-data licensing and model-size budget. Diagnosis + measured
+  table: `docs/algorithms.md` ("Learned watermarking").
 
 ---
 
@@ -162,8 +207,61 @@ re-run clean).
       `keyed_buffers_diverge_by_frame_index` (audio); every frame decodes
       through the same derivation with its index, frame 0 stays
       CLI-decodable with the raw key. Workspace 480 → 484 tests; `./scripts/status.sh --check` verified clean at 484 == 484.
-- [ ] WebRTC streaming and learned watermarking encoder: owner intent
-      required per backlog (unchanged).
+Still open at the end of this pass: WebRTC streaming and the learned
+watermarking encoder (owner intent required per the Long-Term Backlog;
+unchanged). Tracked there — intentionally not duplicated as a checkbox
+here, so the open-item count stays accurate.
+
+---
+
+## 🧹 2026-09-07 Improvement Round — hygiene audit, count-drift gate
+
+Cold-start audit round. No functional code changes; every claim below
+verified against the tree (`cargo test --workspace` 484/0 failures,
+`./scripts/status.sh --check` exit 0 after the fixes).
+
+### Fixed
+
+- [x] `steganographer-core/src/kdf.rs` `mod tests` was compiled into
+      release builds (missing `#[cfg(test)]`) — the only unguarded test
+      module in the workspace, and the sole warning on a plain
+      `cargo build -p steganographer-core` (unused import of `super::*`
+      because all its users were dead code in the non-test build). The
+      9 kdf unit tests still run under `cargo test`; release libs no
+      longer carry them; clippy is warning-free.
+- [x] `cargo fmt` drift in `steganographer-core/src/kdf.rs`,
+      `steganographer-gst/src/audio_element.rs`, and
+      `steganographer-gst/src/lib.rs` (landed unformatted in
+      the 2026-09-06 commit). `cargo fmt --check` exits 0 again.
+- [x] Test-count drift corrected from cargo-verified counts
+      (484 total = 290 core unit + 117 core integration (80 + 37) +
+      37 CLI (6 + 31) + 23 dashboard + 17 gst (14 + 2 + 1 doctest)):
+      `README.md` (288→290, 405→407), `docs/README.md` (288→290,
+      gst 2→17, total 467→484), `docs/contributing.md` (457→484 twice,
+      395/282+113→407/290+117), `docs/getting-started.md` (457→484,
+      395→407), `steganographer-core/AGENTS.md` (288→290, 405→407), and
+      `steganographer-core/README.md` (405→407 badge and totals). The
+      earlier "counts refreshed everywhere" claims had not
+      reached these files — the numbers predated the gst element work.
+
+### Added
+
+- [x] `scripts/status.sh --check` now sweeps every tracked Markdown file
+      and fails on any `<N> tests` / `<N> passing` / `tests-<N>` integer
+      that is not a cargo-reported count (workspace total, per-target
+      count, per-crate sum, or a split integer from the canonical
+      Tests line). This closes the gap that let per-doc counts drift three
+      times while the canonical AGENTS.md total was pinned; historical
+      round notes with pre-gst totals stay truthful because only
+      count-bearing phrases are matched.
+
+### Open (unchanged, owner-intent required)
+
+- WebRTC streaming and the learned watermarking encoder remain the only
+  open backlog items (both 🔴 Major, both owner-intent-gated). Verified
+  this round: no implementation code exists for either; docs mention
+  them only as plans (`docs/algorithms.md` Video Seal wrap,
+  `docs/plans/steganography-platform/06-delivery-and-migration.md`).
 
 ---
 
