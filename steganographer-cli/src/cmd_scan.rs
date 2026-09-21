@@ -24,9 +24,9 @@ struct ScanFinding {
     embedded_magic: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     magic_offsets: Vec<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    text_findings: Vec<TextFindingReport>,
     statistical_detected: bool,
-    statistical_confidence: f64,
-    message: String,
 }
 
 /// Aggregate totals for the run.
@@ -40,6 +40,11 @@ struct ScanSummary {
 impl ScanFinding {
     fn from_scan(path: &Path, size: usize, truncated: bool, scan: forensics::ForensicScan) -> Self {
         let magic_offsets = scan.magic_matches.iter().map(|m| m.offset).collect();
+        let text_findings = scan
+            .text_findings
+            .iter()
+            .map(TextFindingReport::from_finding)
+            .collect();
         ScanFinding {
             file: path.display().to_string(),
             size,
@@ -49,9 +54,28 @@ impl ScanFinding {
             file_family: scan.file_family.as_str().to_string(),
             embedded_magic: scan.embedded_magic.map(|m| m.as_str().to_string()),
             magic_offsets,
+            text_findings,
             statistical_detected: scan.statistical.detected,
-            statistical_confidence: scan.statistical.confidence,
-            message: scan.message,
+        }
+    }
+}
+
+/// One FOR-005 unicode/text detector's evidence, serialized into scan
+/// findings. Offsets are character offsets into the scanned text, matching
+/// the core detector contract.
+#[derive(Debug, Serialize)]
+struct TextFindingReport {
+    detector_id: &'static str,
+    offsets: Vec<usize>,
+    detail: String,
+}
+
+impl TextFindingReport {
+    fn from_finding(finding: &steganographer_core::unicode_text::TextFinding) -> Self {
+        TextFindingReport {
+            detector_id: finding.detector_id,
+            offsets: finding.offsets.clone(),
+            detail: finding.detail.clone(),
         }
     }
 }
@@ -214,14 +238,24 @@ fn emit(
         }
         _ => {
             for finding in findings {
-                println!(
-                    "{}: {} (family={}, entropy={:.2}, statistical_confidence={:.2})",
+                print!(
+                    "{} (family={}, entropy={:.2}, statistical_detected={}",
                     finding.file,
-                    finding.message,
                     finding.file_family,
                     finding.entropy,
-                    finding.statistical_confidence
+                    finding.statistical_detected
                 );
+                if !finding.text_findings.is_empty() {
+                    let ids: Vec<&str> = finding
+                        .text_findings
+                        .iter()
+                        .map(|tf| tf.detector_id)
+                        .collect();
+                    print!(", text_detectors={})", ids.join(", "));
+                } else {
+                    print!(")");
+                }
+                println!();
             }
             for error in errors {
                 eprintln!("error: {error}");

@@ -17,6 +17,9 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 - `PacketEnvelope` — canonical bounded TLV metadata and digest
 - `GenericPacket` — arbitrary byte body plus locator/envelope
 - `DecodeLimits`, `PacketError` — hostile-input ceilings and typed failures
+  (including PKT-009 `max_nesting_depth` = 3 and `max_aggregate_nested_bytes`
+  = 64 MiB; unknown non-critical fields are preserved, unknown critical
+  fields reject)
 - `PacketCodec` — byte codec contract implemented by `GenericPacketCodec` and
   legacy `SignaturePayloadCodec`
 
@@ -40,6 +43,9 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
   balanced Feistel network over the next power-of-two domain with cycle walking
   (`PLC-002` bounded-memory schedule); every slot is hit exactly once and a
   different key/label yields an unrelated order
+- `InterleavedSchedule` — coprime-stride even-spread slot mapping
+  (`PLACEMENT_INTERLEAVED` = 3, `PLC-001`); keyed by `derive_placement_key`
+  over a domain/label pair, deterministic and length-independent
 
 ### password.rs
 
@@ -81,8 +87,18 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 - `SignerBackend` trait — `name()`, `sign()`, `verify()`, `public_key_bytes()`, `signature_size()`, `display_identity()`
 - `Ed25519Backend` — `generate()`, `new()`, `from_bytes()`, `signing_key_bytes()`, `verifying_key()`
 - `Ed25519Verifier` — `new()`, `from_bytes()`, `verify()` (verification-only, no signing key)
-- `MlDsaBackend` — `generate()`, `from_seed()`, ML-DSA-44/65/87 post-quantum signing backend (FIPS 204)
+- `MlDsaBackend` — `generate()`, `from_seed()`, ML-DSA-44/65/87 post-quantum
+  signing backend — **real FIPS 204** via the RustCrypto `ml-dsa` crate:
+  seed-based keygen (FIPS 204 Algorithm 6), deterministic signing
+  (Algorithm 2), real public-key verification (Algorithm 3). Note: pre-0.8
+  "ML-DSA" payloads were keyed MACs over the private seed and are NOT
+  verifiable — re-sign.
+- `MlDsaVerifier` — `new()`, `from_public_key_bytes()`, `verify()`
+  (verification-only, from raw FIPS 204 public-key bytes)
 - `HybridBackend` — `generate()`, `new()`, dual Ed25519 + ML-DSA signing
+  (concatenated signature `(Ed25519_sig ∥ ML-DSA_sig)`, concatenated public key)
+- `HybridVerifier` — `new()`, `from_public_key_bytes()`, `verify()`; both
+  halves must be valid
 - `EthereumBackend`\* — `generate()`, `from_signing_key()`, `address()`, `personal_sign_hash()`
 - `EthereumVerifier`\* — address-based verification
 
@@ -128,3 +144,25 @@ Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
 - `InfoBar` — `new(label)`, with builder methods: `.with_barcode()`, `.with_qr()`, `.with_timestamp()`
 - Renders exoteric watermark strip: label text, timestamp, barcode pattern from the signature hash, QR code
 - Each feature is independently toggleable
+
+### forensics.rs
+
+- `ForensicScan` — scan result struct with structural + statistical findings
+  and `text_findings: Vec<unicode_text::TextFinding>` (FOR-005 detector IDs)
+- `detect_text_stego(data)` — decode text and collect Unicode steganography findings
+- `scan_bytes(data)` — bounded byte-level forensic scan
+
+### unicode_text.rs
+
+- Unicode/text steganography detectors (FOR-005) with stable detector IDs:
+  zero-width characters, variation selectors, bidi controls, whitespace
+  anomalies, homoglyph suspects
+- `TextFinding` — `detector_id`, code-point locations, severity, and preview;
+  normalization handled so equivalent sequences do not double-report
+
+### ots_config.rs
+
+- `OtsConfig` — `[ots]` TOML block: `enabled`, `server_url`, `method`
+  (`bitcoin`/`ethereum`), `interval_secs`, `proof_dir`, `timeout_secs`;
+  entirely opt-in (disabled by default)
+- `OtsSettings` — resolved `Copy` view for hot paths

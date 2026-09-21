@@ -99,12 +99,12 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   288 tests (packet/carrier incl. PCM S16 LSB, keyed placement, crypto, LSB, overlay, config, audio, metrics, signing, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics, OTS)
-steganographer-core (integ):  117 tests (E2E, pipeline, template, info_bar, signer_backend, encryption, ECC, OTS)
-steganographer-cli (unit):      6 tests (media descriptors/I/O and canonical carrier binding)
-steganographer-cli (integ):    31 tests (legacy/generic round trips, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan)
-steganographer-dashboard:     23 tests (LiveConfig, DashboardState, router, API, auth)
-steganographer-gst:            2 tests (plugin skeleton and doctest)
+steganographer-core (unit):   343 tests (packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF, transforms, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. Unicode text detectors, OTS)
+steganographer-core (integ):  123 tests (E2E, pipeline, template, info_bar, signer_backend incl. ML-DSA, encryption, ECC, OTS, golden vectors)
+steganographer-cli (unit):     14 tests (media descriptors/I/O, canonical carrier binding, verify validation/revocation)
+steganographer-cli (integ):    46 tests (legacy/generic round trips, exit-code contract, config, key files, encryption, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode findings, extract command)
+steganographer-dashboard:     52 tests (LiveConfig, DashboardState, router, API, auth, WS origin/token gates, real verification, config validation)
+steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        467 tests, 0 failures
+Total:                        602 tests, 0 failures
 ```

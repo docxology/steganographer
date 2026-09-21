@@ -156,12 +156,22 @@ async function loadDoc(name) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const markdown = await res.text();
 
-        // Render markdown to HTML using marked.js
+        // Render markdown to HTML using marked.js, then sanitize with
+        // DOMPurify BEFORE it reaches innerHTML — markdown sources are
+        // server-supplied, but this keeps script/style/event-handler
+        // injection out even if a doc source is ever attacker-influenced.
         if (typeof marked !== 'undefined' && marked.parse) {
-            contentEl.innerHTML = marked.parse(markdown, {
+            const rawHtml = marked.parse(markdown, {
                 gfm: true,
                 breaks: false,
             });
+            contentEl.innerHTML =
+                typeof DOMPurify !== 'undefined'
+                    ? DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true, svg: true, svgFilters: true } })
+                    : rawHtml;
+            if (typeof DOMPurify === 'undefined') {
+                console.warn('[docs] DOMPurify not loaded; rendered unsanitized');
+            }
         } else {
             // Fallback: render as preformatted text
             contentEl.innerHTML = `<pre class="docs-raw">${escapeHtml(markdown)}</pre>`;

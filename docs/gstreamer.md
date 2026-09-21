@@ -195,6 +195,27 @@ bits without changing buffer sizes or caps. Registered via
 `register_elements()` for both cdylib plugin loading and direct application
 registration.
 
+**Pad templates are restricted** to packed one-plane `video/x-raw` formats —
+`RGB`, `BGR`, `RGBx`, `BGRx`, `XRGB`, `XBGR` — so caps negotiation fails
+loudly for anything the byte-sequential kernel cannot address, instead of
+silently passing buffers through unembedded. (A runtime allowlist in
+`transform_ip` remains as a backstop; the legacy AppSink/AppSrc filters
+negotiate their own caps and are unaffected.)
+
+**Embedding is stride-safe**: the wire format is the CLI packet path over the
+*pixel-only* byte stream (`width × height × bpp` units); padded row-padding
+bytes never carry packet bits. With no padding (`stride == row_bytes`) the
+frame is processed in place; with padding the pixel stream is gathered and
+scattered through a stride-aware slot mapping, and only the first frame is
+allowed to embed across rows (later frames mix the frame index into the key
+derivation).
+
+**Property changes apply at frame granularity** (snapshot under a `StreamState`
+mutex in the element's `imp` module): the next frame after a `key-hex` or
+`bits-per-unit` change sees the new parameters, and both changes **reset the
+frame counter** — the CLI expects `key-hex` to be set before the pipeline
+reaches `PLAYING` so frame 0 embeds with the raw key.
+
 Properties:
 
 | Property | Type | Meaning |
@@ -222,7 +243,7 @@ Wire format notes:
   concatenation. `clear-payload` is ignored with a one-time warning in keyed
   mode.
 - Packed single-plane RGB/BGR/RGBx/BGRx/XRGB/XBGR formats are embedded;
-  other formats pass through unembedded with a warning.
+  negotiation rejects everything else (see the restricted pad templates above).
 
 ### `stegoaudio` element (in-place `BaseTransform`)
 
@@ -233,6 +254,12 @@ with `decode --stego-type lsb_audio` (plus `--embedding-key` for keyed
 carriers) and `--input-format raw_s16le` for headerless sink output. Each
 buffer embeds the full packet independently, so a single-buffer capture
 decodes on its own.
+
+Its **pad templates are likewise restricted** to
+`audio/x-raw, format=S16LE, layout=interleaved` (any rate/channels), so
+negotiation fails loudly for anything else (the `set_caps` gate stays as a
+backstop). Property changes apply at buffer granularity and
+`key-hex`/`bits-per-unit` changes reset the buffer counter.
 
 Example application-side registration:
 

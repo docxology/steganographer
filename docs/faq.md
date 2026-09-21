@@ -13,9 +13,11 @@ Digital watermarking is a subset of steganography focused on marking ownership o
 ### Can I hide arbitrary messages in video/audio?
 
 Yes, through the opt-in generic packet alpha for lossless PNG/raw RGB spatial
-LSB. Use `encode --payload-file` or `--payload-text`, then `decode` the payload.
-Legacy encode/verify remains the default signed-carrier workflow. Generic audio,
-transforms, payload signatures, and keyed placement remain roadmap work.
+LSB and S16LE audio. Use `encode --payload-file` or `--payload-text`, then
+`decode` (full envelope checks) or `extract` (raw payload) to recover it.
+Legacy encode/verify remains the default signed-carrier workflow. Generic
+packets support keyed placement (`--embedding-key`), payload signing
+(`--signing-key`), compression, AEAD encryption, and Reed-Solomon ECC.
 
 ### Is the hidden data visible/audible?
 
@@ -165,7 +167,7 @@ Ed25519's compact signatures (64 bytes vs 256+ for RSA) are critical for stegano
 
 ### Is this quantum-resistant?
 
-No. Ed25519 would be broken by a sufficiently large quantum computer running Shor's algorithm. Post-quantum signature schemes (ML-DSA) are tracked in the [Roadmap](roadmap.md).
+Not Ed25519. It would be broken by a sufficiently large quantum computer running Shor's algorithm. Real post-quantum signing is now implemented — ML-DSA-44/65/87 (FIPS 204) via `MlDsaBackend`/`MlDsaVerifier` and the hybrid Ed25519 + ML-DSA `HybridBackend`/`HybridVerifier` — though the large signature sizes (2.4–4.6 KB) still make it a legacy-workflow fit. See [Cryptography](cryptography.md).
 
 ### What happens if my private key is compromised?
 

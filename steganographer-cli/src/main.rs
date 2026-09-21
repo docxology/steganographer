@@ -2,6 +2,8 @@
 
 use clap::{Parser, Subcommand};
 
+use std::path::PathBuf;
+
 mod carrier_binding;
 #[cfg(feature = "gst")]
 mod cmd_audio;
@@ -243,6 +245,23 @@ enum Commands {
         /// Hash algorithm: "blake3" (default), "sha256", "sha3-256"
         #[arg(long)]
         hash_algorithm: Option<String>,
+        /// Path to the revoked-keys JSON list (default: keys/revoked.json)
+        #[arg(long, default_value = "keys/revoked.json")]
+        revoked_list: String,
+    },
+
+    /// Extract a generic packet payload from a carrier (lsb_video/lsb_audio)
+    Extract {
+        #[arg(long, short)]
+        input: String,
+        #[arg(long, short)]
+        output: String,
+        /// LSB bits per unit: "auto" or 1-4
+        #[arg(long, default_value = "auto")]
+        bits: String,
+        /// Replace an existing payload output
+        #[arg(long)]
+        force: bool,
     },
 
     /// Generate a new Ed25519 signing key pair
@@ -411,9 +430,9 @@ enum OtsAction {
     Verify {
         #[arg(long, short)]
         input: String,
-        /// Path to the .ots proof file
+        /// Path to the .ots proof file (default: <input>.ots)
         #[arg(long)]
-        proof: String,
+        proof: Option<String>,
         /// Output format: "plain" or "json"
         #[arg(long, default_value = "plain")]
         format: String,
@@ -432,7 +451,9 @@ fn main() -> anyhow::Result<()> {
             "info" => log::LevelFilter::Info,
             "warn" => log::LevelFilter::Warn,
             "error" => log::LevelFilter::Error,
-            _ => log::LevelFilter::Info,
+            other => usage_error(format!(
+                "unknown --log-level '{other}': expected trace, debug, info, warn, or error"
+            )),
         }
     };
 
@@ -572,7 +593,7 @@ fn main() -> anyhow::Result<()> {
             decryption_key_file,
             embedding_key,
             embedding_key_file,
-        } => cmd_packet::decode(
+        } => match cmd_packet::decode(
             &input,
             &output,
             &stego_type,
@@ -587,7 +608,54 @@ fn main() -> anyhow::Result<()> {
                 embedding_key,
                 embedding_key_file,
             },
-        ),
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let message = format!("{e:#}");
+                // Contract: a carrier with no embedded generic packet is a
+                // usage/packet-not-found error (exit 2), not a runtime error.
+                if message.contains("no valid generic packet found") {
+                    eprintln!("Error: {message}");
+                    std::process::exit(2);
+                }
+                Err(e)
+            }
+        },
+
+        Commands::Extract {
+            input,
+            output,
+            bits,
+            force,
+        } => {
+            let bits = match bits.to_ascii_lowercase().as_str() {
+                "auto" => None,
+                value => match value.parse::<u8>() {
+                    Ok(n @ 1..=4) => Some(n),
+                    _ => usage_error(format!(
+                        "--bits must be 'auto' or an integer from 1 to 4, got '{bits}'"
+                    )),
+                },
+            };
+            match cmd_packet::run_extract(
+                &PathBuf::from(input),
+                &PathBuf::from(output),
+                bits,
+                force,
+            ) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let message = format!("{e:#}");
+                    // Same contract as decode: no embedded generic packet is
+                    // packet-not-found (exit 2), everything else is runtime.
+                    if message.contains("no valid generic packet found") {
+                        eprintln!("Error: {message}");
+                        std::process::exit(2);
+                    }
+                    Err(e)
+                }
+            }
+        }
 
         Commands::Verify {
             input,
@@ -607,9 +675,23 @@ fn main() -> anyhow::Result<()> {
             ecc_parity,
             spread,
             hash_algorithm,
+            revoked_list,
         } => {
+            // Usage validation first: unknown values are a usage error
+            // (exit 2), not a silent no_signature / BLAKE3 fallback.
+            if let Err(e) = cmd_verify::validate_stego_type(&stego_type) {
+                usage_error(format!("{e}"));
+            }
+            if let Err(e) = cmd_verify::parse_hash_algorithm_strict(
+                hash_algorithm.as_deref().unwrap_or("blake3"),
+            ) {
+                usage_error(format!("{e}"));
+            }
             let opts = cmd_verify::VerifyOptions {
-                bits: cmd_verify::VerifyBits::parse(&bits)?,
+                bits: match cmd_verify::VerifyBits::parse(&bits) {
+                    Ok(parsed) => parsed,
+                    Err(e) => usage_error(format!("{e}")),
+                },
                 decrypt,
                 decryption_key,
                 decryption_key_file,
@@ -621,8 +703,9 @@ fn main() -> anyhow::Result<()> {
                 input_format,
                 raw_width: width,
                 raw_height: height,
+                revoked_list: Some(revoked_list),
             };
-            cmd_verify::run_with_key(
+            match cmd_verify::run_with_key(
                 &cli.config,
                 &input,
                 public_key.as_deref(),
@@ -630,7 +713,21 @@ fn main() -> anyhow::Result<()> {
                 &format,
                 embedding_key.as_deref(),
                 &opts,
-            )
+            ) {
+                Ok(status) => {
+                    if status == "invalid" {
+                        // Exit-code contract: signature verification failed.
+                        std::process::exit(3);
+                    }
+                    // "valid", "valid_revoked", "no_signature",
+                    // "not_verified", "extracted" all complete with exit 0.
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         Commands::Keygen { output } => cmd_encode::keygen(&output),
@@ -666,10 +763,23 @@ fn main() -> anyhow::Result<()> {
             max_bytes,
             format,
         } => {
+            // Argument-shape validation is a usage error (exit 2); a
+            // runtime failure inside the scan is a runtime error (exit 1);
+            // a successful run exits with the caller's policy code
+            // (0 = clean, 1 = findings reported by cmd_scan).
+            let path = std::path::Path::new(&input);
+            if !path.exists() {
+                usage_error(format!(
+                    "cannot access '{input}': no such file or directory"
+                ));
+            }
+            if !path.is_file() && !path.is_dir() {
+                usage_error(format!("'{input}' is not a regular file or directory"));
+            }
             let code = cmd_scan::run(&input, max_depth, max_files, max_bytes, &format)
                 .unwrap_or_else(|error| {
                     eprintln!("Error: {error:#}");
-                    std::process::exit(2);
+                    std::process::exit(1);
                 });
             std::process::exit(code);
         }
@@ -720,12 +830,16 @@ fn main() -> anyhow::Result<()> {
                     );
                 };
 
-                // Trim a single trailing newline (e.g. heredoc / `printf`), which
-                // is common when piping or reading a file.
-                let password_bytes = password_bytes
-                    .strip_suffix(b"\n")
-                    .map(<[u8]>::to_vec)
-                    .unwrap_or(password_bytes);
+                // Trim a single trailing newline (e.g. heredoc / `printf`)
+                // and a preceding carriage return (CRLF, common on Windows
+                // pipes) — both are common when piping or reading a file.
+                let mut password_bytes = password_bytes;
+                if password_bytes.ends_with(b"\n") {
+                    password_bytes.pop();
+                    if password_bytes.ends_with(b"\r") {
+                        password_bytes.pop();
+                    }
+                }
 
                 let params = steganographer_core::Argon2Params {
                     memory_kib: argon2_memory,
@@ -828,19 +942,32 @@ fn main() -> anyhow::Result<()> {
                 method,
                 force,
                 format,
-            } => cmd_ots::stamp(
-                &cli.config,
-                &input,
-                output_dir.as_deref(),
-                method.as_deref(),
-                force,
-                &format,
-            ),
+            } => {
+                // Unknown --method values are a usage error (exit 2), not a
+                // silent fall-back to Bitcoin stamping.
+                if let Some(m) = method.as_deref() {
+                    if let Err(e) = cmd_ots::validate_method(m) {
+                        usage_error(format!("{e}"));
+                    }
+                }
+                cmd_ots::stamp(
+                    &cli.config,
+                    &input,
+                    output_dir.as_deref(),
+                    method.as_deref(),
+                    force,
+                    &format,
+                )
+            }
             OtsAction::Verify {
                 input,
                 proof,
                 format,
-            } => cmd_ots::verify(&cli.config, &input, &proof, &format),
+            } => {
+                // Default proof path: <input>.ots next to the input file.
+                let proof = proof.unwrap_or_else(|| format!("{}.ots", input));
+                cmd_ots::verify(&cli.config, &input, &proof, &format)
+            }
         },
 
         Commands::Dashboard {
@@ -864,9 +991,14 @@ fn main() -> anyhow::Result<()> {
                 match backend.as_str() {
                     #[cfg(feature = "ethereum")]
                     "ethereum" => Box::new(steganographer_core::EthereumBackend::generate()),
+                    #[cfg(not(feature = "ethereum"))]
+                    "ethereum" => usage_error(
+                        "dashboard backend 'ethereum' requires a build with the \
+                         'ethereum' feature enabled"
+                            .to_string(),
+                    ),
                     _ => Box::new(steganographer_core::Ed25519Backend::generate()),
                 };
-
             // Load OTS configuration from the config file (opt-in feature).
             let ots_config = steganographer_core::config::Config::from_file(&cli.config)
                 .map(|c| c.ots_config())
@@ -898,6 +1030,13 @@ fn main() -> anyhow::Result<()> {
                 auth_token,
                 ots_config,
                 ots_client,
+                signer: steganographer_core::Signer::generate(),
+                audio_key: {
+                    use rand::RngCore;
+                    let mut k = [0u8; 32];
+                    rand::rngs::OsRng.fill_bytes(&mut k);
+                    k
+                },
             });
 
             log::info!(
@@ -913,4 +1052,11 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Report a usage-class error and terminate with exit code 2
+/// (the stable exit-code contract's usage/packet-not-found class).
+fn usage_error(message: String) -> ! {
+    eprintln!("Error: {message}");
+    std::process::exit(2);
 }

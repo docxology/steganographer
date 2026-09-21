@@ -35,5 +35,17 @@ path = "fuzz_targets/fuzz_packet_decode.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_transforms_reverse"
+path = "fuzz_targets/fuzz_transforms_reverse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_carrier_extract"
+path = "fuzz_targets/fuzz_carrier_extract.rs"
+test = false
+doc = false
+
 # Keep cargo-fuzz's instrumented package independent from the release workspace.
 [workspace]

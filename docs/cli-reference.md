@@ -12,6 +12,8 @@ flowchart LR
     CLI --> AUDIO["audio\n🎵 Live audio pipeline"]
     CLI --> ENCODE["encode\n🔒 Offline encoding"]
     CLI --> DECODE["decode\n📦 Generic packet decode"]
+    CLI --> EXTRACT["extract\n📤 Packet payload extraction"]
+    CLI --> SCAN["scan\n🧪 Bounded forensic scan"]
     CLI --> VERIFY["verify\n🔓 Signature verification"]
     CLI --> KEYGEN["keygen\n🔑 Key generation"]
     CLI --> INFO["info\n📊 Capacity reporting"]
@@ -52,6 +54,7 @@ steganographer video [OPTIONS]
 | `--source <PIPELINE>` | From config | GStreamer source element string |
 | `--sink <PIPELINE>` | From config | GStreamer sink element string |
 | `--max-frames <N>` | Unlimited | Stop after processing N frames |
+| `--signing-key <PATH>` | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file; if omitted, an ephemeral keypair is generated per run |
 
 **Examples**:
 
@@ -86,6 +89,7 @@ steganographer audio [OPTIONS]
 | `--source <PIPELINE>` | From config | GStreamer audio source element |
 | `--sink <PIPELINE>` | From config | GStreamer audio sink element |
 | `--max-buffers <N>` | Unlimited | Stop after processing N audio buffers |
+| `--signing-key <PATH>` | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file; if omitted, an ephemeral keypair is generated per run |
 
 **Examples**:
 
@@ -129,12 +133,14 @@ steganographer encode [OPTIONS]
 | `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
 | `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction (legacy signature or generic packet) |
 | `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
-| `--compress` | — | `false` | DEFLATE-compress a generic packet payload (recorded only if it shrinks) |
 | `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
 | `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
 | `--mime-type <TYPE>` | — | None | Public generic-packet MIME metadata |
 | `--filename <NAME>` | — | Payload basename | Safe display filename; path components are rejected |
 | `--no-verify-write` | — | `false` | Skip the post-write re-read verification of a generic packet carrier |
+| `--spread <N>` | — | `1` | Multi-frame spreading: spread one signature across N frames (legacy signature path only; generic packets reject `> 1`) |
+| `--hash-algorithm <ALGO>` | — | `blake3` | Hash algorithm: `blake3` (default), `sha256`, `sha3-256` |
+| `--dir` | — | `false` | Batch mode: process all files in the input directory (legacy signature path only; rejected with generic packets) |
 
 **Currently supported formats**:
 
@@ -225,8 +231,17 @@ steganographer verify [OPTIONS]
 | `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for audio/spread-spectrum extraction |
 | `--embedding-key-file <PATH>` | — | Config | File containing the embedding key |
 | `--bits <VALUE>` | — | `auto` | Auto-probe 1–4 LSBs or require an exact value |
+| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
 | `--width <N>` / `--height <N>` | — | None | Explicit headerless raw RGB dimensions |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
+| `--decrypt` | — | `false` | Decrypt an AEAD-encrypted payload (ChaCha20-Poly1305) |
+| `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
+| `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
+| `--ecc` | — | `false` | Apply Reed-Solomon error correction during extraction |
+| `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
+| `--spread <N>` | — | `1` | Multi-frame spreading: the signature was spread across N frames |
+| `--hash-algorithm <ALGO>` | — | `blake3` | Hash algorithm: `blake3` (default), `sha256`, `sha3-256` |
+| `--revoked-list <PATH>` | — | `keys/revoked.json` | Path to the revoked-keys JSON list checked after a valid signature |
 
 **Examples**:
 
@@ -287,6 +302,47 @@ If no signature found:
 No steganographic signature found in the file.
 ```
 
+**Status values** (JSON `status` field):
+
+| Status | Meaning | Exit code |
+| --- | --- | --- |
+| `valid` | Signature cryptographically valid, key not revoked | 0 |
+| `valid_revoked` | Signature valid but the key is in the revoked-keys list — treat as untrusted | 0 |
+| `invalid` | Signature verification failed | 3 |
+| `no_signature` | No embedded signature found | 0 |
+| `not_verified` | Signature extracted but no `--public-key` was given | 0 |
+
+---
+
+### `extract` — Packet Payload Extraction
+
+Extract a generic packet payload from a carrier (`lsb_video` / `lsb_audio`).
+This is the raw-payload counterpart of `decode`: it recovers the embedded
+bytes without the decode-path envelope checks (digest verification, transform
+reversal) and is the command the native `stegovideo`/`stegoaudio` elements'
+wire format targets.
+
+```bash
+steganographer extract [OPTIONS] --input <PATH> --output <PATH>
+```
+
+| Option | Short | Default | Description |
+| --- | --- | --- | --- |
+| `--input <PATH>` | `-i` | Required | Encoded carrier |
+| `--output <PATH>` | `-o` | Required | Payload destination |
+| `--bits <VALUE>` | — | `auto` | Probe 1–4 LSBs, or require an exact strength |
+| `--force` | — | `false` | Replace an existing payload output |
+
+```bash
+steganographer extract -i frame.rgb -o payload.bin --bits auto --force
+```
+
+Exit behavior follows the shared contract: a carrier with no embedded packet
+is a usage/packet-not-found error (exit 2), everything else failing is a
+runtime error (exit 1), and a successful extraction exits 0.
+
+---
+
 ---
 
 ### `keygen` — Key Generation
@@ -328,6 +384,8 @@ steganographer dashboard [OPTIONS]
 | ------ | ----- | ------- | ----------- |
 | `--port <PORT>` | `-p` | `8080` | Port to serve the dashboard on |
 | `--backend <BACKEND>` | — | `ed25519` | Signing backend: `ed25519` or `ethereum` |
+| `--host <ADDR>` | — | `127.0.0.1` | Bind address: `127.0.0.1` (local-only, default) or `0.0.0.0` (all interfaces) |
+| `--auth-token <TOKEN>` | — | None | Auth token for mutating API endpoints (`POST /api/config`, `POST /api/metrics/reset`); clients must send `Authorization: Bearer <token>`. Omitted = auth disabled |
 
 **Examples**:
 
@@ -364,6 +422,7 @@ steganographer info [OPTIONS]
 | `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
 | `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
 | `--embedding-key <HEX>` | — | None | Report keyed-placement capacity (subtracts the recognition-tag units) |
+| `--width <N>` / `--height <N>` | — | None | Explicit dimensions for headerless raw RGB input |
 | `--format <FORMAT>` | — | `plain` | Output format: `plain` or `json` |
 
 For LSB kernels the JSON report also includes `generic_max_packet_bytes` and
@@ -421,7 +480,7 @@ steganographer analyze [OPTIONS] --input <FILE>
 | Option | Default | Description |
 | --- | --- | --- |
 | `--input <FILE>` | Required | Input file to analyze |
-| `--analysis-type <TYPE>` | `chi_squared` | Analysis type: `chi_squared` |
+| `--analysis-type <TYPE>` | `combined` | Analysis type: `combined` (default), `chi_squared`, `sample_pairs` (also `spa`), or `rs` (also `rs_analysis`) |
 | `--format <FORMAT>` | `plain` | Output format: `plain` or `json` |
 
 **Examples**:
@@ -535,9 +594,16 @@ steganographer derive --password-file passphrase.txt \
 
 | Code | Meaning |
 | ---- | ------- |
-| 0    | Success (for `scan`: no findings) |
-| 1    | Runtime error (I/O, config parse, pipeline failure); for `scan`: findings present |
-| 2    | CLI argument error (missing required args, bad format); for `scan`: usage error |
+| 0    | Success (for `scan`: no findings present) |
+| 1    | Runtime error (I/O, config parse, pipeline failure); for `scan`: at least one finding |
+| 2    | Usage error (bad argument shape/unknown value) or packet-not-found: `decode`/`extract` on a carrier with no embedded generic packet |
+| 3    | Signature verification failed (`verify` returning status `invalid`) |
+
+**JSON output contract**: commands with `--format json` always print a single
+JSON document (one JSON value, newline-terminated by pretty printing), never
+trailing logs or multiple concatenated documents, and the JSON never contains
+secret key material (private/seed bytes are never serialized; only public
+identifiers such as public-key hex, digests, and signature bytes appear).
 
 ## Environment Variables
 

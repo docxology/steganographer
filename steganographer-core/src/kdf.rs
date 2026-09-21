@@ -18,16 +18,19 @@
 //! // keys.embedding_key → 32 bytes for LSB PRNG
 //! ```
 
+use zeroize::Zeroize;
+
 /// Context strings for BLAKE3 derive_key.
 /// These are fixed and must not change between encode and verify.
 const SIGNING_CONTEXT: &str = "steganographer-signing-v1";
 const ENCRYPTION_CONTEXT: &str = "steganographer-encryption-v1";
 const EMBEDDING_CONTEXT: &str = "steganographer-embedding-v1";
+
 const LOCATOR_CONTEXT: &str = "steganographer-locator-v1";
 const PLACEMENT_CONTEXT: &str = "steganographer-placement-v1";
 
 /// All keys derived from a master secret.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DerivedKeys {
     /// Ed25519 signing key (32 bytes).
     pub signing_key: [u8; 32],
@@ -35,6 +38,21 @@ pub struct DerivedKeys {
     pub encryption_key: [u8; 32],
     /// LSB embedding key (32 bytes).
     pub embedding_key: [u8; 32],
+}
+
+impl Drop for DerivedKeys {
+    fn drop(&mut self) {
+        self.signing_key.zeroize();
+        self.encryption_key.zeroize();
+        self.embedding_key.zeroize();
+    }
+}
+
+impl std::fmt::Debug for DerivedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key material must never appear in Debug output.
+        f.debug_struct("DerivedKeys").finish_non_exhaustive()
+    }
 }
 
 /// Derive the Ed25519 signing key from a master secret.
@@ -80,7 +98,9 @@ pub fn derive_frame_embedding_key(embedding_key: &[u8; 32], frame_index: u64) ->
     }
     blake3::derive_key(
         "steganographer-frame-placement-v1",
-        [embedding_key.as_slice(), &frame_index.to_le_bytes()].concat().as_slice(),
+        [embedding_key.as_slice(), &frame_index.to_le_bytes()]
+            .concat()
+            .as_slice(),
     )
 }
 
@@ -135,6 +155,7 @@ mod frame_key_tests {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -217,5 +238,31 @@ mod tests {
         let master = vec![0xAB; 1024];
         let keys = derive_all(&master);
         assert!(keys.signing_key.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_derived_keys_zeroize_on_drop_path() {
+        // Exercises the exact zeroize calls the Drop impl makes; Drop itself
+        // cannot be observed after the fact without unsafe code.
+        let mut keys = derive_all(b"zeroize test");
+        assert!(keys.signing_key.iter().any(|&b| b != 0));
+        keys.signing_key.zeroize();
+        keys.encryption_key.zeroize();
+        keys.embedding_key.zeroize();
+        assert!(keys.signing_key.iter().all(|&b| b == 0));
+        assert!(keys.encryption_key.iter().all(|&b| b == 0));
+        assert!(keys.embedding_key.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_debug_does_not_leak_keys() {
+        let keys = derive_all(b"debug redaction test");
+        let debug_str = format!("{keys:?}");
+        assert!(debug_str.contains("DerivedKeys"));
+        assert!(!debug_str.contains(&hex(keys.signing_key[0])));
+    }
+
+    fn hex(byte: u8) -> String {
+        format!("{byte:02x}")
     }
 }

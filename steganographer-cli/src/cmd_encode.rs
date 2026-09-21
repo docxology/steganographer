@@ -5,7 +5,7 @@
 //! `steganographer derive` — derive keys from a master secret.
 
 use rand::seq::SliceRandom;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng};
 use serde::Serialize;
 use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Signer};
 use steganographer_core::encryption::{self, EncryptionKey};
@@ -54,11 +54,11 @@ pub struct EncodeResult {
     pub bits: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub encryption_key_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_correction: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub embedding_key_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spread: Option<u32>,
@@ -260,6 +260,7 @@ pub fn run(
     if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
         anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
     }
+    crate::cmd_packet::validate_format(format)?;
 
     let cfg = steganographer_core::config::Config::from_file(config_path).unwrap_or_else(|e| {
         log::warn!("Could not load config ({}), using defaults", e);
@@ -323,13 +324,16 @@ pub fn run(
         opts.spread
     );
 
-    // Resolve hash algorithm
-    let hash_algo = opts
+    // Resolve hash algorithm (strict: unknown names are rejected rather than
+    // silently mapped onto BLAKE3).
+    let hash_algo = match opts
         .hash_algorithm
         .as_deref()
         .or(cfg.global.hash_algorithm.as_deref())
-        .map(HashAlgorithm::parse)
-        .unwrap_or(HashAlgorithm::Blake3);
+    {
+        Some(value) => parse_hash_algorithm_strict(value)?,
+        None => HashAlgorithm::Blake3,
+    };
     log::info!("Hash algorithm: {}", hash_algo.name());
 
     // Resolve or generate signer
@@ -369,7 +373,7 @@ pub fn run(
             EncryptionKey::from_hex(hex_str)?
         } else {
             let k = EncryptionKey::generate();
-            log::info!("Generated random encryption key: {}", k.to_hex());
+            log::info!("Generated random encryption key: {}", k.expose_hex());
             k
         };
         Some(key)
@@ -420,13 +424,13 @@ pub fn run(
     // Apply encryption if enabled
     let (embed_data, enc_key_hex) = if let Some(ref ek) = enc_key {
         let payload_bytes = payload.to_bytes();
-        let encrypted = encryption::encrypt(ek, 0, &payload_bytes, None)?;
+        let encrypted = encryption::encrypt(ek, &[0u8; 16], &payload_bytes, None)?;
         log::info!(
             "Encrypted payload: {} -> {} bytes",
             payload_bytes.len(),
             encrypted.len()
         );
-        (encrypted, Some(ek.to_hex()))
+        (encrypted, Some(ek.expose_hex()))
     } else {
         (payload.to_bytes().to_vec(), None)
     };
@@ -460,6 +464,7 @@ pub fn run(
     // Apply multi-frame spreading if enabled
     if opts.spread > 1 {
         return encode_multi_frame(
+            input,
             output,
             &media.data,
             &embed_data,
@@ -483,12 +488,10 @@ pub fn run(
         bits,
         embedding_key.as_ref(),
     )?;
-
     // Write output (with format)
     media_io::write_output(output, &media, stego_type)?;
     let bytes_written = std::fs::metadata(output)?.len() as usize;
     log::info!("Wrote {} encoded bytes to {}", bytes_written, output);
-
     let result = EncodeResult {
         stego_type: stego_type.to_string(),
         input: input.to_string(),
@@ -578,6 +581,21 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Strict hash-algorithm parsing: the accepted set mirrors
+/// [`HashAlgorithm::parse`], but unknown names error out instead of
+/// silently falling back to BLAKE3.
+fn parse_hash_algorithm_strict(value: &str) -> anyhow::Result<HashAlgorithm> {
+    match value.to_ascii_lowercase().as_str() {
+        "blake3" => Ok(HashAlgorithm::Blake3),
+        "sha256" | "sha-256" => Ok(HashAlgorithm::Sha256),
+        "sha3" | "sha-3" | "sha3-256" => Ok(HashAlgorithm::Sha3_256),
+        _ => anyhow::bail!(
+            "unsupported hash algorithm '{}': expected blake3, sha256, or sha3-256",
+            value
+        ),
+    }
 }
 
 // ─── Embedding ──────────────────────────────────────────────────────
@@ -805,15 +823,27 @@ fn embed_raw_lsb_audio(
     Ok(())
 }
 
+/// Default spread factor of
+/// [`steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key`],
+/// the constructor this embed path uses. The core type does not expose a
+/// spread-factor getter, so the capacity guard mirrors the documented
+/// default here; encode and extraction both construct via `with_key`, so
+/// the two sides stay in lockstep.
+const SS_DEFAULT_SPREAD: usize = 64;
+
 /// Embed raw bytes into spread-spectrum video (direct bit embedding).
+///
+/// Every bit is delegated to the core host-canceling differential-pair
+/// embedder ([`steganographer_core::spread_spectrum::SpreadSpectrumVideo::embed_bit`]);
+/// the CLI carries no PN/correlation math of its own, so encode and
+/// extraction stay in lockstep by construction.
 fn embed_raw_spread_spectrum_video(
     frame: &mut VideoFrame,
     payload: &[u8],
     ss: &steganographer_core::spread_spectrum::SpreadSpectrumVideo,
 ) -> anyhow::Result<()> {
     let total_bits = 32 + payload.len() * 8;
-    let spread = 64; // default
-    let needed = total_bits * spread;
+    let needed = total_bits * SS_DEFAULT_SPREAD;
     if needed > frame.data.len() {
         anyhow::bail!(
             "Not enough capacity for spread-spectrum: need {} bytes, have {}",
@@ -826,54 +856,19 @@ fn embed_raw_spread_spectrum_video(
     let len = payload.len() as u32;
     for bit_pos in 0..32 {
         let bit = ((len >> (31 - bit_pos)) & 1) as u8;
-        let start = bit_pos * spread;
-        embed_ss_bit(frame.data, start, bit, bit_pos, frame.frame_index, ss);
+        let start = bit_pos * SS_DEFAULT_SPREAD;
+        ss.embed_bit(frame.data, start, bit, bit_pos, frame.frame_index);
     }
     // Embed payload bits
     for (byte_idx, byte) in payload.iter().enumerate() {
         for bit_in_byte in 0..8 {
             let bit = (byte >> bit_in_byte) & 1;
             let payload_bit = 32 + byte_idx * 8 + bit_in_byte;
-            let start = payload_bit * spread;
-            embed_ss_bit(frame.data, start, bit, payload_bit, frame.frame_index, ss);
+            let start = payload_bit * SS_DEFAULT_SPREAD;
+            ss.embed_bit(frame.data, start, bit, payload_bit, frame.frame_index);
         }
     }
     Ok(())
-}
-
-fn embed_ss_bit(
-    data: &mut [u8],
-    start: usize,
-    bit: u8,
-    bit_pos: usize,
-    frame_index: u64,
-    ss: &steganographer_core::spread_spectrum::SpreadSpectrumVideo,
-) {
-    let spread = 64usize;
-    let amplitude = 3i32;
-    if start + spread > data.len() {
-        return;
-    }
-    // Seed PN sequence using the secret key — matches the extraction side
-    // (cmd_verify.rs:extract_ss_bit) and the library (spread_spectrum.rs:pn_sequence).
-    // Previously this was `fb ^ bb` only (no key), making embedding fully public
-    // and breaking the round-trip with verify.
-    let key = ss.key();
-    let mut seed = [0u8; 32];
-    let fb = frame_index.to_le_bytes();
-    let bb = (bit_pos as u64).to_le_bytes();
-    for i in 0..32 {
-        seed[i] = key[i] ^ fb[i % 8] ^ bb[i % 8];
-    }
-    let mut rng = rand::rngs::StdRng::from_seed(seed);
-    let pn: Vec<i32> = (0..spread)
-        .map(|_| if rng.gen::<bool>() { 1 } else { -1 })
-        .collect();
-    let sign = if bit == 1 { 1 } else { -1 };
-    for i in 0..spread {
-        let val = data[start + i] as i32 + pn[i] * amplitude * sign;
-        data[start + i] = val.clamp(0, 255) as u8;
-    }
 }
 
 // ─── Multi-frame spreading ──────────────────────────────────────────
@@ -881,6 +876,7 @@ fn embed_ss_bit(
 #[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Encode with multi-frame spreading.
 fn encode_multi_frame(
+    input: &str,
     output: &str,
     data: &[u8],
     embed_data: &[u8],
@@ -912,7 +908,7 @@ fn encode_multi_frame(
 
     let result = EncodeResult {
         stego_type: stego_type.to_string(),
-        input: output.to_string(),
+        input: input.to_string(),
         output: output.to_string(),
         bytes_written: data.len() * n as usize,
         public_key: pub_hex.to_string(),
@@ -1368,11 +1364,10 @@ pub fn encode_multi_frame_file(
         );
     }
 
-    let hash_algo = opts
-        .hash_algorithm
-        .as_deref()
-        .map(HashAlgorithm::parse)
-        .unwrap_or(HashAlgorithm::Blake3);
+    let hash_algo = match opts.hash_algorithm.as_deref() {
+        Some(value) => parse_hash_algorithm_strict(value)?,
+        None => HashAlgorithm::Blake3,
+    };
 
     let signer = match &opts.signing_key {
         Some(path) => {

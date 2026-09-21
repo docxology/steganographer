@@ -15,7 +15,7 @@ use axum::{extract::State, response::Html, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use steganographer_core::ots_handler;
-use steganographer_core::{OTSClient, OtsConfig, StegoMetrics};
+use steganographer_core::{OTSClient, OtsConfig, Signer, StegoMetrics};
 use tower_http::cors::CorsLayer;
 
 use ws_handler::{EncodedAudioChunk, EncodedFrame};
@@ -130,6 +130,15 @@ pub struct DashboardState {
     pub ots_config: OtsConfig,
     /// OTS client, present only when OTS is enabled in the config.
     pub ots_client: Option<Arc<OTSClient>>,
+    /// Session-wide signing keypair, generated once at startup.
+    /// Both video and audio WebSocket encode handlers sign with this key and
+    /// the decode handlers verify against its public half, so a frame signed
+    /// by the encode side verifies on the decode side (previously each WS
+    /// connection generated its own keypair, making verification impossible).
+    pub signer: Signer,
+    /// Session-wide 32-byte key for audio LSB embedding/derivation, shared
+    /// between the audio encode and decode handlers.
+    pub audio_key: [u8; 32],
 }
 
 /// All documentation markdown files, embedded at compile time.
@@ -226,6 +235,7 @@ fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) 
     let Some(ref token) = expected_token else {
         return true; // Auth disabled in local-only mode
     };
+
     if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth.to_str() {
             if let Some(bearer) = auth_str.strip_prefix("Bearer ") {
@@ -236,6 +246,31 @@ fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) 
     false
 }
 
+/// Validate client-supplied live config before it reaches panicking
+/// constructors (`LsbVideo::new`/`LsbAudio::new` panic outside 1..=4) or
+/// pathological values (opacity out of range, zero sign rate busy-loop).
+/// Returns a user-facing error message on the first violation.
+pub fn validate_live_config(cfg: &LiveConfig) -> Result<(), String> {
+    if !(1..=4).contains(&cfg.lsb_bits) {
+        return Err(format!(
+            "lsbBits must be between 1 and 4, got {}",
+            cfg.lsb_bits
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.opacity) {
+        return Err(format!(
+            "opacity must be between 0.0 and 1.0, got {}",
+            cfg.opacity
+        ));
+    }
+    if cfg.sign_rate_ms < 50 {
+        return Err(format!(
+            "signRateMs must be at least 50 ms to avoid a busy loop, got {}",
+            cfg.sign_rate_ms
+        ));
+    }
+    Ok(())
+}
 /// Start the dashboard server.
 ///
 /// # Arguments
@@ -387,6 +422,12 @@ async fn api_config_post(
             serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
         );
     }
+    if let Err(msg) = validate_live_config(&new_cfg) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({ "status": "error", "message": msg }).to_string(),
+        );
+    }
 
     log::info!(
         "Config updated: opacity={:.2}, lsb_bits={}, backend={}, overlay='{}', sign_rate={}ms, qr_scale={}%, res={}",
@@ -428,6 +469,7 @@ async fn api_version() -> String {
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "name": env!("CARGO_PKG_NAME"),
+        "signature_payload_size": steganographer_core::SignaturePayload::SERIALIZED_SIZE,
     })
     .to_string()
 }
@@ -522,8 +564,16 @@ async fn ots_stamp(
 /// POST /ots/verify — verify a `.ots` proof file sent as the request body.
 async fn ots_verify(
     State(state): State<Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, String) {
+    if !check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
+        );
+    }
+
     let Some(client) = &state.ots_client else {
         return (
             axum::http::StatusCode::OK,

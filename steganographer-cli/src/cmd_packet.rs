@@ -2,6 +2,7 @@
 
 use rand::RngCore;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use steganographer_core::encryption::EncryptionKey;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, KERNEL_SPATIAL_LSB,
@@ -101,6 +102,7 @@ pub fn encode(
     format: &str,
     options: &GenericEncodeOptions,
 ) -> anyhow::Result<()> {
+    validate_format(format)?;
     validate_kernel(stego_type)?;
     let audio = is_audio_kernel(stego_type);
     let (payload, payload_kind, default_filename) = match (
@@ -164,7 +166,7 @@ pub fn encode(
 
     // Apply opt-in transforms (sign, compress, AEAD encrypt, chunked RS ECC).
     let signer = resolve_signing_key(options)?;
-    let encrypt_key = resolve_encryption_key(options)?;
+    let encrypt_key = resolve_encryption_key(options, format)?;
     let ecc_parity = if options.ecc { options.ecc_parity } else { 0 };
     if options.ecc && !(1..=steganographer_core::MAX_ECC_PARITY).contains(&ecc_parity) {
         anyhow::bail!(
@@ -177,7 +179,6 @@ pub fn encode(
     let error_corrected = ecc_parity > 0;
     let context = TransformContext {
         packet_id: &packet.envelope.packet_id,
-        nonce: &packet.locator.nonce,
         payload_kind: packet.envelope.payload_kind as u16,
         original_len: packet.envelope.original_len,
     };
@@ -269,7 +270,7 @@ pub fn decode(
     force: bool,
     options: &GenericDecodeOptions,
 ) -> anyhow::Result<()> {
-    validate_kernel(stego_type)?;
+    validate_format(format)?;
     let audio = is_audio_kernel(stego_type);
     let input_path = std::path::Path::new(input);
     let output_path = std::path::Path::new(output);
@@ -336,7 +337,6 @@ pub fn decode(
     let decrypt_key = resolve_decryption_key(options)?;
     let context = TransformContext {
         packet_id: &report.packet.envelope.packet_id,
-        nonce: &report.packet.locator.nonce,
         payload_kind: report.packet.envelope.payload_kind as u16,
         original_len: report.packet.envelope.original_len,
     };
@@ -396,6 +396,129 @@ pub fn decode(
     };
     print_decode_result(&result, format)?;
     Ok(())
+}
+
+/// SUR-002: extract the payload from a generic packet carrier straight to a
+/// file, with a saved-digest report and none of the decode-report ceremony.
+///
+/// `bits` is `None` for auto-detection (1..=4 tried in order) or an explicit
+/// LSB strength; the caller's CLI layer maps `--bits auto` to `None`.
+pub fn run_extract(
+    input: &PathBuf,
+    output: &PathBuf,
+    bits: Option<u8>,
+    force: bool,
+) -> anyhow::Result<()> {
+    let output_str = output
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8"))?;
+    validate_extract_output_name(output_str)?;
+    let input_str = input
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("input path is not valid UTF-8"))?;
+    if input == output
+        || (output.exists()
+            && std::fs::canonicalize(input).ok() == std::fs::canonicalize(output).ok())
+    {
+        anyhow::bail!("extracted payload output must differ from the carrier input");
+    }
+    let metadata = std::fs::metadata(output);
+    if let Ok(metadata) = &metadata {
+        if metadata.is_dir() {
+            anyhow::bail!(
+                "refusing to extract onto directory '{}'; choose a file path",
+                output_str
+            );
+        }
+        if !force {
+            anyhow::bail!(
+                "refusing to overwrite existing output '{}'; pass --force to replace it",
+                output_str
+            );
+        }
+    }
+
+    let candidate_bits = match bits {
+        None => bits_candidates("auto")?,
+        Some(value) => bits_candidates(&value.to_string())?,
+    };
+    let selected_format = media_io::detect_format(input_str, "lsb_video");
+    let media = media_io::read_input(input_str, &selected_format, "lsb_video")?;
+    let limits = DecodeLimits::default();
+
+    let mut extracted = None;
+    let mut errors = Vec::new();
+    for candidate in candidate_bits {
+        let config = EmbeddingConfig::new(candidate)?;
+        let sequential = SpatialLsb.extract_packet(&media.data, &config, &limits);
+        match sequential {
+            Ok(report) => {
+                extracted = Some(report);
+                break;
+            }
+            Err(error) => errors.push(format!("{candidate} bits: {error}")),
+        }
+    }
+    let report = extracted.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no valid generic packet found with requested LSB strengths ({})",
+            errors.join("; ")
+        )
+    })?;
+
+    // Fail closed on transforms: an encrypted packet cannot be extracted
+    // without the decryption key, so reversal runs keyless and errors out.
+    let context = TransformContext {
+        packet_id: &report.packet.envelope.packet_id,
+        payload_kind: report.packet.envelope.payload_kind as u16,
+        original_len: report.packet.envelope.original_len,
+    };
+    let payload = transforms::reverse(
+        &report.packet.body,
+        &context,
+        None,
+        &report.packet.envelope.transforms,
+        report.packet.envelope.original_len,
+    )
+    .map_err(|e| anyhow::anyhow!("transform reversal failed: {e}"))?;
+    if !report.packet.envelope.content_digest.verify(&payload) {
+        anyhow::bail!("recovered payload digest does not match the packet envelope");
+    }
+
+    std::fs::write(output, &payload)?;
+    let digest = blake3::hash(&payload);
+    let kind = payload_kind_name(report.packet.envelope.payload_kind);
+    println!(
+        "Extracted payload: {} bytes (kind: {})",
+        payload.len(),
+        kind
+    );
+    println!("Saved to: {}", output_str);
+    println!("BLAKE3 digest: {}", digest);
+    Ok(())
+}
+
+/// The final path component of an extract target must be a safe file name;
+/// the caller supplies the directory.
+fn validate_extract_output_name(output: &str) -> anyhow::Result<()> {
+    let name = Path::new(output)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("output path has no safe file name component"))?;
+    if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
+        anyhow::bail!("output file name must be a safe file name without path components");
+    }
+    Ok(())
+}
+
+/// `--format` is a closed set: anything else is a usage error, never a
+/// silent fallthrough to plain output. Shared by the packet and legacy
+/// encode surfaces.
+pub(crate) fn validate_format(format: &str) -> anyhow::Result<()> {
+    match format {
+        "plain" | "json" => Ok(()),
+        other => anyhow::bail!("--format must be 'plain' or 'json', got '{other}'"),
+    }
 }
 
 fn synchronize_locator(
@@ -543,22 +666,38 @@ fn decode_hex_32(hex: &str) -> anyhow::Result<[u8; 32]> {
     Ok(out)
 }
 
-fn resolve_encryption_key(options: &GenericEncodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
+fn resolve_encryption_key(
+    options: &GenericEncodeOptions,
+    format: &str,
+) -> anyhow::Result<Option<EncryptionKey>> {
     if !options.encrypt {
         return Ok(None);
     }
-    let key = if let Some(ref path) = options.encryption_key_file {
-        let hex_str = std::fs::read_to_string(path)?.trim().to_string();
-        EncryptionKey::from_hex(&hex_str)?
-    } else if let Some(ref hex_str) = options.encryption_key {
-        EncryptionKey::from_hex(hex_str)?
-    } else {
-        let key = EncryptionKey::generate();
-        println!(
-            "Generated random encryption key (hex, save it to decrypt later): {}",
-            key.to_hex()
-        );
-        key
+    let key = match (&options.encryption_key_file, &options.encryption_key) {
+        (Some(path), _) => {
+            let hex_str = std::fs::read_to_string(path)?.trim().to_string();
+            EncryptionKey::from_hex(&hex_str)?
+        }
+        (None, Some(hex_str)) => EncryptionKey::from_hex(hex_str)?,
+        (None, None) => {
+            let key = EncryptionKey::generate();
+            // JSON mode must stay a single pure JSON document on stdout, so
+            // the freshly generated key is only echoed on the terminal
+            // stream there; plain mode hands the raw key to the user.
+            if format == "json" {
+                eprintln!(
+                    "Generated a random encryption key (raw key shown only in \
+                     plain mode; pass --encryption-key-file to reuse it)"
+                );
+            } else {
+                println!(
+                    "Generated random encryption key (hex, save it to decrypt \
+                     later): {}",
+                    key.expose_hex()
+                );
+            }
+            key
+        }
     };
     Ok(Some(key))
 }

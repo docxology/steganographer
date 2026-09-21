@@ -1,7 +1,7 @@
 # steganographer-core
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-405%20(288%20unit%20%2B%20117%20integration)-brightgreen)
+![Tests](https://img.shields.io/badge/tests-466%20(343%20unit%20%2B%20123%20integration)-brightgreen)
 Pure, media-agnostic algorithms for steganographic embedding, cryptographic signing, and configuration. This is the foundational crate with zero GStreamer or I/O dependencies.
 
 ## Modules
@@ -10,23 +10,25 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 | -------- | ------ | ------------- |
 | `packet` | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec` — generic packet v1 alpha |
 | `carrier` | `src/carrier.rs` | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels — carrier embed/extract |
-| `placement` | `src/placement.rs` | `KeyedPermutation` — Feistel-network keyed slot placement |
+| `placement` | `src/placement.rs` | `KeyedPermutation` — Feistel-network keyed slot placement; `InterleavedSchedule` — coprime-stride interleaved schedule (`PLACEMENT_INTERLEAVED`, PLC-001) |
 | `video` | `src/video.rs` | `VideoFrame` struct, `VideoFormat` enum, `VideoStegoModule` trait |
 | `audio` | `src/audio.rs` | `AudioBuffer` struct, `AudioStegoModule` trait |
 | `crypto` | `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload` — BLAKE3 + Ed25519 |
-| `signer_backend` | `src/signer_backend.rs` | `SignerBackend` / `Ed25519Backend` / `EthereumBackend` / `MlDsaBackend` / `HybridBackend` |
+| `signer_backend` | `src/signer_backend.rs` | `SignerBackend` / `Ed25519Backend` / `EthereumBackend` / `MlDsaBackend` / `HybridBackend` + public-key-only `MlDsaVerifier` / `HybridVerifier` (real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate) |
 | `config` | `src/config.rs` | `Config` TOML parsing, hex key decoding, overlay/info_bar config |
 | `lsb_video` | `src/lsb_video.rs` | `LsbVideo` — 1–4 bit LSB video embed/extract with length prefix |
 | `lsb_audio` | `src/lsb_audio.rs` | `LsbAudio` — keyed PRNG index permutation LSB audio embed/extract |
 | `overlay` | `src/overlay.rs` | `TextOverlay` — 8×8 bitmap font renderer, template expansion (`{timestamp}`, `{frame_index}`) |
 | `info_bar` | `src/info_bar.rs` | `InfoBar` — exoteric visible watermark with toggleable timestamps, barcodes, QR |
 | `metrics` | `src/metrics.rs` | `StegoMetrics` — thread-safe atomic counters for latency/frame tracking |
+| `forensics` | `src/forensics.rs` | `ForensicScan` (incl. `text_findings`) and `detect_text_stego` — bounded forensic byte scanning |
+| `unicode_text` | `src/unicode_text.rs` | Unicode/text steganography detectors (FOR-005: zero-width, variation selectors, bidi controls, whitespace anomalies, homoglyph suspects) |
 
 ## Tests
 
-- **Unit tests**: 288 inline tests across all modules
+- **Unit tests**: 343 inline tests across all modules
 - **Integration tests**: 117 tests (`80` in `tests/integration_tests.rs` + `37` in `tests/ots_integration_tests.rs`)
-- **Total**: 405 tests (core only)
+- **Total**: 466 tests (core only)
 
 ```bash
 cargo test -p steganographer-core
@@ -55,11 +57,13 @@ lib.rs
 ├── video.rs             → VideoFrame / VideoStegoModule trait
 ├── audio.rs             → AudioBuffer / AudioStegoModule trait
 ├── crypto.rs            → Signer + Verifier (BLAKE3 hash, Ed25519 sign)
-├── signer_backend.rs    → SignerBackend trait + Ed25519/Ethereum/ML-DSA/Hybrid impls
+├── signer_backend.rs    → SignerBackend trait + Ed25519/Ethereum/ML-DSA/Hybrid impls (+ public-key-only verifiers)
 ├── config.rs            → Config model + TOML parsing
 ├── lsb_video.rs         → LsbVideo implements VideoStegoModule
 ├── lsb_audio.rs         → LsbAudio implements AudioStegoModule
 ├── overlay.rs           → TextOverlay implements VideoStegoModule + template expansion
 ├── info_bar.rs          → InfoBar implements VideoStegoModule
-└── metrics.rs           → StegoMetrics (atomic counters, JSON export)
+├── metrics.rs           → StegoMetrics (atomic counters, JSON export)
+├── forensics.rs         → ForensicScan / detect_text_stego (FOR-005 text findings)
+└── unicode_text.rs      → Unicode/text steganography detectors (FOR-005)
 ```

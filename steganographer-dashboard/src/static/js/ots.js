@@ -118,7 +118,11 @@
     btn.disabled = true;
     btn.textContent = 'Stamping…';
     try {
-      const resp = await fetch('/ots/stamp', { method: 'POST' });
+      // Authorization: Bearer <token> when the dashboard runs with auth
+      // enabled (token ingested from ?token= by app.js into sessionStorage).
+      const token = sessionStorage.getItem('auth_token');
+      const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
+      const resp = await fetch('/ots/stamp', { method: 'POST', headers: headers });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok && data.status === 'stamped') {
         btn.textContent = '✓ Stamped';

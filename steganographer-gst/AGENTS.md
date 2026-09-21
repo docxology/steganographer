@@ -8,13 +8,13 @@ GStreamer integration for real-time media pipeline processing.
 
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
-| `src/lib.rs` | ~129 | `init()`, `run_macos_main_loop()`, `launch()`, `plugin_init` + `gst_plugin_define!` (name `steganographer_gst` = cdylib file stem) |
-| `src/video_filter.rs` | 488 | `run_video_filter()`, `extract_from_source()`, `process_video_file()` |
-| `src/audio_filter.rs` | 204 | `run_audio_filter()`, `extract_from_source()` |
-| `src/elements.rs` | ~515 | `StegoVideo` native `BaseTransform` element (sequential + keyed placement, real clear-payload), `register()` |
-| `src/audio_element.rs` | ~440 | `StegoAudio` native `BaseTransform` element over interleaved S16LE PCM (`AudioSpatialLsb`/`KeyedAudioSpatialLsb`) |
+| `src/lib.rs` | 132 | `init()`, `run_macos_main_loop()`, `launch()`, `plugin_init` + `gst_plugin_define!` (name `steganographer_gst` = cdylib file stem) |
+| `src/video_filter.rs` | 516 | `run_video_filter()`, `extract_from_source()`, `process_video_file()` |
+| `src/audio_filter.rs` | 290 | `run_audio_filter()`, `extract_from_source()` |
+| `src/elements.rs` | 833 | `StegoVideo` native `BaseTransform` element: sequential (`SpatialLsb`) + keyed (`KeyedSpatialLsb`) placement, stride-safe pixel-only embedding, restricted pad templates, real clear-payload, `StreamState` frame-granularity property semantics, `register()` |
+| `src/audio_element.rs` | 638 | `StegoAudio` native `BaseTransform` element over interleaved S16LE PCM (`AudioSpatialLsb`/`KeyedAudioSpatialLsb`), restricted S16LE/interleaved pad templates |
 | `src/plugin.rs` | 50 | `register_elements()`, plugin metadata constants |
-| `tests/gst_roundtrip.rs` | ~80 | `stegoaudio` wire-format decode check + packet-hex printer for gst-launch acceptance runs |
+| `tests/gst_roundtrip.rs` | 405 | `stegoaudio` wire-format decode check + packet-hex printer for gst-launch acceptance runs |
 
 ## Data Flow
 
@@ -25,5 +25,12 @@ GStreamer integration for real-time media pipeline processing.
 
 ## Supported Formats
 
-- Video: RGB, BGRA (from GStreamer `video/x-raw`)
-- Audio: S16LE mono/stereo (from GStreamer `audio/x-raw`)
+- Native elements (`stegovideo`): restricted pad templates — packed one-plane
+  `video/x-raw` formats only: `RGB`, `BGR`, `RGBx`, `BGRx`, `XRGB`, `XBGR`
+  (negotiation fails loudly otherwise; a runtime allowlist in `transform_ip`
+  is a backstop). Embedding is stride-safe: packet bits occupy pixel bytes
+  only, never row-padding bytes.
+- Native elements (`stegoaudio`): restricted pad templates —
+  `audio/x-raw, format=S16LE, layout=interleaved` (any rate/channels).
+- Legacy AppSink/AppSrc filters: RGB, BGRA (from GStreamer `video/x-raw`);
+  S16LE mono/stereo (from GStreamer `audio/x-raw`).

@@ -17,6 +17,7 @@ fuzz_target!(|data: &[u8]| {
         max_extensions: 32,
         max_filename_len: 255,
         max_mime_len: 127,
+        ..DecodeLimits::default()
     };
 
     let _ = GenericPacket::decode(data, &limits);

@@ -6,29 +6,34 @@ Source modules for the core steganographer algorithms.
 
 | File | Lines | Purpose |
 | ------ | ------- | --------- |
-| `lib.rs` | 95 | Crate root — module declarations and public re-exports |
-| `packet.rs` | 1278 | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec` — generic packet v1 alpha |
-| `carrier.rs` | 1086 | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels — carrier embed/extract |
-| `placement.rs` | 243 | `KeyedPermutation` — Feistel-network keyed slot placement |
+| `lib.rs` | 97 | Crate root — module declarations and public re-exports |
+| `packet.rs` | 1677 | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec`, `FIELD_PARENT_ID` nesting scaffold — generic packet v1 alpha |
+| `carrier.rs` | 1632 | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, `KeyedSpatialLsb`/`KeyedAudioSpatialLsb` keyed kernels — carrier embed/extract |
+| `placement.rs` | 439 | `KeyedPermutation` — Feistel-network keyed slot placement; `InterleavedSchedule` (`PLACEMENT_INTERLEAVED`, PLC-001) |
 | `video.rs` | 64 | `VideoFrame` struct, `VideoFormat` enum (Rgb8/Bgra8/Yuv420), `VideoStegoModule` trait |
 | `audio.rs` | 45 | `AudioBuffer` struct (i16 samples), `AudioStegoModule` trait |
 | `crypto.rs` | 600 | `Signer` (BLAKE3 hash → Ed25519 sign), `Verifier`, `SignaturePayload` serialization |
-| `signer_backend.rs` | 649 | `SignerBackend` trait, `Ed25519Backend`, `MlDsaBackend`, `HybridBackend`, `EthereumBackend` (feature-gated) |
+| `signer_backend.rs` | 1020 | `SignerBackend` trait, `Ed25519Backend`, `MlDsaBackend` (real FIPS 204 via RustCrypto `ml-dsa`), `HybridBackend`, `EthereumBackend` (feature-gated), plus public-key-only `Ed25519Verifier`, `MlDsaVerifier`, `HybridVerifier` |
 | `config.rs` | 529 | TOML config model with `serde`, hex key decode, overlay + info_bar config |
-| `metrics.rs` | 332 | `StegoMetrics` — atomic counters for frames/latency/verify, `to_json()`, `average_fps()` |
+| `metrics.rs` | 332 | `StegoMetrics` — atomic counters for frames/latency/verify, `to_json()`, `average_fps()`, `reset()` |
 | `lsb_video.rs` | 298 | `LsbVideo` — multi-bit embed/extract with 32-bit length prefix protocol |
 | `lsb_audio.rs` | 360 | `LsbAudio` — keyed PRNG (ChaCha8) Fisher-Yates permutation for sample indices |
 | `overlay.rs` | 417 | `TextOverlay` — 8×8 bitmap font, RGB/BGRA rendering, 5 positions, `expand_template()` |
 | `info_bar.rs` | 568 | `InfoBar` — exoteric visible watermark with toggleable timestamps, barcodes, QR |
+| `forensics.rs` | 356 | `ForensicScan` (incl. `text_findings`), `detect_text_stego()` — bounded forensic byte scanning |
+| `unicode_text.rs` | 682 | Unicode/text steganography detectors (FOR-005 detector IDs) |
+| `ots_config.rs` | — | `OtsConfig` — `[ots]` TOML block (enabled, server_url, method, interval_secs, proof_dir, timeout_secs) |
 
 ## Trait Hierarchy
 
 ```text
 VideoStegoModule      AudioStegoModule      SignerBackend
 ├── LsbVideo          └── LsbAudio          ├── Ed25519Backend
-├── TextOverlay                             ├── MlDsaBackend
-└── InfoBar                                 ├── HybridBackend
+├── TextOverlay                             ├── MlDsaBackend  (FIPS 204, ml-dsa crate)
+└── InfoBar                                 ├── HybridBackend (Ed25519 + ML-DSA)
                                             └── EthereumBackend (feature-gated)
+
+Verification-only (no private key): Ed25519Verifier · MlDsaVerifier · HybridVerifier
 ```
 
 ## Conventions

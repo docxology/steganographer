@@ -37,3 +37,5 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 image = "0.25"
 # HTTP client for the OpenTimestamps REST API (steganographer-core::ots_client).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ml-dsa = "0.1.1"
+zeroize = "1.9"

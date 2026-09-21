@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-484_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-602_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-4-informational?style=flat-square" alt="4 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 484 tests, 0 failures
+cargo test --workspace   # 602 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -133,7 +133,7 @@ Four Rust crates with strict dependency layering:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│  steganographer-cli       (binary)           │  Clap CLI: 14 subcommands
+│  steganographer-cli       (binary)           │  Clap CLI: 15 subcommands
 ├──────────────────────────────────────────────┤
 │  steganographer-dashboard (web server)       │  Axum + WebSocket, 3 tabs
 │  steganographer-gst       (GStreamer plugin)  │  AppSink/AppSrc pipeline
@@ -193,6 +193,9 @@ steganographer encode --input cover.png --output packed.png \
   --payload-file report.pdf --mime-type application/pdf --bits 2
 steganographer decode --input packed.png --output recovered.pdf --bits auto
 
+# Generic packet alpha: extract the raw embedded payload from a carrier
+steganographer extract --input packed.png --output payload.bin --bits auto
+
 # Validate a TOML configuration file
 steganographer config check
 
@@ -240,20 +243,20 @@ bits = 1
 
 ## ✅ Tests
 
-484 tests across 4 crates — all passing:
+602 tests across 4 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 288 | `steganographer-core/src/*.rs` |
-| Core integration tests | 117 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` |
-| CLI unit + integration tests | 37 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` |
-| Dashboard tests | 23 | `steganographer-dashboard/tests/dashboard_tests.rs` |
-| GStreamer unit + integration + doc-tests | 17 | `steganographer-gst/src/` + `steganographer-gst/tests/` + doc-test |
-| **Total** | **484** | **0 failures** |
+| Core unit tests | 343 | `steganographer-core/src/*.rs` |
+| Core integration tests | 123 | `steganographer-core/tests/integration_tests.rs` + `tests/ots_integration_tests.rs` + `tests/golden_vectors.rs` |
+| CLI unit + integration tests | 60 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` + `tests/cli_packet_tests.rs` |
+| Dashboard tests | 52 | `steganographer-dashboard/tests/dashboard_tests.rs` + doc-tests |
+| GStreamer unit + integration + doc-tests | 24 | `steganographer-gst/src/` + `steganographer-gst/tests/` + doc-test |
+| **Total** | **602** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 484 tests
-cargo test -p steganographer-core     # Core only (405 tests)
+cargo test --workspace                # All 602 tests
+cargo test -p steganographer-core     # Core only (466 tests)
 cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 ```
 
@@ -286,7 +289,7 @@ cargo test -p steganographer-dashboard # Dashboard only (23 tests)
 | [**Security**](docs/security.md) | Cachin's ε-security, deployment guidance |
 | [**Threat Model**](docs/threat-model.md) | Adversary model, attack catalog, mitigations |
 | [**Key Rotation**](docs/key-rotation.md) | Key rotation record, incident report, revocation procedure |
-| [**CLI Reference**](docs/cli-reference.md) | All 14 commands with examples |
+| [**CLI Reference**](docs/cli-reference.md) | All 15 commands with examples |
 | [**API Reference**](docs/api-reference.md) | HTTP + WebSocket endpoints, JSON schemas |
 | [**Configuration**](docs/configuration.md) | Full TOML schema, template variables |
 | [**GStreamer**](docs/gstreamer.md) | Pipeline integration, AppSink/AppSrc |

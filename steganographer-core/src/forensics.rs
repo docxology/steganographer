@@ -5,8 +5,11 @@
 //! magic-byte file identification, and embedded signature/packet-magic scanning.
 //! Every probe here is non-recursive and bounded — it only looks at the bytes it
 //! is given and never opens containers, follows links, or touches the network.
+//! Unicode/text steganography probes delegate to [`crate::unicode_text`];
+//! see [`detect_text_stego`].
 
 use crate::steganalysis::{self, CombinedResult};
+use crate::unicode_text;
 
 /// Shannon entropy of a byte buffer, in bits per byte (`0.0 ..= 8.0`).
 ///
@@ -185,6 +188,16 @@ pub fn detect_embedded_magics_detailed(data: &[u8]) -> Vec<EmbeddedMagicMatch> {
     matches
 }
 
+/// Scan decoded text for Unicode/text steganography markers (FOR-005).
+///
+/// Thin adapter over [`crate::unicode_text`]: validates UTF-8 and applies the
+/// module's bounded 1 MiB scan cap. Non-UTF-8 buffers yield no text findings
+/// (they are not text). Reported offsets are character offsets into the
+/// decoded text, not byte offsets.
+pub fn detect_text_stego(data: &[u8]) -> Vec<unicode_text::TextFinding> {
+    unicode_text::analyze_bytes(data)
+}
+
 /// Aggregated forensic scan of one byte buffer.
 #[derive(Debug, Clone)]
 pub struct ForensicScan {
@@ -196,6 +209,8 @@ pub struct ForensicScan {
     pub embedded_magic: Option<EmbeddedMagic>,
     /// All inline embedded magic matches and their offsets.
     pub magic_matches: Vec<EmbeddedMagicMatch>,
+    /// Unicode/text steganography findings (FOR-005 detector IDs).
+    pub text_findings: Vec<unicode_text::TextFinding>,
     /// Aggregated statistical detector results.
     pub statistical: CombinedResult,
     /// `true` if any detector flags the buffer as suspicious.
@@ -214,12 +229,16 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
     let entropy = shannon_entropy(data);
     let file_family = detect_file_family(data);
     let magic_matches = detect_embedded_magics_detailed(data);
+    let text_findings = detect_text_stego(data);
     let embedded_magic = magic_matches.first().map(|m| m.magic);
-    let detected = statistical.detected || embedded_magic.is_some();
+    let detected = statistical.detected || embedded_magic.is_some() || !text_findings.is_empty();
     let message = if let Some(magic) = embedded_magic {
         format!("embedded {} magic found inline", magic.as_str())
     } else if statistical.detected {
         statistical.message.clone()
+    } else if !text_findings.is_empty() {
+        let ids: Vec<&str> = text_findings.iter().map(|f| f.detector_id).collect();
+        format!("unicode text anomalies: {}", ids.join(", "))
     } else {
         "no forensic indicators".to_string()
     };
@@ -228,6 +247,7 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
         file_family,
         embedded_magic,
         magic_matches,
+        text_findings,
         statistical,
         detected,
         message,
@@ -314,5 +334,21 @@ mod tests {
         let scan = scan_bytes(&data);
         assert_eq!(scan.embedded_magic, None);
         assert!(!scan.message.contains("magic"));
+    }
+
+    #[test]
+    fn text_stego_entry_point_wiring() {
+        // Cyrillic 'а' inside an ASCII word is a homoglyph suspect.
+        let scan = scan_bytes("p\u{0430}ypal".as_bytes());
+        assert!(scan.detected);
+        assert!(scan
+            .text_findings
+            .iter()
+            .any(|f| f.detector_id == unicode_text::HOMOGLYPH_SUSPECT));
+
+        // Plain ASCII text produces no text findings.
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(10);
+        let clean = scan_bytes(&data);
+        assert!(clean.text_findings.is_empty());
     }
 }

@@ -8,9 +8,9 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, ML-DSA post-quantum, Hybrid), metrics, config, frequency-domain kernels, encryption, ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics, and WASM inspection facade (30 modules + `lib.rs`) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed + interleaved placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate with public-key-only `MlDsaVerifier`/`HybridVerifier`, Hybrid), metrics, config, frequency-domain kernels, encryption (packet-id-derived AEAD nonce), ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms, steganalysis, forensics + unicode-text detectors (FOR-005), and WASM inspection facade (32 modules + `lib.rs`) |
 | `steganographer-gst/` | Crate | GStreamer integration: AppSink/AppSrc video/audio filter pipelines + native `stegovideo` (keyed/sequential LSB video element) and `stegoaudio` (S16 PCM audio element) with cdylib plugin packaging (6 modules + integration tests) |
-| `steganographer-cli/` | Crate | CLI binary: 14 Clap subcommands — video, audio, encode, decode, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (10 modules) |
+| `steganographer-cli/` | Crate | CLI binary: 15 Clap subcommands — video, audio, encode, decode, extract, verify, keygen, info, analyze, scan, derive, config, revoke, dashboard, ots (10 modules) |
 | `steganographer-dashboard/` | Crate | Axum web dashboard: 3-tab GUI (Video/Audio/Docs) with WebSocket streaming, dynamic LSB, signature preview (2 modules + 7 static assets) |
 | `config/` | Config | Example TOML configuration files |
 | `docs/` | Docs | 17 user-facing guides + 7 steganography-platform planning specifications (+ `README.md` / `AGENTS.md`) |
@@ -21,7 +21,7 @@
 
 - **Root files**: 18 (`.dockerignore`, `.gitattributes`, `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `CHANGELOG.md`, `Cargo.lock`, `Cargo.toml`, `deny.toml`, `Dockerfile`, `FUNDING.md`, `LICENSE`, `README.md`, `release.toml`, `run.sh`, `rust-toolchain.toml`, `steganographer.toml`, `TODO.md`)
 - **Source files**: 60 Rust files (49 `src/` modules + 5 test files + 4 fuzz targets + 1 benchmark file + `build.rs`) + 7 static web assets across 4 crates
-- **Tests**: 290 core unit + 117 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs`) + 6 CLI unit + 31 CLI integration + 23 dashboard + 17 GStreamer (14 unit + 2 integration + 1 doctest) = **484 passing tests** — **canonical count home is this line** (as of 2026-09-02; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
+- **Tests**: 343 core unit + 123 core integration (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs`) + 14 CLI unit + 46 CLI integration (39 in `cli_integration_tests.rs` + 7 in `cli_packet_tests.rs`) + 44 dashboard tests + 8 dashboard doc-tests + 14 GStreamer unit + 9 GStreamer integration + 1 GStreamer doc-test = **602 passing tests** — **canonical count home is this line** (as of 2026-09-20; verify with `cargo test --workspace` or `./scripts/status.sh --check` and update here first, then defer from other docs).
 - **Doc files**: 27 markdown files under `docs/` (17 guides + `README.md` + `AGENTS.md` + 7 program planning specifications + `manuscript/MANUSCRIPT_STATUS.md`) + README.md / AGENTS.md per crate
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 
@@ -31,7 +31,7 @@
 cargo build --workspace
 cargo test -p steganographer-core              # core crate only (count: canonical Tests line above)
 cargo test -p steganographer-core --features ethereum  # includes Ethereum tests
-cargo test --workspace                         # 484 total tests
+cargo test --workspace                         # 602 total tests
 ./run.sh                                       # Interactive menu
 ./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
 ./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo

@@ -702,7 +702,12 @@ fn test_lsb_audio_encode_verify_roundtrip() {
         stdout, stderr
     );
     let encode_result = parse_json(&stdout);
-    assert_eq!(encode_result["embedding_key_hex"], embed_key);
+    // JSON output must NEVER contain secret key material (v0.8.0 contract);
+    // the key is delivered to the user in plain mode / via key files instead.
+    assert!(
+        encode_result.get("embedding_key_hex").is_none(),
+        "embedding key must not be serialized into JSON output"
+    );
 
     // Verify — audio requires --embedding-key
     let (code, stdout, stderr) = run_cli(&[
@@ -1967,4 +1972,318 @@ fn test_scan_directory_recurses_with_budget() {
     let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(result["summary"]["files_scanned"], 1);
     assert_eq!(result["summary"]["findings"], 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Exit-code contract: usage (2), runtime (1), invalid signature (3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Helper: encode a signed lsb_video carrier and return (dir, carrier path,
+/// public key hex).
+fn encode_signed_lsb_video() -> (tempfile::TempDir, PathBuf, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("input.rgb");
+    let output = tmp.path().join("output.rgb");
+    let key_prefix = tmp.path().join("test_key");
+    create_test_rgb(input.to_str().unwrap());
+    run_cli(&["keygen", "--output", key_prefix.to_str().unwrap()]);
+    let key_path = format!("{}.key", key_prefix.display());
+    let pub_key = std::fs::read_to_string(format!("{}.pub", key_prefix.display()))
+        .unwrap()
+        .trim()
+        .to_string();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "encode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--stego-type",
+        "lsb_video",
+        "--signing-key",
+        &key_path,
+    ]);
+    assert_eq!(code, 0, "encode failed: {stdout}{stderr}");
+    (tmp, output, pub_key)
+}
+
+#[test]
+fn test_tampered_carrier_verify_exits_3() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_ctx, carrier, pub_key) = encode_signed_lsb_video();
+    let tampered = tmp.path().join("tampered.rgb");
+    let mut data = std::fs::read(&carrier).unwrap();
+    // Payload layout: [magic 0..4][version 4][frame_index 5..13][hash
+    // 13..45][signature 45..109]. At bits=1 each payload bit occupies one
+    // file byte's LSB: the 32-bit length prefix lives in file bytes 0..32,
+    // so payload byte k occupies file bytes 32+8k..32+8k+8. Flip the LSB of
+    // file byte 500 → payload byte 58, inside the signature region:
+    // magic/version stay valid so the payload still parses, but the
+    // signature no longer matches → status "invalid" → exit 3.
+    data[500] ^= 0b0000_0001;
+    std::fs::write(&tampered, &data).unwrap();
+
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        tampered.to_str().unwrap(),
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "lsb_video",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 3, "tampered carrier must exit 3: {stdout}{stderr}");
+    let result = parse_json(&stdout);
+    assert_eq!(result["status"], "invalid");
+}
+
+#[test]
+fn test_decode_without_packet_exits_2_with_contract_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("plain.rgb");
+    create_test_rgb(input.to_str().unwrap());
+    let output = tmp.path().join("payload.bin");
+
+    let (code, _stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "decode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "decode of packet-free carrier must exit 2");
+    assert!(
+        stderr.contains("no valid generic packet found"),
+        "packet-not-found message contract violated: {stderr}"
+    );
+
+    // The `extract` subcommand follows the same mapping.
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "extract",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "extract of packet-free carrier must exit 2");
+    assert!(stderr.contains("no valid generic packet found"), "{stderr}");
+}
+
+#[test]
+fn test_verify_json_emits_exactly_one_document() {
+    let (_ctx, carrier, pub_key) = encode_signed_lsb_video();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "lsb_video",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "verify failed: {stdout}{stderr}");
+    // serde_json::from_str rejects any trailing content, so a second JSON
+    // document (e.g. a separate OTS object) would fail this parse.
+    let result: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout is not exactly one JSON document ({e}): {stdout}"));
+    assert_eq!(result["status"], "valid");
+}
+
+#[test]
+fn test_verify_revoked_list_reports_valid_revoked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_ctx, carrier, pub_key) = encode_signed_lsb_video();
+    let revoked = tmp.path().join("revoked.json");
+    std::fs::write(&revoked, format!("[\"{pub_key}\"]")).unwrap();
+
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "lsb_video",
+        "--revoked-list",
+        revoked.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "valid_revoked still completes: {stdout}{stderr}");
+    let result = parse_json(&stdout);
+    assert_eq!(result["status"], "valid_revoked");
+    assert!(
+        result["message"].as_str().unwrap().contains("REVOKED"),
+        "message must surface the revocation: {result}"
+    );
+}
+
+#[test]
+fn test_ots_offline_error_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("input.bin");
+    std::fs::write(&input, b"some bytes to stamp").unwrap();
+
+    // Unknown --method is a usage error (exit 2), not a silent Bitcoin stamp.
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "ots",
+        "stamp",
+        "--input",
+        input.to_str().unwrap(),
+        "--method",
+        "litecoin",
+    ]);
+    assert_eq!(code, 2, "unknown ots method must exit 2");
+    assert!(stderr.contains("unknown OTS method"), "{stderr}");
+
+    // Missing proof file is a runtime error (exit 1).
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "ots",
+        "verify",
+        "--input",
+        input.to_str().unwrap(),
+        "--proof",
+        tmp.path().join("missing.ots").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "missing proof file must exit 1");
+    assert!(stderr.contains("Cannot read proof file"), "{stderr}");
+
+    // Omitted --proof defaults to <input>.ots (which does not exist here).
+    let default_proof = format!("{}.ots", input.to_str().unwrap());
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "ots",
+        "verify",
+        "--input",
+        input.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "default proof path missing must exit 1");
+    assert!(
+        stderr.contains(&default_proof),
+        "error must name the defaulted <input>.ots path: {stderr}"
+    );
+}
+
+#[test]
+fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
+    let (_ctx, carrier, pub_key) = encode_signed_lsb_video();
+    let carrier = carrier.to_str().unwrap().to_string();
+
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        &carrier,
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "foobar",
+    ]);
+    assert_eq!(code, 2, "unknown --stego-type must exit 2");
+    assert!(stderr.contains("unknown stego type"), "{stderr}");
+
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        &carrier,
+        "--public-key",
+        &pub_key,
+        "--hash-algorithm",
+        "md5",
+    ]);
+    assert_eq!(code, 2, "unknown --hash-algorithm must exit 2");
+    assert!(stderr.contains("unsupported hash algorithm"), "{stderr}");
+
+    // --log-level is global: validation fires before any subcommand runs.
+    let (code, _, stderr) = run_cli(&["--log-level", "bogus", "keygen", "--output", "/dev/null"]);
+    assert_eq!(code, 2, "unknown --log-level must exit 2");
+    assert!(stderr.contains("unknown --log-level"), "{stderr}");
+
+    let (code, _, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "extract",
+        "--input",
+        &carrier,
+        "--output",
+        "/dev/null",
+        "--bits",
+        "7",
+    ]);
+    assert_eq!(code, 2, "out-of-range extract --bits must exit 2");
+    assert!(stderr.contains("--bits"), "{stderr}");
+}
+
+#[test]
+fn test_scan_missing_input_exits_2() {
+    // Nonexistent --input is a usage error (exit 2).
+    let (code, _, stderr) = run_cli(&["scan", "--input", "/nonexistent/path/xyz"]);
+    assert_eq!(code, 2, "missing scan input must exit 2");
+    assert!(stderr.contains("cannot access"), "{stderr}");
+}
+
+#[test]
+fn test_derive_password_stdin_strips_trailing_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let salt = "000102030405060708090a0b0c0d0e0f";
+    let out_lf = tmp.path().join("keys_lf");
+    let out_crlf = tmp.path().join("keys_crlf");
+
+    let derive_stdin = |out: &std::path::Path, password: &[u8]| {
+        use std::io::Write;
+        let bin = cli_binary();
+        let mut child = Command::new(&bin)
+            .args([
+                "derive",
+                "--password-stdin",
+                "--salt",
+                salt,
+                "--argon2-memory",
+                "8",
+                "--argon2-iterations",
+                "1",
+                "--output",
+                out.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn derive");
+        child.stdin.as_mut().unwrap().write_all(password).unwrap();
+        let output = child.wait_with_output().unwrap();
+        output.status.code().unwrap_or(-1)
+    };
+
+    assert_eq!(derive_stdin(&out_lf, b"hunter2\n"), 0);
+    assert_eq!(derive_stdin(&out_crlf, b"hunter2\r\n"), 0);
+    // CRLF must be stripped so both runs derive identical keys.
+    assert_eq!(
+        std::fs::read_to_string(out_lf.join("signing.key")).unwrap(),
+        std::fs::read_to_string(out_crlf.join("signing.key")).unwrap(),
+        "--password-stdin must strip trailing CRLF"
+    );
 }

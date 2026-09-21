@@ -176,6 +176,8 @@ fn run_video_filter_internal(
     let mut stego = stego;
     let mut frame_index: u64 = 0;
     let mut consecutive_misses: u32 = 0;
+    let mut skipped_frames: u64 = 0;
+    let mut unsupported_format_warned = false;
 
     loop {
         // macOS autorelease pool for Objective-C objects created by AVFoundation
@@ -209,7 +211,11 @@ fn run_video_filter_internal(
                         log::info!("End of stream");
                         source_bin.set_state(gstreamer::State::Null).ok();
                         sink_bin.set_state(gstreamer::State::Null).ok();
-                        log::info!("Video filter complete: {} frames processed", frame_index);
+                        log::info!(
+                            "Video filter complete: {} frames processed ({} passed through unembedded)",
+                            frame_index,
+                            skipped_frames
+                        );
                         return Ok(());
                     }
                     _ => {}
@@ -276,21 +282,39 @@ fn run_video_filter_internal(
             appsrc.set_caps(Some(&caps_owned));
         }
 
-        let mut map = buffer_copy
-            .make_mut()
-            .map_writable()
-            .map_err(|_| anyhow::anyhow!("Could not map buffer writable"))?;
-
+        // Unsupported formats pass through unembedded (matching the
+        // BaseTransform sibling); the frame counter still advances so
+        // max_frames terminates on all-unsupported streams. The format check
+        // runs before the writable map so discarded frames are never copied.
         let format = match video_info.format() {
             gstreamer_video::VideoFormat::Rgb => VideoFormat::Rgb8,
             gstreamer_video::VideoFormat::Bgra => VideoFormat::Bgra8,
             other => {
-                log::warn!("Unsupported video format {:?}, skipping", other);
+                if !unsupported_format_warned {
+                    log::warn!(
+                        "Unsupported video format {other:?}; passing frames through unembedded"
+                    );
+                    unsupported_format_warned = true;
+                }
+                skipped_frames += 1;
+                match appsrc.push_buffer(buffer_copy) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("Failed to push buffer: {:?}", e);
+                        break;
+                    }
+                }
+                frame_index += 1;
                 continue;
             }
         };
 
         // Sign and embed steganography
+        let mut map = buffer_copy
+            .make_mut()
+            .map_writable()
+            .map_err(|_| anyhow::anyhow!("Could not map buffer writable"))?;
+
         let sig = signer.map(|s| s.sign_frame(frame_index, map.as_ref(), None));
         let mut core_frame = VideoFrame {
             width: video_info.width(),
@@ -326,7 +350,11 @@ fn run_video_filter_internal(
     log::info!("Shutting down pipelines...");
     source_bin.set_state(gstreamer::State::Null)?;
     sink_bin.set_state(gstreamer::State::Null)?;
-    log::info!("Video filter complete: {} frames processed", frame_index);
+    log::info!(
+        "Video filter complete: {} frames processed ({} passed through unembedded)",
+        frame_index,
+        skipped_frames
+    );
 
     Ok(())
 }

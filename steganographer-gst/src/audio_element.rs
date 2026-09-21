@@ -24,6 +24,11 @@
 //!   delivery). With a key set, `clear-payload` is ignored with a one-time
 //!   warning (keyed slots are permutation-scattered; re-embedding is kept).
 //! - When no packet is set, buffers pass through untouched.
+//! - Pad templates are restricted to `audio/x-raw, format=S16LE,
+//!   layout=interleaved`: negotiation fails loudly for anything else. The
+//!   `set_caps` gate stays as a backstop.
+//! - Property changes apply at frame granularity (see `StreamState` in the
+//!   imp module); `key-hex`/`bits-per-unit` changes reset the buffer counter.
 
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -38,36 +43,106 @@ use steganographer_core::carrier::{
     AudioSpatialLsb, CarrierEmbedder, EmbeddingConfig, KeyedAudioSpatialLsb,
 };
 use steganographer_core::kdf::derive_frame_embedding_key;
-
 mod imp {
     use super::*;
+    /// One-shot warning flags, keyed by reason: the first occurrence of each
+    /// reason warns, later occurrences stay silent.
+    #[derive(Clone, Copy, Default)]
+    struct WarnFlags {
+        unaligned_buffer: bool,
+        capacity: bool,
+        keyed_clear: bool,
+    }
+
+    /// Skip-reason selector for [`StreamState::note_skip`].
+    #[derive(Clone, Copy)]
+    enum SkipReason {
+        UnalignedBuffer,
+        Capacity,
+    }
+
+    impl WarnFlags {
+        fn slot(&mut self, reason: SkipReason) -> &mut bool {
+            match reason {
+                SkipReason::UnalignedBuffer => &mut self.unaligned_buffer,
+                SkipReason::Capacity => &mut self.capacity,
+            }
+        }
+    }
+
+    /// Property-driven streaming parameters plus per-stream progress
+    /// counters, under one lock so a property write cannot interleave with a
+    /// `transform_ip` snapshot (stale counters, half-updated key/packet/bits).
+    ///
+    /// Streaming-order note: property changes apply at *buffer granularity*.
+    /// Each in-flight buffer works on the snapshot taken when it arrived; the
+    /// next buffer after a `key-hex` or `bits-per-unit` change sees the new
+    /// value with the progress counters reset (it is treated as buffer 0
+    /// and, in keyed mode, embedded with the raw key). Keyed mode therefore
+    /// expects `key-hex` to be set before the pipeline reaches PLAYING, so
+    /// buffer 0 is embedded with the raw key and decodes via the CLI
+    /// `--embedding-key` path.
+    #[derive(Clone)]
+    struct StreamState {
+        packet: Option<Vec<u8>>,
+        key: Option<[u8; 32]>,
+        bits_per_unit: u8,
+        clear_payload: bool,
+        /// Buffers that already carried the full packet.
+        embedded_buffers: u64,
+        /// Buffers skipped (capacity or alignment limits); warned once per
+        /// reason.
+        skipped_buffers: u64,
+        warned: WarnFlags,
+    }
+
+    impl Default for StreamState {
+        fn default() -> Self {
+            Self {
+                packet: None,
+                key: None,
+                bits_per_unit: 1,
+                clear_payload: false,
+                embedded_buffers: 0,
+                skipped_buffers: 0,
+                warned: WarnFlags::default(),
+            }
+        }
+    }
+
+    impl StreamState {
+        /// Count a skipped buffer; returns true only the first time for the
+        /// reason so callers warn once per reason.
+        fn note_skip(&mut self, reason: SkipReason) -> bool {
+            self.skipped_buffers += 1;
+            let slot = self.warned.slot(reason);
+            let first = !*slot;
+            *slot = true;
+            first
+        }
+
+        /// Reset per-stream progress after a property change that alters the
+        /// placement or wire format: the next buffer starts from buffer 0.
+        fn reset_progress(&mut self) {
+            self.embedded_buffers = 0;
+            self.skipped_buffers = 0;
+            self.warned = WarnFlags::default();
+        }
+    }
 
     /// Per-element state.
     pub struct StegoAudio {
         info: parking_lot::Mutex<Option<AudioInfo>>,
-        key: parking_lot::Mutex<Option<[u8; 32]>>,
-        packet: parking_lot::Mutex<Option<Vec<u8>>>,
-        clear_payload: parking_lot::Mutex<bool>,
-        bits_per_unit: parking_lot::Mutex<u8>,
-        /// Buffers that already carried the full packet.
-        embedded_buffers: parking_lot::Mutex<u64>,
-        /// Buffers skipped (capacity or format limits); logged once.
-        skipped_buffers: parking_lot::Mutex<u64>,
-        /// Whether the keyed `clear-payload` warning was already emitted.
-        clear_unsupported_warned: parking_lot::Mutex<bool>,
+        /// Streaming parameters + counters; see [`StreamState`] for the
+        /// ordering contract.
+        stream: parking_lot::Mutex<StreamState>,
     }
 
     impl Default for StegoAudio {
         fn default() -> Self {
             Self {
                 info: parking_lot::Mutex::new(None),
-                key: parking_lot::Mutex::new(None),
-                packet: parking_lot::Mutex::new(None),
-                clear_payload: parking_lot::Mutex::new(false),
-                bits_per_unit: parking_lot::Mutex::new(1),
-                embedded_buffers: parking_lot::Mutex::new(0),
-                skipped_buffers: parking_lot::Mutex::new(0),
-                clear_unsupported_warned: parking_lot::Mutex::new(false),
+                stream: parking_lot::Mutex::new(StreamState::default()),
             }
         }
     }
@@ -102,10 +177,21 @@ mod imp {
             match pspec.name() {
                 "key-hex" => {
                     let hex = value.get::<String>().unwrap_or_default();
+                    let mut stream = self.stream.lock();
                     if hex.is_empty() {
-                        *self.key.lock() = None;
+                        if stream.key.take().is_some() {
+                            stream.reset_progress();
+                            gstreamer::info!(
+                                gstreamer::CAT_DEFAULT,
+                                imp = self,
+                                "key-hex cleared; sequential placement from the next buffer"
+                            );
+                        }
                     } else if let Some(key) = decode_key(&hex) {
-                        *self.key.lock() = Some(key);
+                        if stream.key != Some(key) {
+                            stream.key = Some(key);
+                            stream.reset_progress();
+                        }
                     } else {
                         gstreamer::warning!(
                             gstreamer::CAT_DEFAULT,
@@ -116,14 +202,33 @@ mod imp {
                 }
                 "packet-hex" => {
                     let hex = value.get::<String>().unwrap_or_default();
-                    *self.packet.lock() = decode_hex_fixed(&hex, hex.len() / 2);
+                    if hex.is_empty() {
+                        gstreamer::info!(
+                            gstreamer::CAT_DEFAULT,
+                            imp = self,
+                            "packet-hex cleared; embedding disabled"
+                        );
+                        self.stream.lock().packet = None;
+                    } else if let Some(bytes) = decode_hex_fixed(&hex, hex.len() / 2) {
+                        self.stream.lock().packet = Some(bytes);
+                    } else {
+                        gstreamer::warning!(
+                            gstreamer::CAT_DEFAULT,
+                            imp = self,
+                            "packet-hex must be valid even-length hex; keeping previous packet"
+                        );
+                    }
                 }
                 "clear-payload" => {
-                    *self.clear_payload.lock() = value.get::<bool>().unwrap_or(false);
+                    self.stream.lock().clear_payload = value.get::<bool>().unwrap_or(false);
                 }
                 "bits-per-unit" => {
-                    let bits = value.get::<u32>().unwrap_or(1).min(u8::MAX as u32) as u8;
-                    *self.bits_per_unit.lock() = bits;
+                    let bits = value.get::<u32>().unwrap_or(1).clamp(1, 4) as u8;
+                    let mut stream = self.stream.lock();
+                    if stream.bits_per_unit != bits {
+                        stream.bits_per_unit = bits;
+                        stream.reset_progress();
+                    }
                 }
                 _ => unimplemented!(),
             }
@@ -131,19 +236,19 @@ mod imp {
 
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
-                "key-hex" => match self.key.lock().as_ref() {
-                    Some(key) => hex_encode(*key).to_value(),
+                "key-hex" => match self.stream.lock().key {
+                    Some(key) => hex_encode(key).to_value(),
                     None => String::new().to_value(),
                 },
                 "packet-hex" => {
-                    let packet = self.packet.lock();
-                    match packet.as_deref() {
+                    let stream = self.stream.lock();
+                    match stream.packet.as_deref() {
                         Some(bytes) => hex_encode_slice(bytes).to_value(),
                         None => String::new().to_value(),
                     }
                 }
-                "clear-payload" => (*self.clear_payload.lock()).to_value(),
-                "bits-per-unit" => (*self.bits_per_unit.lock() as u32).to_value(),
+                "clear-payload" => self.stream.lock().clear_payload.to_value(),
+                "bits-per-unit" => (self.stream.lock().bits_per_unit as u32).to_value(),
                 _ => unimplemented!(),
             }
         }
@@ -166,11 +271,23 @@ mod imp {
         }
 
         fn pad_templates() -> &'static [gstreamer::PadTemplate] {
-            // Any-caps templates: set_caps enforces interleaved S16LE and
-            // pass-through keeps non-audio-raw formats negotiable.
+            // Restricted templates: negotiation fails loudly for anything
+            // outside interleaved S16LE, instead of silently passing buffers
+            // through unembedded. The set_caps gate stays as a backstop; the
+            // legacy AppSink/AppSrc filters negotiate their own caps and are
+            // unaffected.
             static PAD_TEMPLATES: std::sync::LazyLock<Vec<gstreamer::PadTemplate>> =
                 std::sync::LazyLock::new(|| {
-                    let caps = gstreamer::Caps::new_any();
+                    let caps = gstreamer::Caps::builder_full()
+                        .structure(
+                            gstreamer::Structure::builder("audio/x-raw")
+                                .field("format", "S16LE")
+                                .field("layout", "interleaved")
+                                .field("rate", gstreamer::IntRange::new(1, i32::MAX))
+                                .field("channels", gstreamer::IntRange::new(1, i32::MAX))
+                                .build(),
+                        )
+                        .build();
                     vec![
                         gstreamer::PadTemplate::new(
                             "sink",
@@ -221,12 +338,14 @@ mod imp {
             &self,
             buf: &mut gstreamer::BufferRef,
         ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
-            let packet = self.packet.lock().clone();
-            let Some(packet_bytes) = packet else {
+            // One short lock: snapshot the streaming parameters for this
+            // buffer so a concurrent property write cannot split the
+            // packet/key/bits triple or the buffer counter across the embed.
+            let snap = self.stream.lock().clone();
+            let Some(packet_bytes) = snap.packet.as_deref() else {
                 return Ok(gstreamer::FlowSuccess::Ok);
             };
-            let bits = *self.bits_per_unit.lock();
-            let Ok(config) = EmbeddingConfig::new(bits) else {
+            let Ok(config) = EmbeddingConfig::new(snap.bits_per_unit) else {
                 gstreamer::warning!(
                     gstreamer::CAT_PERFORMANCE,
                     imp = self,
@@ -253,48 +372,49 @@ mod imp {
             })?;
             let data = map.as_mut_slice();
             if data.len() % 2 != 0 {
-                note_skip(
-                    self,
+                self.note_skip(
+                    SkipReason::UnalignedBuffer,
                     "buffer length is not a whole number of S16 samples; passing through",
                 );
                 return Ok(gstreamer::FlowSuccess::Ok);
             }
 
-            let key = *self.key.lock();
-            let clear = *self.clear_payload.lock();
-            let already = *self.embedded_buffers.lock();
-
-            if key.is_some() && clear && already > 0 {
-                let mut warned = self.clear_unsupported_warned.lock();
-                if !*warned {
+            if snap.key.is_some() && snap.clear_payload && snap.embedded_buffers > 0 {
+                let first = {
+                    let mut stream = self.stream.lock();
+                    let first = !stream.warned.keyed_clear;
+                    stream.warned.keyed_clear = true;
+                    first
+                };
+                if first {
                     gstreamer::warning!(
                         gstreamer::CAT_PERFORMANCE,
+                        imp = self,
                         "clear-payload is unsupported with keyed placement; re-embedding every buffer"
                     );
-                    *warned = true;
                 }
-            } else if clear && already > 0 {
-                clear_packet_slots(data, packet_bytes.len(), bits);
-                *self.embedded_buffers.lock() += 1;
+            } else if snap.embedded_buffers > 0 && snap.clear_payload {
+                // Clear the packet slots (packet_len * 8 LSB bits at the
+                // leading sequential sample slots) and stop embedding after
+                // the first delivery buffer.
+                clear_packet_slots(data, packet_bytes.len(), snap.bits_per_unit);
+                self.stream.lock().embedded_buffers += 1;
                 return Ok(gstreamer::FlowSuccess::Ok);
             }
 
-            let result = match key {
-                // Frame-scoped keyed placement (see stegovideo): frame 0
-                // keeps the raw key, later frames mix the buffer counter in.
+            let result = match snap.key {
+                // Frame-scoped keyed placement (see stegovideo): buffer 0
+                // keeps the raw key, later buffers mix the buffer counter in.
                 Some(embedding_key) => {
-                    let frame_key = derive_frame_embedding_key(
-                        &embedding_key,
-                        *self.embedded_buffers.lock(),
-                    );
-                    KeyedAudioSpatialLsb::new(frame_key)
-                        .embed_packet(data, &packet_bytes, &config)
+                    let frame_key =
+                        derive_frame_embedding_key(&embedding_key, snap.embedded_buffers);
+                    KeyedAudioSpatialLsb::new(frame_key).embed_packet(data, packet_bytes, &config)
                 }
-                None => AudioSpatialLsb.embed_packet(data, &packet_bytes, &config),
+                None => AudioSpatialLsb.embed_packet(data, packet_bytes, &config),
             };
             match result {
                 Ok(report) => {
-                    *self.embedded_buffers.lock() += 1;
+                    self.stream.lock().embedded_buffers += 1;
                     gstreamer::debug!(
                         gstreamer::CAT_DEFAULT,
                         imp = self,
@@ -303,16 +423,21 @@ mod imp {
                         report.modified_units
                     );
                 }
-                Err(e) => {
-                    note_skip(
-                        self,
-                        &format!(
-                            "packet does not fit buffer capacity: {e}; buffer remains unembedded"
-                        ),
-                    );
-                }
+                Err(e) => self.note_skip(
+                    SkipReason::Capacity,
+                    &format!("packet does not fit buffer capacity: {e}; buffer remains unembedded"),
+                ),
             }
             Ok(gstreamer::FlowSuccess::Ok)
+        }
+    }
+
+    impl StegoAudio {
+        /// Count a skipped buffer and warn once per skip reason.
+        fn note_skip(&self, reason: SkipReason, message: &str) {
+            if self.stream.lock().note_skip(reason) {
+                gstreamer::warning!(gstreamer::CAT_PERFORMANCE, imp = self, "{}", message);
+            }
         }
     }
 
@@ -325,14 +450,6 @@ mod imp {
         for unit in 0..needed_units.min(max_units) {
             let slot = unit * 2;
             data[slot] &= mask;
-        }
-    }
-
-    fn note_skip(state: &StegoAudio, message: &str) {
-        let mut skipped = state.skipped_buffers.lock();
-        *skipped += 1;
-        if *skipped == 1 {
-            gstreamer::warning!(gstreamer::CAT_PERFORMANCE, "{}", message);
         }
     }
 }

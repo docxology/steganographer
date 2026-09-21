@@ -2,7 +2,11 @@
 //!
 //! Provides [`SignerBackend`] trait with implementations for:
 //! - [`Ed25519Backend`] — BLAKE3 hash + Ed25519 signature (default)
+//! - [`MlDsaBackend`] — ML-DSA (FIPS 204) post-quantum signatures (RustCrypto `ml-dsa` crate)
+//! - [`HybridBackend`] — dual Ed25519 + ML-DSA signatures
 //! - `EthereumBackend` — Keccak-256 hash + secp256k1 ECDSA with EIP-191 (feature-gated)
+//!
+//! Verification-only counterparts: [`Ed25519Verifier`], [`MlDsaVerifier`], [`HybridVerifier`].
 
 use anyhow::Result;
 
@@ -363,18 +367,17 @@ mod ethereum {
 pub use ethereum::{EthereumBackend, EthereumVerifier};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Post-Quantum (ML-DSA / FIPS 204 Parameterized) & Hybrid Backends
+// Post-Quantum ML-DSA (FIPS 204) & Hybrid Backends
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Post-Quantum ML-DSA (Module-Lattice-Based Digital Signature Standard, FIPS 204)
-/// compatible signature structure.
+/// FIPS 204 ML-DSA security levels, mapping 1:1 to the parameter sets of the
+/// RustCrypto [`ml-dsa`](https://crates.io/crates/ml-dsa) crate: `MlDsa44`,
+/// `MlDsa65`, `MlDsa87` (i.e. CRYSTALS-Dilithium, standardized as ML-DSA in
+/// FIPS 204).
 ///
-/// ML-DSA-44 produces 2,420 byte signatures with a 1,312 byte public key.
-/// ML-DSA-65 produces 3,309 byte signatures with a 1,952 byte public key.
-/// ML-DSA-87 produces 4,627 byte signatures with a 2,592 byte public key.
-///
-/// This backend implements deterministic lattice-structured signing over
-/// high-entropy Blake3/SHAKE-256 digests.
+/// Encoded sizes are exactly the FIPS 204 values:
+/// ML-DSA-44: 2,420-byte signature / 1,312-byte public key;
+/// ML-DSA-65: 3,309 / 1,952; ML-DSA-87: 4,627 / 2,592.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlDsaLevel {
     MlDsa44,
@@ -408,11 +411,68 @@ impl MlDsaLevel {
     }
 }
 
-/// ML-DSA post-quantum signature backend.
+use ml_dsa::{
+    EncodedVerifyingKey, Keypair as MlDsaKeypair, MlDsa44, MlDsa65, MlDsa87, MlDsaParams, Seed,
+    Signature as MlDsaSignature, Signer as MlDsaSigner, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
+};
+
+/// Runtime dispatch over the three FIPS 204 parameter sets for an ML-DSA
+/// signing key (in the `ml-dsa` crate, parameter sets are compile-time
+/// generics, so a level-erased backend needs an enum over the instantiations).
+enum MlDsaSigningKeyInner {
+    MlDsa44(MlDsaSigningKey<MlDsa44>),
+    MlDsa65(MlDsaSigningKey<MlDsa65>),
+    MlDsa87(MlDsaSigningKey<MlDsa87>),
+}
+
+/// Deterministic ML-DSA signing: FIPS 204 Algorithm 2 (`ML-DSA.Sign`),
+/// deterministic variant, empty context string — this is the mode the
+/// `ml-dsa` crate's `Signer` implementation uses in 0.1.1.
+fn mldsa_sign<P: MlDsaParams>(signing_key: &MlDsaSigningKey<P>, data: &[u8]) -> Vec<u8> {
+    MlDsaSigner::sign(signing_key, data).encode().to_vec()
+}
+
+/// ML-DSA verification: FIPS 204 Algorithm 3 (`ML-DSA.Verify`), empty
+/// context string, matching the signing context. `Signature::try_from`
+/// rejects wrong-length and structurally invalid encodings outright.
+fn mldsa_verify<P: MlDsaParams>(
+    verifying_key: &MlDsaVerifyingKey<P>,
+    data: &[u8],
+    signature: &[u8],
+) -> bool {
+    match MlDsaSignature::<P>::try_from(signature) {
+        Ok(sig) => verifying_key.verify_with_context(data, &[], &sig),
+        Err(_) => false,
+    }
+}
+
+/// ML-DSA post-quantum signature backend (FIPS 204), implemented with the
+/// RustCrypto [`ml-dsa`](https://crates.io/crates/ml-dsa) crate (v0.1.1,
+/// pure Rust; note that the crate has not been independently audited).
+///
+/// - Parameter sets: [`MlDsaLevel`] maps 1:1 to the crate's `MlDsa44` /
+///   `MlDsa65` / `MlDsa87`; signature and public-key sizes are the exact
+///   FIPS 204 encoded sizes (see [`MlDsaLevel`]).
+/// - Key generation: `from_seed` uses the caller's 32 bytes directly as the
+///   ml-dsa [`Seed`] — FIPS 204 Algorithm 6 (`ML-DSA.KeyGen_internal`), where
+///   SHAKE-256 expands the seed into ρ, ρ′ and K. The same seed always
+///   yields the same key pair.
+/// - Signing: deterministic ML-DSA (FIPS 204 Algorithm 2, deterministic
+///   variant, empty context string). Same seed + same message ⇒
+///   byte-identical signature.
+/// - Verification: real public-key verification (FIPS 204 Algorithm 3,
+///   `ML-DSA.Verify`, empty context string), also available without any
+///   private key material via [`MlDsaVerifier`].
+///
+/// # Migration note
+/// Signatures produced by the pre-0.8 placeholder implementation (keyed
+/// BLAKE3-XOF MACs over the private seed; its "public key" could not verify
+/// anything) are NOT verifiable by this backend or by [`MlDsaVerifier`].
+/// Payloads signed with that scheme must be re-signed.
 pub struct MlDsaBackend {
     level: MlDsaLevel,
-    private_seed: [u8; 32],
-    public_key: Vec<u8>,
+    signing_key: MlDsaSigningKeyInner,
 }
 
 impl MlDsaBackend {
@@ -424,18 +484,25 @@ impl MlDsaBackend {
     }
 
     /// Deterministically derive an ML-DSA keypair from a 32-byte seed.
+    ///
+    /// The seed is passed unchanged to `SigningKey::<P>::from_seed`
+    /// (FIPS 204 Algorithm 6). There is no extra domain separation between
+    /// levels beyond the level-dependent expansion inside ML-DSA itself.
     pub fn from_seed(level: MlDsaLevel, private_seed: [u8; 32]) -> Self {
-        let mut hasher = blake3::Hasher::new_keyed(&private_seed);
-        hasher.update(b"steganographer-mldsa-public-v1");
-        hasher.update(level.name().as_bytes());
-        let mut xof = hasher.finalize_xof();
-        let mut public_key = vec![0u8; level.public_key_size()];
-        xof.fill(&mut public_key);
-
+        let seed = Seed::from(private_seed);
         Self {
             level,
-            private_seed,
-            public_key,
+            signing_key: match level {
+                MlDsaLevel::MlDsa44 => {
+                    MlDsaSigningKeyInner::MlDsa44(MlDsaSigningKey::<MlDsa44>::from_seed(&seed))
+                }
+                MlDsaLevel::MlDsa65 => {
+                    MlDsaSigningKeyInner::MlDsa65(MlDsaSigningKey::<MlDsa65>::from_seed(&seed))
+                }
+                MlDsaLevel::MlDsa87 => {
+                    MlDsaSigningKeyInner::MlDsa87(MlDsaSigningKey::<MlDsa87>::from_seed(&seed))
+                }
+            },
         }
     }
 
@@ -450,26 +517,27 @@ impl SignerBackend for MlDsaBackend {
     }
 
     fn sign(&self, data: &[u8]) -> Vec<u8> {
-        let mut hasher = blake3::Hasher::new_keyed(&self.private_seed);
-        hasher.update(b"steganographer-mldsa-signature-v1");
-        hasher.update(self.level.name().as_bytes());
-        hasher.update(data);
-        let mut xof = hasher.finalize_xof();
-        let mut sig = vec![0u8; self.level.signature_size()];
-        xof.fill(&mut sig);
-        sig
+        match &self.signing_key {
+            MlDsaSigningKeyInner::MlDsa44(sk) => mldsa_sign(sk, data),
+            MlDsaSigningKeyInner::MlDsa65(sk) => mldsa_sign(sk, data),
+            MlDsaSigningKeyInner::MlDsa87(sk) => mldsa_sign(sk, data),
+        }
     }
 
     fn verify(&self, data: &[u8], signature: &[u8]) -> bool {
-        if signature.len() != self.level.signature_size() {
-            return false;
+        match &self.signing_key {
+            MlDsaSigningKeyInner::MlDsa44(sk) => mldsa_verify(&sk.verifying_key(), data, signature),
+            MlDsaSigningKeyInner::MlDsa65(sk) => mldsa_verify(&sk.verifying_key(), data, signature),
+            MlDsaSigningKeyInner::MlDsa87(sk) => mldsa_verify(&sk.verifying_key(), data, signature),
         }
-        let expected_sig = self.sign(data);
-        crate::carrier::constant_time_eq(signature, &expected_sig)
     }
 
     fn public_key_bytes(&self) -> Vec<u8> {
-        self.public_key.clone()
+        match &self.signing_key {
+            MlDsaSigningKeyInner::MlDsa44(sk) => sk.verifying_key().encode().to_vec(),
+            MlDsaSigningKeyInner::MlDsa65(sk) => sk.verifying_key().encode().to_vec(),
+            MlDsaSigningKeyInner::MlDsa87(sk) => sk.verifying_key().encode().to_vec(),
+        }
     }
 
     fn signature_size(&self) -> usize {
@@ -477,18 +545,92 @@ impl SignerBackend for MlDsaBackend {
     }
 
     fn display_identity(&self) -> String {
+        let public_key = self.public_key_bytes();
         format!(
             "{}:{}",
             self.level.name(),
-            hex_encode(&self.public_key[..16.min(self.public_key.len())])
+            hex_encode(&public_key[..16.min(public_key.len())])
         )
     }
 }
 
-/// Hybrid dual-signing backend combining classical (Ed25519) and post-quantum (ML-DSA) schemes.
+/// Verification-only ML-DSA verifier built from a public key.
 ///
-/// Produces a concatenated signature `(Ed25519_sig || ML-DSA_sig)` to allow seamless
-/// quantum-resistant migration while preserving legacy verifiability.
+/// Mirrors [`Ed25519Verifier`]: construct from raw FIPS 204 public-key bytes
+/// (exactly [`MlDsaLevel::public_key_size`] bytes for the given level) or
+/// from a typed `ml_dsa::VerifyingKey`, then verify signatures without any
+/// private key material.
+pub struct MlDsaVerifier {
+    level: MlDsaLevel,
+    /// Encoded FIPS 204 public key (Algorithm 22, `pkEncode`).
+    verifying_key: Vec<u8>,
+}
+
+impl MlDsaVerifier {
+    /// Create from a typed `ml_dsa::VerifyingKey`. `level` must match the
+    /// parameter set of `verifying_key` (checked in debug builds).
+    pub fn new<P: MlDsaParams>(level: MlDsaLevel, verifying_key: MlDsaVerifyingKey<P>) -> Self {
+        let encoded = verifying_key.encode();
+        debug_assert_eq!(encoded.len(), level.public_key_size());
+        Self {
+            level,
+            verifying_key: encoded.to_vec(),
+        }
+    }
+
+    /// Import from raw FIPS 204 public-key bytes
+    /// (`level.public_key_size()` bytes).
+    pub fn from_public_key_bytes(level: MlDsaLevel, bytes: &[u8]) -> Result<Self> {
+        anyhow::ensure!(
+            bytes.len() == level.public_key_size(),
+            "ML-DSA {} public key must be exactly {} bytes (got {})",
+            level.name(),
+            level.public_key_size(),
+            bytes.len()
+        );
+        Ok(Self {
+            level,
+            verifying_key: bytes.to_vec(),
+        })
+    }
+
+    /// The security level of this verifier's public key.
+    pub fn level(&self) -> MlDsaLevel {
+        self.level
+    }
+
+    /// Size (in bytes) of signatures verifiable by this verifier.
+    pub fn signature_size(&self) -> usize {
+        self.level.signature_size()
+    }
+
+    /// Verify a signature over `data` (FIPS 204 Algorithm 3, empty context
+    /// string). Returns `true` only for a signature produced by the matching
+    /// signing key.
+    pub fn verify(&self, data: &[u8], signature: &[u8]) -> bool {
+        match self.level {
+            MlDsaLevel::MlDsa44 => self.verify_with::<MlDsa44>(data, signature),
+            MlDsaLevel::MlDsa65 => self.verify_with::<MlDsa65>(data, signature),
+            MlDsaLevel::MlDsa87 => self.verify_with::<MlDsa87>(data, signature),
+        }
+    }
+
+    fn verify_with<P: MlDsaParams>(&self, data: &[u8], signature: &[u8]) -> bool {
+        match EncodedVerifyingKey::<P>::try_from(&self.verifying_key[..]) {
+            Ok(encoded) => mldsa_verify(&MlDsaVerifyingKey::<P>::decode(&encoded), data, signature),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Hybrid dual-signing backend combining classical (Ed25519) and post-quantum
+/// (ML-DSA / FIPS 204) schemes.
+///
+/// Produces a concatenated signature `(Ed25519_sig || ML-DSA_sig)` and a
+/// concatenated public key `(Ed25519_pk(32) || ML-DSA_pk)` to allow seamless
+/// quantum-resistant migration while preserving legacy verifiability. Both
+/// halves are real signatures; verification (via [`SignerBackend::verify`] or
+/// [`HybridVerifier`]) requires BOTH to be valid.
 pub struct HybridBackend {
     ed25519: Ed25519Backend,
     mldsa: MlDsaBackend,
@@ -550,12 +692,60 @@ impl SignerBackend for HybridBackend {
     }
 }
 
+/// Verification-only hybrid verifier built from public keys.
+///
+/// Mirrors [`HybridBackend`]'s concatenated layouts: `from_public_key_bytes`
+/// parses `(Ed25519_pk(32) || ML-DSA_pk)` and `verify` splits
+/// `(Ed25519_sig || ML-DSA_sig)`, requiring BOTH halves to be valid.
+pub struct HybridVerifier {
+    ed25519: Ed25519Verifier,
+    mldsa: MlDsaVerifier,
+}
+
+impl HybridVerifier {
+    /// Create from separately built verifiers. The ML-DSA verifier fixes the
+    /// security level of the PQ half.
+    pub fn new(ed25519: Ed25519Verifier, mldsa: MlDsaVerifier) -> Self {
+        Self { ed25519, mldsa }
+    }
+
+    /// Import from concatenated public-key bytes `(Ed25519_pk(32) || ML-DSA_pk)`.
+    pub fn from_public_key_bytes(level: MlDsaLevel, bytes: &[u8]) -> Result<Self> {
+        anyhow::ensure!(
+            bytes.len() == 32 + level.public_key_size(),
+            "hybrid public key must be 32 + {} bytes (got {})",
+            level.public_key_size(),
+            bytes.len()
+        );
+        let (ed_pk, mldsa_pk) = bytes.split_at(32);
+        let ed_bytes: [u8; 32] = ed_pk
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("hybrid public key Ed25519 half must be 32 bytes"))?;
+        Ok(Self {
+            ed25519: Ed25519Verifier::from_bytes(&ed_bytes)?,
+            mldsa: MlDsaVerifier::from_public_key_bytes(level, mldsa_pk)?,
+        })
+    }
+
+    /// Verify a hybrid signature over `data`. Both the Ed25519 and the
+    /// ML-DSA half must be valid.
+    pub fn verify(&self, data: &[u8], signature: &[u8]) -> bool {
+        let ed_len = 64;
+        let pq_len = self.mldsa.signature_size();
+        if signature.len() != ed_len + pq_len {
+            return false;
+        }
+        self.ed25519.verify(data, &signature[..ed_len])
+            && self.mldsa.verify(data, &signature[ed_len..])
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests for Ed25519Backend
+// Tests for the signing backends and verifiers
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -621,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    fn test_mldsa_sizes_exact_fips204() {
+        for (level, sig_size, pk_size) in [
+            (MlDsaLevel::MlDsa44, 2420, 1312),
+            (MlDsaLevel::MlDsa65, 3309, 1952),
+            (MlDsaLevel::MlDsa87, 4627, 2592),
+        ] {
+            let backend = MlDsaBackend::generate(level);
+            assert_eq!(level.signature_size(), sig_size);
+            assert_eq!(level.public_key_size(), pk_size);
+            assert_eq!(backend.signature_size(), sig_size);
+            assert_eq!(backend.sign(b"size check").len(), sig_size);
+            assert_eq!(backend.public_key_bytes().len(), pk_size);
+        }
+    }
+
+    #[test]
     fn test_mldsa_sign_verify_all_levels() {
         for level in [
             MlDsaLevel::MlDsa44,
@@ -634,7 +840,125 @@ mod tests {
             assert_eq!(backend.public_key_bytes().len(), level.public_key_size());
             assert!(backend.verify(data, &sig));
             assert!(!backend.verify(b"tampered data", &sig));
+            // Real lattice signature, not an input-appended MAC: the
+            // signature must not be a deterministic function of the message
+            // alone that a third party without the key could re-derive.
+            assert_ne!(&sig[..32], &data[..32.min(data.len())]);
         }
+    }
+
+    #[test]
+    fn test_mldsa_keygen_and_signing_deterministic() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let seed = [0x42u8; 32];
+            let a = MlDsaBackend::from_seed(level, seed);
+            let b = MlDsaBackend::from_seed(level, seed);
+            let data = b"deterministic keygen and signing";
+            assert_eq!(a.public_key_bytes(), b.public_key_bytes());
+            assert_eq!(a.sign(data), b.sign(data));
+            // And the independent backend verifies the shared signature.
+            assert!(b.verify(data, &a.sign(data)));
+        }
+    }
+
+    #[test]
+    fn test_mldsa_wrong_key_fails() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let a = MlDsaBackend::from_seed(level, [1u8; 32]);
+            let b = MlDsaBackend::from_seed(level, [2u8; 32]);
+            assert_ne!(a.public_key_bytes(), b.public_key_bytes());
+            let data = b"frame data";
+            let sig = a.sign(data);
+            assert!(a.verify(data, &sig));
+            assert!(!b.verify(data, &sig));
+        }
+    }
+
+    #[test]
+    fn test_mldsa_tampered_signature_fails() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let backend = MlDsaBackend::from_seed(level, [3u8; 32]);
+            let data = b"frame data";
+            let sig = backend.sign(data);
+            assert!(backend.verify(data, &sig));
+            // Flip a byte in the c̃ region (start)…
+            let mut sig_start = sig.clone();
+            sig_start[0] ^= 0x01;
+            assert!(!backend.verify(data, &sig_start));
+            // …and in the hint region (end).
+            let mut sig_end = sig.clone();
+            let n = sig_end.len();
+            sig_end[n - 1] ^= 0x80;
+            assert!(!backend.verify(data, &sig_end));
+        }
+    }
+
+    #[test]
+    fn test_mldsa_wrong_message_fails() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let backend = MlDsaBackend::from_seed(level, [4u8; 32]);
+            let sig = backend.sign(b"original message");
+            assert!(!backend.verify(b"original message!", &sig));
+        }
+    }
+
+    #[test]
+    fn test_mldsa_verifier_from_public_key_bytes() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let backend = MlDsaBackend::from_seed(level, [5u8; 32]);
+            let verifier =
+                MlDsaVerifier::from_public_key_bytes(level, &backend.public_key_bytes()).unwrap();
+            assert_eq!(verifier.level(), level);
+            assert_eq!(verifier.signature_size(), level.signature_size());
+            let data = b"public-key-only verification";
+            let sig = backend.sign(data);
+            assert!(verifier.verify(data, &sig));
+            assert!(!verifier.verify(b"wrong message", &sig));
+            // Wrong key.
+            let other = MlDsaBackend::from_seed(level, [6u8; 32]);
+            assert!(!verifier.verify(data, &other.sign(data)));
+            // Tampered signature.
+            let mut tampered = sig.clone();
+            tampered[16] ^= 0xff;
+            assert!(!verifier.verify(data, &tampered));
+            // Wrong-length public keys are rejected at import.
+            assert!(MlDsaVerifier::from_public_key_bytes(
+                level,
+                &vec![0u8; level.public_key_size() - 1]
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn test_mldsa_verifier_from_typed_verifying_key() {
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::Seed::from([11u8; 32]));
+        let verifier = MlDsaVerifier::new(MlDsaLevel::MlDsa44, sk.verifying_key());
+        let backend = MlDsaBackend::from_seed(MlDsaLevel::MlDsa44, [11u8; 32]);
+        let data = b"typed verifying key";
+        let sig = backend.sign(data);
+        assert!(verifier.verify(data, &sig));
+        assert!(!verifier.verify(b"wrong message", &sig));
     }
 
     #[test]
@@ -645,5 +969,52 @@ mod tests {
         assert_eq!(sig.len(), 64 + 2420);
         assert!(backend.verify(data, &sig));
         assert!(!backend.verify(b"tampered", &sig));
+    }
+
+    #[test]
+    fn test_hybrid_tamper_each_half_fails() {
+        let backend = HybridBackend::generate(MlDsaLevel::MlDsa44);
+        let data = b"hybrid tamper test";
+        let sig = backend.sign(data);
+        assert!(backend.verify(data, &sig));
+        // Ed25519 half (first 64 bytes).
+        let mut sig_ed = sig.clone();
+        sig_ed[0] ^= 0x01;
+        assert!(!backend.verify(data, &sig_ed));
+        // ML-DSA half.
+        let mut sig_pq = sig.clone();
+        let n = sig_pq.len();
+        sig_pq[n - 1] ^= 0x01;
+        assert!(!backend.verify(data, &sig_pq));
+    }
+
+    #[test]
+    fn test_hybrid_verifier_from_public_key_bytes() {
+        let backend = HybridBackend::generate(MlDsaLevel::MlDsa44);
+        let pk = backend.public_key_bytes();
+        assert_eq!(pk.len(), 32 + 1312);
+        let verifier = HybridVerifier::from_public_key_bytes(MlDsaLevel::MlDsa44, &pk).unwrap();
+        let data = b"hybrid public-key-only verification";
+        let sig = backend.sign(data);
+        assert_eq!(sig.len(), 64 + 2420);
+        assert!(verifier.verify(data, &sig));
+        assert!(!verifier.verify(b"other message", &sig));
+        // Wrong key.
+        let other = HybridBackend::generate(MlDsaLevel::MlDsa44);
+        assert!(!verifier.verify(data, &other.sign(data)));
+        // Tampered Ed25519 half.
+        let mut sig_ed = sig.clone();
+        sig_ed[10] ^= 0x01;
+        assert!(!verifier.verify(data, &sig_ed));
+        // Tampered ML-DSA half.
+        let mut sig_pq = sig.clone();
+        let n = sig_pq.len();
+        sig_pq[n - 1] ^= 0x01;
+        assert!(!verifier.verify(data, &sig_pq));
+        // Malformed public-key length is rejected at import.
+        assert!(
+            HybridVerifier::from_public_key_bytes(MlDsaLevel::MlDsa44, &pk[..pk.len() - 1])
+                .is_err()
+        );
     }
 }

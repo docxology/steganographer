@@ -196,19 +196,9 @@ pub fn split(
 
     let mut shards = Vec::with_capacity(n);
 
-    // Shard 0: payload XOR mask_0
-    let mut shard0 = [0u8; SignaturePayload::SERIALIZED_SIZE];
-    for i in 0..payload_bytes.len() {
-        shard0[i] = payload_bytes[i] ^ masks[0][i];
-    }
-
-    // For n=2: shard_1 = mask_0
-    // For n=3: shard_1 = mask_0, shard_2 = mask_1
-    // (but we need: shard_0 XOR shard_1 XOR ... XOR shard_{n-1} = payload)
-    // So shard_0 = payload XOR mask_0 XOR mask_1 XOR ... XOR mask_{n-2}
-    // And shard_i = mask_{i-1} for i = 1..n-1
-
-    // Recompute shard 0 with all masks XORed
+    // shard_i = mask_{i-1} for i = 1..n-1, and
+    // shard_0 = payload XOR mask_0 XOR ... XOR mask_{n-2}
+    // so that shard_0 XOR shard_1 XOR ... XOR shard_{n-1} = payload.
     let mut all_masks_xor = [0u8; SignaturePayload::SERIALIZED_SIZE];
     for mask in masks.iter().take(n - 1) {
         for (acc, &byte) in all_masks_xor.iter_mut().zip(mask.iter()) {
@@ -216,6 +206,7 @@ pub fn split(
         }
     }
 
+    let mut shard0 = [0u8; SignaturePayload::SERIALIZED_SIZE];
     for i in 0..payload_bytes.len() {
         shard0[i] = payload_bytes[i] ^ all_masks_xor[i];
     }

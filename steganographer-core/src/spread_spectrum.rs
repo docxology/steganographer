@@ -14,14 +14,21 @@
 //!    making it difficult for an attacker to detect or remove the
 //!    watermark without the key.
 //!
-//! ## Algorithm
-//!
-//! For each payload bit `b`:
+//! For each payload bit `b` (host-canceling **differential** modulation):
 //! 1. Generate a PN sequence `pn[i] ∈ {-1, +1}` of length `spread_factor`
 //!    using a keyed PRNG.
-//! 2. For each pixel in the spread region: `pixel += pn[i] * amplitude * (2*b - 1)`
-//! 3. Extraction: compute `correlation = Σ(pixel[i] * pn[i])` over the
-//!    spread region. If `correlation > threshold`, bit = 1; else bit = 0.
+//! 2. Embed into *differential pairs*: the byte at `2i` receives
+//!    `+amplitude * pn[2i] * s` and the byte at `2i+1` receives
+//!    `-amplitude * pn[2i] * s`, where `s = +1` for bit 1 and `-1` for bit 0.
+//! 3. Extraction sums `(pixel[2i] − pixel[2i+1]) * pn[2i]` over the pairs.
+//!    The embedded signal contributes `+amplitude·spread` (bit 1) or
+//!    `−amplitude·spread` (bit 0), while the host contribution reduces to the
+//!    *adjacent-pixel differences* `Σ (host[2i] − host[2i+1]) * pn[2i]` —
+//!    near zero for natural imagery. The old absolute-correlation scheme
+//!    (`Σ (pixel[i] − 128) * pn[i]`) left the host term un-cancelled with
+//!    std ≈ σ_host·√spread, which exceeds the signal margin on real carriers
+//!    and corrupts ~35% of bits. If `spread_factor` is odd, the final byte
+//!    of each region is left unused.
 //!
 //! ## Parameters
 //!
@@ -60,20 +67,35 @@ impl SpreadSpectrumVideo {
     /// * `key` — 32-byte secret key for PN sequence generation.
     /// * `amplitude` — Embedding strength (1–5 recommended).
     /// * `spread_factor` — Pixels per payload bit (32–256 recommended).
+    ///
+    /// # Panics
+    /// Panics if `amplitude <= 0` or `spread_factor < 8`. For fallible
+    /// construction, use [`try_new`](Self::try_new).
     pub fn new(key: [u8; 32], amplitude: i32, spread_factor: usize) -> Self {
-        assert!(amplitude > 0, "Amplitude must be positive");
-        assert!(spread_factor > 0, "Spread factor must be positive");
-        assert!(spread_factor >= 8, "Spread factor must be at least 8");
-        Self {
-            key,
-            amplitude,
-            spread_factor,
-        }
+        Self::try_new(key, amplitude, spread_factor).expect("invalid spread-spectrum parameters")
     }
 
     /// Create with default parameters.
     pub fn with_key(key: [u8; 32]) -> Self {
         Self::new(key, DEFAULT_AMPLITUDE, DEFAULT_SPREAD)
+    }
+
+    /// Create a new spread-spectrum video module, returning an error on
+    /// invalid parameters.
+    ///
+    /// Use this when parameters come from untrusted input (config, CLI args).
+    pub fn try_new(key: [u8; 32], amplitude: i32, spread_factor: usize) -> anyhow::Result<Self> {
+        if amplitude <= 0 {
+            anyhow::bail!("Amplitude must be positive, got {}", amplitude);
+        }
+        if spread_factor < 8 {
+            anyhow::bail!("Spread factor must be at least 8, got {}", spread_factor);
+        }
+        Ok(Self {
+            key,
+            amplitude,
+            spread_factor,
+        })
     }
 
     /// Returns the secret key used for PN sequence generation.
@@ -96,27 +118,55 @@ impl SpreadSpectrumVideo {
             .collect()
     }
 
-    /// Embed a single bit at a given offset in the pixel data.
-    fn embed_bit(&self, data: &mut [u8], start: usize, bit: u8, bit_pos: usize, frame_index: u64) {
+    /// Embed a single bit at a given offset in the pixel data using
+    /// deterministic differential-pair modulation: every adjacent pair's
+    /// difference is forced to `sign * 2 * amplitude` along the pair's PN
+    /// direction (both pixels moved toward the midpoint, clamped). The
+    /// region length is `spread_factor` bytes (an odd trailing byte is
+    /// left unused).
+    pub fn embed_bit(
+        &self,
+        data: &mut [u8],
+        start: usize,
+        bit: u8,
+        bit_pos: usize,
+        frame_index: u64,
+    ) {
         let region = &mut data[start..start + self.spread_factor];
         let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
-        let sign = if bit == 1 { 1 } else { -1 };
-
-        for (i, pixel) in region.iter_mut().enumerate() {
-            let val = *pixel as i32 + pn[i] * self.amplitude * sign;
-            *pixel = val.clamp(0, 255) as u8;
+        // Deterministic differential modulation: force each adjacent pair's
+        // difference to `sign * 2 * amplitude` * the pair's PN direction
+        // (both pixels adjusted toward the pair midpoint, clamped). The
+        // extractor below correlates pair differences with the PN sequence;
+        // because the difference is fully determined by the embedded sign,
+        // live pairs contribute exactly `sign * 2 * amplitude` and
+        // fully-clamped ("dead") pairs contribute 0 — host-texture noise
+        // cancels exactly instead of merely to adjacent-pixel differences.
+        let target: i32 = 2 * self.amplitude * if bit == 1 { 1 } else { -1 };
+        for i in 0..self.spread_factor / 2 {
+            let pn_dir: i32 = if pn[2 * i] > 0 { 1 } else { -1 };
+            let diff = target * pn_dir;
+            let mid = (region[2 * i] as i32 + region[2 * i + 1] as i32) / 2;
+            let a = (mid + diff / 2).clamp(0, 255);
+            let b = a - diff;
+            region[2 * i] = a as u8;
+            region[2 * i + 1] = b.clamp(0, 255) as u8;
         }
     }
 
-    /// Extract a single bit from a given offset in the pixel data.
-    fn extract_bit(&self, data: &[u8], start: usize, bit_pos: usize, frame_index: u64) -> u8 {
+    /// Extract a single bit from a given offset in the pixel data by
+    /// correlating adjacent-pixel differences with the PN sequence. The
+    /// host contribution cancels to adjacent-pixel differences instead of
+    /// absolute deviations from 128.
+    pub fn extract_bit(&self, data: &[u8], start: usize, bit_pos: usize, frame_index: u64) -> u8 {
         let region = &data[start..start + self.spread_factor];
         let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
 
-        let correlation: i64 = region
-            .iter()
-            .zip(pn.iter())
-            .map(|(pixel, pn_val)| (*pixel as i64 - 128) * *pn_val as i64)
+        let correlation: i64 = (0..self.spread_factor / 2)
+            .map(|i| {
+                let diff = region[2 * i] as i64 - region[2 * i + 1] as i64;
+                diff * pn[2 * i] as i64
+            })
             .sum();
 
         if correlation > 0 {
@@ -211,15 +261,30 @@ pub struct SpreadSpectrumAudio {
 
 impl SpreadSpectrumAudio {
     /// Create a new spread-spectrum audio module.
+    ///
+    /// # Panics
+    /// Panics if `amplitude <= 0` or `spread_factor < 8`. For fallible
+    /// construction, use [`try_new`](Self::try_new).
     pub fn new(key: [u8; 32], amplitude: i32, spread_factor: usize) -> Self {
-        assert!(amplitude > 0, "Amplitude must be positive");
-        assert!(spread_factor > 0, "Spread factor must be positive");
-        assert!(spread_factor >= 8, "Spread factor must be at least 8");
-        Self {
+        Self::try_new(key, amplitude, spread_factor).expect("invalid spread-spectrum parameters")
+    }
+
+    /// Create a new spread-spectrum audio module, returning an error on
+    /// invalid parameters.
+    ///
+    /// Use this when parameters come from untrusted input (config, CLI args).
+    pub fn try_new(key: [u8; 32], amplitude: i32, spread_factor: usize) -> anyhow::Result<Self> {
+        if amplitude <= 0 {
+            anyhow::bail!("Amplitude must be positive, got {}", amplitude);
+        }
+        if spread_factor < 8 {
+            anyhow::bail!("Spread factor must be at least 8, got {}", spread_factor);
+        }
+        Ok(Self {
             key,
             amplitude,
             spread_factor,
-        }
+        })
     }
 
     /// Create with default parameters.
@@ -239,6 +304,64 @@ impl SpreadSpectrumAudio {
             .map(|_| if rng.gen::<bool>() { 1 } else { -1 })
             .collect()
     }
+
+    /// `start`, using deterministic differential-pair modulation: each
+    /// adjacent pair's difference is forced to `sign * 2 * amplitude` along
+    /// the pair's PN direction (see the video `embed_bit` for the rationale).
+    /// An odd trailing sample is left unused.
+    pub fn embed_bit(
+        &self,
+        samples: &mut [i16],
+        start: usize,
+        bit: u8,
+        bit_pos: usize,
+        frame_index: u64,
+    ) {
+        let region = &mut samples[start..start + self.spread_factor];
+        let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
+        // Deterministic differential modulation (see the video embed_bit for
+        // the full rationale): each adjacent pair's difference is forced to
+        // `sign * 2 * amplitude` * the pair's PN direction, so live pairs
+        // contribute exactly `sign * 2 * amplitude` to the correlation and
+        // fully-clamped pairs contribute 0 — host noise cancels exactly.
+        let target: i32 = 2 * self.amplitude * if bit == 1 { 1 } else { -1 };
+        for i in 0..self.spread_factor / 2 {
+            let pn_dir: i32 = if pn[2 * i] > 0 { 1 } else { -1 };
+            let diff = target * pn_dir;
+            let mid = (region[2 * i] as i32 + region[2 * i + 1] as i32) / 2;
+            let a = (mid + diff / 2).clamp(-32768, 32767);
+            let b = a - diff;
+            region[2 * i] = a as i16;
+            region[2 * i + 1] = b.clamp(-32768, 32767) as i16;
+        }
+    }
+
+    /// Extract a single bit from `spread_factor` audio samples starting at
+    /// `start` by correlating adjacent-sample differences with the PN
+    /// sequence (host-canceling differential detection).
+    pub fn extract_bit(
+        &self,
+        samples: &[i16],
+        start: usize,
+        bit_pos: usize,
+        frame_index: u64,
+    ) -> u8 {
+        let region = &samples[start..start + self.spread_factor];
+        let pn = self.pn_sequence(self.spread_factor, bit_pos, frame_index);
+
+        let correlation: i64 = (0..self.spread_factor / 2)
+            .map(|i| {
+                let diff = region[2 * i] as i64 - region[2 * i + 1] as i64;
+                diff * pn[2 * i] as i64
+            })
+            .sum();
+
+        if correlation > 0 {
+            1
+        } else {
+            0
+        }
+    }
 }
 
 impl AudioStegoModule for SpreadSpectrumAudio {
@@ -251,32 +374,13 @@ impl AudioStegoModule for SpreadSpectrumAudio {
             Some(s) => s,
             None => return Ok(()),
         };
-
         let payload_bytes = sig.to_bytes();
-        let total_bits = payload_bytes.len() * 8;
-        let needed = total_bits * self.spread_factor;
-
-        if needed > buf.samples.len() {
-            anyhow::bail!(
-                "Not enough capacity for audio spread-spectrum: need {} samples, have {}",
-                needed,
-                buf.samples.len()
-            );
-        }
-
         for (byte_idx, byte) in payload_bytes.iter().enumerate() {
             for bit_in_byte in 0..8 {
                 let bit = (byte >> bit_in_byte) & 1;
                 let payload_bit_pos = byte_idx * 8 + bit_in_byte;
                 let start = payload_bit_pos * self.spread_factor;
-                let region = &mut buf.samples[start..start + self.spread_factor];
-                let pn = self.pn_sequence(self.spread_factor, payload_bit_pos, buf.frame_index);
-                let sign = if bit == 1 { 1 } else { -1 };
-
-                for (i, sample) in region.iter_mut().enumerate() {
-                    let val = *sample as i32 + pn[i] * self.amplitude * sign;
-                    *sample = val.clamp(-32768, 32767) as i16;
-                }
+                self.embed_bit(buf.samples, start, bit, payload_bit_pos, buf.frame_index);
             }
         }
 
@@ -297,18 +401,8 @@ impl AudioStegoModule for SpreadSpectrumAudio {
             for bit_in_byte in 0..8 {
                 let payload_bit_pos = byte_idx * 8 + bit_in_byte;
                 let start = payload_bit_pos * self.spread_factor;
-                let region = &buf.samples[start..start + self.spread_factor];
-                let pn = self.pn_sequence(self.spread_factor, payload_bit_pos, buf.frame_index);
-
-                let correlation: i64 = region
-                    .iter()
-                    .zip(pn.iter())
-                    .map(|(sample, pn_val)| (*sample as i64) * (*pn_val as i64))
-                    .sum();
-
-                if correlation > 0 {
-                    *byte |= 1 << bit_in_byte;
-                }
+                let bit = self.extract_bit(buf.samples, start, payload_bit_pos, buf.frame_index);
+                *byte |= bit << bit_in_byte;
             }
         }
 
@@ -577,6 +671,140 @@ mod tests {
         // (may fail occasionally due to RNG, but high amplitude helps)
         if let Some(ref ext) = extracted {
             assert_eq!(ext.frame_index, 0);
+        }
+    }
+    /// Deterministic pseudo-random textured carrier: a slowly-varying base
+    /// pattern (large σ_host, small adjacent-pixel differences) plus small
+    /// LCG texture noise — shaped like natural imagery.
+    fn textured_carrier(len: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(len);
+        let mut lcg = 0x2545F4914F6CDD1Du64;
+        for i in 0..len {
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let noise = ((lcg >> 33) % 9) as i32 - 4; // ±4 texture noise
+                                                      // Base pattern steps every 8 pixels across a ±50 span around 128.
+            let base = 128 + ((i as i32 / 8) % 100) - 50;
+            data.push((base + noise).clamp(0, 255) as u8);
+        }
+        data
+    }
+
+    #[test]
+    fn test_textured_carrier_roundtrip() {
+        // OLD SCHEME (absolute correlation Σ(pixel−128)·pn) FAILS on this
+        // carrier: the un-cancelled host term has std ≈ σ_host·√spread.
+        // Here σ_host ≈ 29 (base pattern spanning ±50), spread = 64, so host
+        // noise std ≈ 232 vs. a signal margin of amplitude·spread = 192
+        // (amplitude 3) — a per-bit error rate of ≈ 20% (Gaussian tail),
+        // corrupting effectively every payload. On uniform-random pixels
+        // (σ_host ≈ 73.6) it is ≈ 35% per bit. The host-canceling
+        // differential modulation below cancels the host term down to
+        // adjacent-pixel differences (std ≈ 60 here), so exact recovery
+        // holds; this test asserts EXACT bit recovery.
+        let signer = Signer::generate();
+        let payload = signer.sign_frame(7, b"textured carrier test", None);
+
+        let total_bits = SignaturePayload::SERIALIZED_SIZE * 8;
+        let spread = DEFAULT_SPREAD;
+        let mut data = textured_carrier(total_bits * spread);
+        let original = data.clone();
+        let mut ss = SpreadSpectrumVideo::new(test_key(), 5, spread);
+
+        {
+            let mut frame = VideoFrame {
+                width: 2048,
+                height: (data.len() / (2048 * 3)) as u32,
+                stride: 2048 * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 7,
+            };
+            ss.embed(&mut frame, Some(&payload)).unwrap();
+        }
+
+        // Embedded region must be non-constant and differ from the carrier.
+        assert_ne!(
+            &data[..total_bits * spread],
+            &original[..total_bits * spread]
+        );
+
+        // Exact bit-level recovery via the public bit helpers.
+        for bit_pos in 0..total_bits {
+            let byte = payload.to_bytes()[bit_pos / 8];
+            let expected = (byte >> (bit_pos % 8)) & 1;
+            let got = ss.extract_bit(&data, bit_pos * spread, bit_pos, 7);
+            assert_eq!(got, expected, "bit {} mismatch", bit_pos);
+        }
+
+        // Full payload roundtrip through the trait API.
+        let mut data2 = textured_carrier(total_bits * spread);
+        let mut frame = VideoFrame {
+            width: 2048,
+            height: (data2.len() / (2048 * 3)) as u32,
+            stride: 2048 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data2,
+            frame_index: 7,
+        };
+        ss.embed(&mut frame, Some(&payload)).unwrap();
+        let extracted = ss.extract(&frame).unwrap();
+        assert!(
+            extracted.is_some(),
+            "should extract payload from textured carrier"
+        );
+        let extracted = extracted.unwrap();
+        assert_eq!(extracted.frame_index, 7);
+        assert_eq!(extracted.hash, payload.hash);
+        assert_eq!(extracted.signature, payload.signature);
+    }
+
+    #[test]
+    fn test_bit_helpers_differential_roundtrip() {
+        // Bit-level helpers: embed alternating bits into a textured carrier
+        // at distinct regions and recover them exactly.
+        let spread = 64;
+        let ss = SpreadSpectrumVideo::new(test_key(), 5, spread);
+        let mut data = textured_carrier(8 * spread * 2);
+        for k in 0..8 {
+            let bit = (k % 2) as u8;
+            ss.embed_bit(&mut data, k * spread, bit, k, 0);
+        }
+        for k in 0..8 {
+            assert_eq!(ss.extract_bit(&data, k * spread, k, 0), (k % 2) as u8);
+        }
+    }
+
+    #[test]
+    fn test_try_new_rejects_invalid_params() {
+        let key = test_key();
+        assert!(SpreadSpectrumVideo::try_new(key, 0, 64).is_err());
+        assert!(SpreadSpectrumVideo::try_new(key, -1, 64).is_err());
+        assert!(SpreadSpectrumVideo::try_new(key, 3, 7).is_err());
+        assert!(SpreadSpectrumVideo::try_new(key, 3, 64).is_ok());
+        assert!(SpreadSpectrumAudio::try_new(key, 0, 64).is_err());
+        assert!(SpreadSpectrumAudio::try_new(key, 3, 7).is_err());
+        assert!(SpreadSpectrumAudio::try_new(key, 3, 64).is_ok());
+        // new() still works for valid input (delegates to try_new).
+        assert_eq!(SpreadSpectrumVideo::new(key, 3, 64).amplitude, 3);
+        assert_eq!(SpreadSpectrumAudio::new(key, 3, 64).amplitude, 3);
+    }
+
+    #[test]
+    fn test_audio_bit_helpers_differential_roundtrip() {
+        let spread = 64;
+        let ss = SpreadSpectrumAudio::new(test_key(), 5, spread);
+        let mut samples = vec![0i16; 8 * spread];
+        for k in 0..8 {
+            let bit = (k / 2 % 2) as u8;
+            ss.embed_bit(&mut samples, k * spread, bit, k, 3);
+        }
+        for k in 0..8 {
+            assert_eq!(
+                ss.extract_bit(&samples, k * spread, k, 3),
+                (k / 2 % 2) as u8
+            );
         }
     }
 }

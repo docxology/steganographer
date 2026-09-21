@@ -6,7 +6,9 @@ Web-based live dashboard for real-time round-trip steganography verification wit
 
 ## Features
 
-- **Three-tab interface**: Video | Audio | Documentation — switch between media and docs
+- **Three-tab interface**: Video | Audio | Documentation (plus an OpenTimestamps panel served from `/ots.js`) — switch between media and docs
+- **Real signature verification**: decode handlers verify the extracted signature against the pre-embed bytes using the session-wide keypair's public half (`DashboardState.signer`), so a frame signed by the encode side verifies on the decode side
+- **WebSocket security gates**: cross-origin upgrades are rejected with 403 (loopback/same-host origins only); when `--auth-token` is set, upgrades require `?token=<token>` or a `Sec-WebSocket-Protocol: bearer-<token>` subprotocol (401 otherwise); decoded messages capped at 4 MiB, WS frames at 1 MiB
 - **Dual-panel encode/decode**: Left panel shows raw feed, right panel shows decoded payload + verification
 - **Dynamic LSB configuration**: Change LSB bits (1–4) live via slider — encode and decode stay in sync
 - **Signature preview**: First 16 bytes of the Ed25519/secp256k1 signature displayed in decoded payload
