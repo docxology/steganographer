@@ -59,8 +59,9 @@ fn test_state() -> Arc<DashboardState> {
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
         transport: TransportPolicy::Auto,
-        // Hardened session-wide signer/audio key (unused by the DataChannel
-        // path, but required by the shared DashboardState).
+        // Session-wide signer: the DataChannel pump signs with this key
+        // (process_encode_frame) and the verify worker checks against its
+        // public half. Audio key unused by the video path.
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
         webrtc_sessions: Mutex::new(std::collections::HashMap::new()),

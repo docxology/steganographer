@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod carrier_binding;
-#[cfg(feature = "gst")]
 mod cmd_audio;
 mod cmd_encode;
 mod cmd_ots;
@@ -14,6 +13,7 @@ mod cmd_scan;
 mod cmd_verify;
 #[cfg(feature = "gst")]
 mod cmd_video;
+mod envelope;
 mod media_io;
 
 #[derive(Parser)]
@@ -41,6 +41,11 @@ pub struct Cli {
     /// Suppress all output except final result (for scripting)
     #[arg(long, short, global = true)]
     quiet: bool,
+
+    /// Machine-readable output schema version for --format json/jsonl.
+    /// v1 wraps machine payloads in the steganographer.cli/v1 envelope.
+    #[arg(long, global = true, default_value = "v1")]
+    schema_version: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -284,12 +289,18 @@ enum Commands {
         /// Path to a password file for password-derived packet decoding
         #[arg(long)]
         password_file: Option<String>,
+        /// Output format: "plain" (human-readable) or "json" (envelope-wrapped)
+        #[arg(long, default_value = "plain")]
+        format: String,
     },
 
     /// Generate a new Ed25519 signing key pair
     Keygen {
         #[arg(long, short, default_value = "steganographer")]
         output: String,
+        /// Output format: "plain" (human-readable) or "json" (envelope-wrapped)
+        #[arg(long, default_value = "plain")]
+        format: String,
     },
 
     /// Report steganographic capacity of a media file
@@ -394,6 +405,9 @@ enum Commands {
         /// Output directory for derived keys
         #[arg(long, short, default_value = "keys")]
         output: String,
+        /// Output format: "plain" (human-readable) or "json" (envelope-wrapped)
+        #[arg(long, default_value = "plain")]
+        format: String,
     },
 
     /// Launch the live round-trip verification dashboard (web GUI)
@@ -432,12 +446,18 @@ enum Commands {
         /// Path to the revoked-keys file (default: keys/revoked.json)
         #[arg(long, short, default_value = "keys/revoked.json")]
         output: String,
+        /// Output format: "plain" (human-readable) or "json" (envelope-wrapped)
+        #[arg(long, default_value = "plain")]
+        format: String,
     },
 
     /// Validate a TOML configuration file without running any pipeline
     Config {
         #[arg(default_value = "check")]
         action: String,
+        /// Output format: "plain" (human-readable) or "json" (envelope-wrapped)
+        #[arg(long, default_value = "plain")]
+        format: String,
     },
 
     /// OpenTimestamps attestation: stamp or verify a file's Merkle root
@@ -481,8 +501,28 @@ enum OtsAction {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn main() {
+    // Clap parse failures (unknown args, malformed flags) are usage-class
+    // errors: exit 1. `--help`/`--version` write to stdout and exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let success = !error.use_stderr();
+            let _ = error.print();
+            std::process::exit(if success { 0 } else { 1 });
+        }
+    };
+
+    // JSON v1 is the only schema version; the v1 envelope gates the
+    // json/jsonl machine payloads. Unknown values are a usage error (1).
+    if cli.schema_version != "v1" {
+        // clap has not initialized the logger yet; print directly.
+        eprintln!(
+            "Error: unknown --schema-version '{}': expected 'v1'",
+            cli.schema_version
+        );
+        std::process::exit(1);
+    }
 
     let log_level = if cli.quiet {
         log::LevelFilter::Off
@@ -507,7 +547,7 @@ fn main() -> anyhow::Result<()> {
     log::info!("Steganographer v{}", env!("CARGO_PKG_VERSION"));
     log::info!("Config: {}", cli.config);
 
-    match cli.command {
+    let run_result: anyhow::Result<()> = match cli.command {
         #[cfg(feature = "gst")]
         Commands::Video {
             source,
@@ -567,14 +607,16 @@ fn main() -> anyhow::Result<()> {
                 input_format,
                 raw_width: width,
                 raw_height: height,
+                quiet_report: false,
             };
             if payload_file.is_some() || payload_text.is_some() {
                 if dir {
-                    anyhow::bail!("generic packet encoding does not support --dir");
+                    usage_error("generic packet encoding does not support --dir".to_string());
                 }
                 if opts.spread > 1 {
-                    anyhow::bail!(
+                    usage_error(
                         "generic packet alpha does not yet support multi-frame spreading"
+                            .to_string(),
                     );
                 }
                 cmd_packet::encode(
@@ -641,36 +683,29 @@ fn main() -> anyhow::Result<()> {
             embedding_key_file,
             password,
             password_file,
-        } => match cmd_packet::decode(
-            &input,
-            &output,
-            &stego_type,
-            &bits,
-            &format,
-            input_format.as_deref(),
-            force,
-            &cmd_packet::GenericDecodeOptions {
-                decrypt,
-                decryption_key,
-                decryption_key_file,
-                embedding_key,
-                embedding_key_file,
-                password,
-                password_file,
-            },
-        ) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let message = format!("{e:#}");
-                // Contract: a carrier with no embedded generic packet is a
-                // usage/packet-not-found error (exit 2), not a runtime error.
-                if message.contains("no valid generic packet found") {
-                    eprintln!("Error: {message}");
-                    std::process::exit(2);
-                }
-                Err(e)
-            }
-        },
+        } => {
+            // Errors are classified centrally: a carrier with no embedded
+            // generic packet is packet-not-found (exit 2). JSON mode
+            // surfaces it as an error envelope.
+            cmd_packet::decode(
+                &input,
+                &output,
+                &stego_type,
+                &bits,
+                &format,
+                input_format.as_deref(),
+                force,
+                &cmd_packet::GenericDecodeOptions {
+                    decrypt,
+                    decryption_key,
+                    decryption_key_file,
+                    embedding_key,
+                    embedding_key_file,
+                    password,
+                    password_file,
+                },
+            )
+        }
 
         Commands::Extract {
             input,
@@ -679,6 +714,7 @@ fn main() -> anyhow::Result<()> {
             force,
             password,
             password_file,
+            format,
         } => {
             let bits = match bits.to_ascii_lowercase().as_str() {
                 "auto" => None,
@@ -689,26 +725,16 @@ fn main() -> anyhow::Result<()> {
                     )),
                 },
             };
-            match cmd_packet::run_extract_with_password(
+            // Same packet-not-found contract as decode, classified centrally.
+            cmd_packet::run_extract_with_password(
                 &PathBuf::from(input),
                 &PathBuf::from(output),
                 bits,
                 force,
                 password,
                 password_file,
-            ) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    let message = format!("{e:#}");
-                    // Same contract as decode: no embedded generic packet is
-                    // packet-not-found (exit 2), everything else is runtime.
-                    if message.contains("no valid generic packet found") {
-                        eprintln!("Error: {message}");
-                        std::process::exit(2);
-                    }
-                    Err(e)
-                }
-            }
+                &format,
+            )
         }
 
         Commands::Verify {
@@ -732,7 +758,7 @@ fn main() -> anyhow::Result<()> {
             revoked_list,
         } => {
             // Usage validation first: unknown values are a usage error
-            // (exit 2), not a silent no_signature / BLAKE3 fallback.
+            // (exit 1), not a silent no_signature / BLAKE3 fallback.
             if let Err(e) = cmd_verify::validate_stego_type(&stego_type) {
                 usage_error(format!("{e}"));
             }
@@ -770,21 +796,23 @@ fn main() -> anyhow::Result<()> {
             ) {
                 Ok(status) => {
                     if status == "invalid" {
-                        // Exit-code contract: signature verification failed.
+                        // Exit-code contract: signature verification failed
+                        // (3). In JSON mode the error envelope was already
+                        // emitted by cmd_verify's report, so exit silently.
                         std::process::exit(3);
                     }
                     // "valid", "valid_revoked", "no_signature",
                     // "not_verified", "extracted" all complete with exit 0.
                     Ok(())
                 }
-                Err(e) => {
-                    eprintln!("Error: {e:#}");
-                    std::process::exit(1);
-                }
+                // Runtime failures (unreadable media, internal errors) fall
+                // through to the central error path: exit 6, or exit 1 for
+                // user-class errors, with an error envelope in JSON mode.
+                Err(e) => Err(e),
             }
         }
 
-        Commands::Keygen { output } => cmd_encode::keygen(&output),
+        Commands::Keygen { output, format } => cmd_encode::keygen(&output, &format),
 
         Commands::Info {
             input,
@@ -819,10 +847,14 @@ fn main() -> anyhow::Result<()> {
             follow_input_symlink,
             profile,
         } => {
-            // Argument-shape validation is a usage error (exit 2); a
-            // runtime failure inside the scan is a runtime error (exit 1);
-            // a successful run exits with the caller's policy code
-            // (0 = clean, 1 = findings reported by cmd_scan).
+            // Argument-shape validation is a usage error (exit 1); a
+            // runtime failure inside the scan falls through to the central
+            // error path (exit 6); a successful run exits with the
+            // caller's policy code (0 = clean, 4 = findings meet the
+            // failure threshold, 5 = truncated with no findings).
+            if format == "json" || format == "jsonl" {
+                envelope::activate_json_mode("scan");
+            }
             let path = std::path::Path::new(&input);
             if !path.exists() {
                 usage_error(format!(
@@ -834,7 +866,7 @@ fn main() -> anyhow::Result<()> {
             }
             // Symlinks are never followed by scan; rejecting the symlinked
             // input keeps the top level consistent with directory recursion
-            // (usage class, exit 2).
+            // (usage class, exit 1).
             if let Err(message) = cmd_scan::check_input_symlink(path, follow_input_symlink) {
                 usage_error(message);
             }
@@ -855,10 +887,10 @@ fn main() -> anyhow::Result<()> {
                 scan_profile.as_ref(),
             )
             .unwrap_or_else(|error| {
-                eprintln!("Error: {error:#}");
-                std::process::exit(1);
+                let (code, kind) = envelope::classify_exit(&format!("{error:#}"), None);
+                envelope::fail_json("scan", kind, &format!("{error:#}"), code);
             });
-            std::process::exit(code);
+            std::process::exit(code)
         }
 
         Commands::Derive {
@@ -873,15 +905,17 @@ fn main() -> anyhow::Result<()> {
             argon2_iterations,
             argon2_parallelism,
             output,
+            format,
         } => {
             let master_mode =
                 master_secret.is_some() || master_secret_file.is_some() || master_secret_stdin;
             let password_mode = password.is_some() || password_file.is_some() || password_stdin;
 
             if password_mode && master_mode {
-                anyhow::bail!(
+                usage_error(
                     "Provide either a master secret (--master-secret*) or a password \
                      (--password*), not both."
+                        .to_string(),
                 );
             }
 
@@ -890,10 +924,18 @@ fn main() -> anyhow::Result<()> {
                 let password_bytes = if password_stdin {
                     use std::io::Read;
                     let mut buf = Vec::new();
-                    std::io::stdin().read_to_end(&mut buf)?;
+                    std::io::stdin()
+                        .read_to_end(&mut buf)
+                        .unwrap_or_else(|error| {
+                            let (code, kind) = envelope::classify_exit(&format!("{error}"), None);
+                            envelope::fail_json("derive", kind, &format!("{error}"), code);
+                        });
                     buf
                 } else if let Some(path) = password_file {
-                    std::fs::read(&path)?
+                    std::fs::read(&path).unwrap_or_else(|error| {
+                        let (code, kind) = envelope::classify_exit(&format!("{error}"), None);
+                        envelope::fail_json("derive", kind, &format!("{error}"), code)
+                    })
                 } else if let Some(pw) = password {
                     log::warn!(
                         "Reading password from --password (visible in shell history / ps). \
@@ -901,9 +943,10 @@ fn main() -> anyhow::Result<()> {
                     );
                     pw.into_bytes()
                 } else {
-                    anyhow::bail!(
+                    usage_error(
                         "No password provided. Use --password <text>, \
                          --password-file <path>, or --password-stdin."
+                            .to_string(),
                     );
                 };
 
@@ -939,16 +982,28 @@ fn main() -> anyhow::Result<()> {
                     salt.as_deref(),
                     &params,
                     &output,
+                    &format,
                 )
             } else {
                 // Resolve the master secret from one of three sources
                 let secret_hex = if master_secret_stdin {
                     use std::io::Read;
                     let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf)?;
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .unwrap_or_else(|error| {
+                            let (code, kind) = envelope::classify_exit(&format!("{error}"), None);
+                            envelope::fail_json("derive", kind, &format!("{error}"), code);
+                        });
                     buf.trim().to_string()
                 } else if let Some(path) = master_secret_file {
-                    std::fs::read_to_string(&path)?.trim().to_string()
+                    std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| {
+                            let (code, kind) = envelope::classify_exit(&format!("{error}"), None);
+                            envelope::fail_json("derive", kind, &format!("{error}"), code)
+                        })
+                        .trim()
+                        .to_string()
                 } else if let Some(s) = master_secret {
                     log::warn!(
                         "Reading master secret from --master-secret (visible in shell history / ps). \
@@ -956,18 +1011,21 @@ fn main() -> anyhow::Result<()> {
                     );
                     s
                 } else {
-                    anyhow::bail!(
+                    usage_error(
                         "No master secret provided. Use --master-secret <hex>, \
                          --master-secret-file <path>, --master-secret-stdin, or the \
                          password options (--password/--password-file/--password-stdin)."
+                            .to_string(),
                     );
                 };
 
                 // Warn about low-entropy secrets (short hex strings are brute-forceable
                 // at BLAKE3 speed — this KDF is designed for already-high-entropy key
                 // material, not passphrases)
-                let raw_bytes = cmd_encode::hex_decode(&secret_hex)
-                    .map_err(|e| anyhow::anyhow!("Master secret is not valid hex: {}", e))?;
+                let raw_bytes = match cmd_encode::hex_decode(&secret_hex) {
+                    Ok(bytes) => bytes,
+                    Err(e) => usage_error(format!("Master secret is not valid hex: {}", e)),
+                };
                 if raw_bytes.len() < 32 {
                     log::warn!(
                         "Master secret is only {} bytes — BLAKE3 derive_key is NOT a slow KDF. \
@@ -978,11 +1036,11 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
 
-                cmd_encode::derive_keys(&secret_hex, &output)
+                cmd_encode::derive_keys(&secret_hex, &output, &format)
             }
         }
 
-        Commands::Config { action } => match action.as_str() {
+        Commands::Config { action, format } => match action.as_str() {
             "check" => match steganographer_core::config::Config::from_file(&cli.config) {
                 Ok(cfg) => match cfg.validate() {
                     Ok(()) => {
@@ -999,36 +1057,73 @@ fn main() -> anyhow::Result<()> {
                         if cfg.profiles.is_some() {
                             sections.push("profiles");
                         }
-                        println!("✓ Configuration valid: {}", cli.config);
-                        println!("  Sections: {}", sections.join(", "));
-                        if let Some(ref algo) = cfg.global.hash_algorithm {
-                            println!("  Hash algorithm: {}", algo);
+                        let mut profile_names: Vec<String> = Vec::new();
+                        if let Some(profiles) = &cfg.profiles {
+                            profile_names.extend(profiles.keys().cloned());
+                            profile_names.sort();
                         }
-                        if let Some(ref kf) = cfg.global.key_file {
-                            println!("  Key file: {}", kf);
-                        }
-                        if let Some(ref profiles) = cfg.profiles {
-                            let mut names: Vec<&str> =
-                                profiles.keys().map(String::as_str).collect();
-                            names.sort_unstable();
-                            println!("  Profiles: {}", names.join(", "));
+                        if format == "json" {
+                            envelope::activate_json_mode("config check");
+                            envelope::print(&envelope::success(
+                                "config check",
+                                serde_json::json!({
+                                    "config_path": cli.config,
+                                    "valid": true,
+                                    "sections": sections,
+                                    "hash_algorithm": cfg.global.hash_algorithm,
+                                    "key_file": cfg.global.key_file,
+                                    "profiles": profile_names,
+                                }),
+                            ));
+                        } else {
+                            println!("✓ Configuration valid: {}", cli.config);
+                            println!("  Sections: {}", sections.join(", "));
+                            if let Some(algo) = &cfg.global.hash_algorithm {
+                                println!("  Hash algorithm: {}", algo);
+                            }
+                            if let Some(kf) = &cfg.global.key_file {
+                                println!("  Key file: {}", kf);
+                            }
+                            if !profile_names.is_empty() {
+                                println!("  Profiles: {}", profile_names.join(", "));
+                            }
                         }
                         Ok(())
                     }
                     Err(e) => {
+                        if format == "json" {
+                            envelope::fail_json(
+                                "config check",
+                                envelope::USAGE_ERROR,
+                                &format!("Configuration error in {}: {e}", cli.config),
+                                1,
+                            );
+                        }
                         eprintln!("✗ Configuration error in {}: {}", cli.config, e);
-                        std::process::exit(1);
+                        std::process::exit(1)
                     }
                 },
                 Err(e) => {
+                    if format == "json" {
+                        envelope::fail_json(
+                            "config check",
+                            envelope::USAGE_ERROR,
+                            &format!("Configuration error in {}: {e}", cli.config),
+                            1,
+                        );
+                    }
                     eprintln!("✗ Configuration error in {}: {}", cli.config, e);
-                    std::process::exit(1);
+                    std::process::exit(1)
                 }
             },
-            _ => anyhow::bail!("Unknown config action: {}. Use 'check'.", action),
+            _ => usage_error(format!("Unknown config action: {action}. Use 'check'.")),
         },
 
-        Commands::Revoke { public_key, output } => cmd_encode::revoke_key(&public_key, &output),
+        Commands::Revoke {
+            public_key,
+            output,
+            format,
+        } => cmd_encode::revoke_key(&public_key, &output, &format),
 
         Commands::Ots { action } => match action {
             OtsAction::Stamp {
@@ -1038,7 +1133,7 @@ fn main() -> anyhow::Result<()> {
                 force,
                 format,
             } => {
-                // Unknown --method values are a usage error (exit 2), not a
+                // Unknown --method values are a usage error (exit 1), not a
                 // silent fall-back to Bitcoin stamping.
                 if let Some(m) = method.as_deref() {
                     if let Err(e) = cmd_ots::validate_method(m) {
@@ -1164,17 +1259,42 @@ fn main() -> anyhow::Result<()> {
             );
             log::info!("Identity: {}", identity_backend.display_identity());
 
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(steganographer_dashboard::start_server(state, port, &host))?;
-            Ok(())
+            let rt = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+                let (code, kind) = envelope::classify_exit(&format!("{error}"), None);
+                envelope::fail_json("dashboard", kind, &format!("{error}"), code)
+            });
+            let server_result =
+                rt.block_on(steganographer_dashboard::start_server(state, port, &host));
+            match server_result {
+                Err(error) => {
+                    let (code, kind) = envelope::classify_exit(&format!("{error:#}"), None);
+                    envelope::fail_json("dashboard", kind, &format!("{error:#}"), code)
+                }
+                Ok(_) => Ok(()),
+            }
         }
+    };
+
+    // Central error path (SUR-003 exit-code contract): packet-not-found is
+    // exit 2, unexpected I/O and internal failures are exit 6, and every
+    // other error is a user/configuration/format error (exit 1). In JSON
+    // mode the error also surfaces as an error envelope on stdout so stdout
+    // stays a single machine payload.
+    if let Err(error) = run_result {
+        let message = format!("{error:#}");
+        let (exit_code, error_code) = envelope::classify_exit(&message, Some(&error));
+        if let Some(command) = envelope::current_json_command() {
+            envelope::fail_json(&command, error_code, &message, exit_code);
+        }
+        eprintln!("Error: {message}");
+        std::process::exit(exit_code);
     }
 }
 
 /// Resolve a named `[profiles.<name>]` profile from the config file.
 ///
 /// Config-load failures, validation failures, and unknown profiles are
-/// usage-class errors for the scan subcommand (exit 2 via `usage_error`).
+/// usage-class errors for the scan subcommand (exit 1 via `usage_error`).
 fn resolve_scan_profile(
     config_path: &str,
     name: &str,
@@ -1188,9 +1308,9 @@ fn resolve_scan_profile(
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// Report a usage-class error and terminate with exit code 2
-/// (the stable exit-code contract's usage/packet-not-found class).
+/// Report a usage-class error and terminate with exit code 1
+/// (the finalized exit-code contract's user/configuration/format class).
 fn usage_error(message: String) -> ! {
     eprintln!("Error: {message}");
-    std::process::exit(2);
+    std::process::exit(1);
 }

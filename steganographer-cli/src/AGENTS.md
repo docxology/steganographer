@@ -4,10 +4,22 @@
 
 ### main.rs
 
-- `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, and `--quiet` global flags
+- `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, `--quiet`, and
+  `--schema-version` global flags (v1 gates the machine JSON envelope)
 - `Commands` — `Video`, `Audio`, `Encode`, `Decode`, `Verify`, `Keygen`,
   `Info`, `Analyze`, `Scan`, `Derive`, `Dashboard`, `Revoke`, `Config`, and `Ots`
 - `main()` — initializes `env_logger`, dispatches to `cmd_*::run()`
+
+### envelope.rs
+
+- `steganographer.cli/v1` JSON envelope (`schema`, `command`, `status`,
+  `result`, `warnings`, `errors`, `timing`, `tool`) wrapping every
+  `--format json` output; `partial` = a resource-limit-truncated scan
+- Stable error codes (`usage_error`, `packet_not_found`,
+  `verification_failed`, `scan_error`, `internal_error`) and the finalized
+  exit-code table (0/1/2/3/4/5/6) via `classify_exit`
+- JSON-mode context so the central error path emits error envelopes on
+  stdout; secrets are never serialized
 
 ### cmd_video.rs
 
@@ -23,7 +35,10 @@
 ### cmd_encode.rs
 
 - `run(...)` — descriptor-preserving legacy offline signing and embedding
-- `keygen(output)` — generates Ed25519 keypair, writes `.key` and `.pub` files
+- `keygen(output, format)`, `info`, `analyze`, `revoke_key`, `derive_keys`,
+  `derive_keys_from_password` — all emit the envelope in `--format json`
+- Exit-code mapping: usage → 1, packet-not-found → 2, verify invalid → 3,
+  scan findings → 4, truncated scan → 5, internal/I-O → 6
 - Supports spatial LSB, keyed audio LSB, spread-spectrum, and DCT paths with
   symmetric config, key, encryption, ECC, capacity, and format validation
 
@@ -35,7 +50,9 @@
 
 ### cmd_scan.rs
 
-- `run(...)` — bounded forensic scan of one file or a directory tree
+- `run(...)` — bounded forensic scan of one file or a directory tree;
+  returns 0 clean / 4 findings / 5 truncated-inconclusive; JSONL emits one
+  schema-wrapped record per file plus a final summary envelope
 - Delegates to `steganographer_core::forensics::scan_bytes()`, which pairs
   structural probes (Shannon entropy, file family, embedded magic bytes) with
   `steganalysis::analyze_combined()`

@@ -49,6 +49,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | [API Reference](api-reference.md) | Complete Rust API: types, traits, structs, methods, dashboard endpoints, and `LiveConfig` |
 | [Contributing](contributing.md) | Development workflow, coding standards, testing, adding new algorithms |
 | [Roadmap](roadmap.md) | Planned features, extension points, and future work |
+| [Compatibility](compatibility.md) | Compatibility & deprecation policy: SemVer semantics, wire-format rules, golden-vector stability, MSRV, and platform matrix |
 | [Steganography Platform Plan](plans/steganography-platform/README.md) | Composable v0.6.x–v1.0 program for generic packets, carriers, formats, forensics, documents, CLI/WASM, validation, and migration |
 | [FAQ](faq.md) | 30+ Q&As on concepts, build, usage, crypto, dashboard, and configuration |
 
@@ -109,5 +110,5 @@ steganographer-dashboard:     57 tests (LiveConfig incl. transport, DashboardSta
 steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
 steganographer-wasm:           9 tests (packet encode/decode, RGB/PCM carriers, forensic scan, decode-limit overrides)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        664 tests, 0 failures
+Total:                        705 tests, 0 failures
 ```

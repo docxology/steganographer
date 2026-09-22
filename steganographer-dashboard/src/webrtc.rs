@@ -583,7 +583,7 @@ async fn run_frame_pump(
 
     const HIGH_WATER_BYTES: usize = 4 * 1024 * 1024;
 
-    let _encode_session = EncodeSession::new();
+    let encode_session = std::sync::Arc::new(std::sync::Mutex::new(EncodeSession::new()));
     let mut decode_session = DecodeSession::new();
     let mut reassembler = Reassembler::default();
 
@@ -658,19 +658,20 @@ async fn run_frame_pump(
                                 let st = state.clone();
                                 let dc = dc.clone();
                                 let session_id = session_id.clone();
+                                let encode_session = encode_session.clone();
                                 tokio::spawn(async move {
                                     let reply = match crate::ws_handler::base64_decode(&b64) {
-                                        Ok(jpeg) => {
-                                            let mut session = EncodeSession::new();
-                                            tokio::task::spawn_blocking(move || {
-                                                process_encode_frame(&st, &mut session, &jpeg)
-                                            })
-                                            .await
-                                            .unwrap_or(None)
-                                            .unwrap_or_else(|| {
-                                                json!({"type": "encode_error", "msg_id": msg_id})
-                                            })
-                                        }
+                                        Ok(jpeg) => tokio::task::spawn_blocking(move || {
+                                            let mut session = encode_session
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            process_encode_frame(&st, &mut session, &jpeg)
+                                        })
+                                        .await
+                                        .unwrap_or(None)
+                                        .unwrap_or_else(
+                                            || json!({"type": "encode_error", "msg_id": msg_id}),
+                                        ),
                                         Err(e) => json!({
                                             "type": "encode_error",
                                             "msg_id": msg_id,

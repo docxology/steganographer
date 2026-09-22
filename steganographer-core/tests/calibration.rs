@@ -16,7 +16,8 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use steganographer_core::forensics::{
-    self, FileFamily, ForensicScan, DOC_001_FAMILY, DOC_002_FAMILY, ZIP_TOPOLOGY_FAMILY,
+    self, FileFamily, ForensicScan, DOC_001_FAMILY, DOC_002_FAMILY, DOC_003_FAMILY, DOC_004_FAMILY,
+    ZIP_TOPOLOGY_FAMILY,
 };
 
 const MANIFEST: &str = include_str!("../testdata/corpus/manifest.json");
@@ -86,6 +87,27 @@ fn corpus_bytes(spec: &Value) -> Vec<u8> {
             // Claim ~2 GiB uncompressed for the main part (central directory lie).
             Some(0x7FFF_FFFF),
         ),
+        "pptx_clean" => pptx(BALANCED_ALPHABET.repeat(3).as_str()),
+        "pptx_laced" => {
+            let pairs = spec["run_pairs"].as_u64().unwrap_or(6) as usize;
+            let mut body = BALANCED_ALPHABET.to_string();
+            for i in 0..pairs * 2 {
+                body.push(if i % 2 == 0 { '\u{200B}' } else { '\u{200C}' });
+            }
+            pptx(&body)
+        }
+        "pdf_clean" => pdf(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>",
+        ]),
+        "pdf_embedded_file" => pdf(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>",
+            "<</Type/Filespec/F(attach.bin)/EF<</F 5 0 R>>>>",
+            "<</Type/EmbeddedFile/Subtype(application#2Foctet-stream)/Length 12>>\nstream\nraw payload\nendstream",
+        ]),
         "zip_generic" => zip(
             vec![("notes/readme.txt", BALANCED_ALPHABET.as_bytes().to_vec())],
             &[],
@@ -192,6 +214,51 @@ fn docx(body: &str, lie_uncompressed: Option<u32>) -> Vec<u8> {
     zip(entries, &lies)
 }
 
+/// A minimal pptx package: content types, presentation, one slide (stored
+/// uncompressed so the fixture bytes are fully deterministic).
+fn pptx(slide_body: &str) -> Vec<u8> {
+    let content_types =
+        b"<Types><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>";
+    let presentation = b"<p:presentation xmlns:p=\"p\"/>";
+    let slide = format!(
+        "<p:sld xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:t>{slide_body}</a:t></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"
+    )
+    .into_bytes();
+    zip(
+        vec![
+            ("[Content_Types].xml", content_types.to_vec()),
+            ("ppt/presentation.xml", presentation.to_vec()),
+            ("ppt/slides/slide1.xml", slide),
+        ],
+        &[],
+    )
+}
+
+/// Assemble a minimal deterministic PDF: `%PDF-1.7` header, numbered
+/// objects, a correct xref table, trailer, `startxref`, `%%EOF`.
+fn pdf(objects: &[&str]) -> Vec<u8> {
+    let mut out: Vec<u8> = b"%PDF-1.7\n".to_vec();
+    let mut offsets: Vec<usize> = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {} /Root 1 0 R>>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
 /// Findings attributed to one detector ID from a completed scan.
 fn detector_count(id: &str, scan: &ForensicScan) -> usize {
     match id {
@@ -212,6 +279,8 @@ fn detector_count(id: &str, scan: &ForensicScan) -> usize {
         "ZIP_TOPOLOGY" => container_family_count(scan, ZIP_TOPOLOGY_FAMILY),
         "DOC-001" => container_family_count(scan, DOC_001_FAMILY),
         "DOC-002" => container_family_count(scan, DOC_002_FAMILY),
+        "DOC-003" => container_family_count(scan, DOC_003_FAMILY),
+        "DOC-004" => container_family_count(scan, DOC_004_FAMILY),
         other => panic!("unknown detector id in manifest: {other}"),
     }
 }

@@ -12,12 +12,17 @@ use crate::steganalysis::{self, CombinedResult};
 use crate::unicode_text;
 
 mod ooxml;
+mod pdf;
 
 pub use ooxml::{
     analyze_package, OoxmlError, ZipArchive, ZipEntry, CONTAINER_MAX_ENTRIES,
     CONTAINER_MAX_ENTRY_NAME_BYTES, CONTAINER_MAX_EOCD_SCAN_BYTES, CONTAINER_MAX_FINDINGS,
     CONTAINER_MAX_INFLATE_PER_ENTRY, CONTAINER_MAX_INFLATE_TOTAL, DOC_001_FAMILY, DOC_002_FAMILY,
-    ZIP_TOPOLOGY_FAMILY,
+    DOC_003_FAMILY, ZIP_TOPOLOGY_FAMILY,
+};
+pub use pdf::{
+    analyze_pdf, DOC_004_FAMILY, PDF_FAMILY, PDF_MAX_FILE_BYTES, PDF_MAX_OBJECTS_SCANNED,
+    PDF_MAX_STRING_LENGTH,
 };
 
 /// Shannon entropy of a byte buffer, in bits per byte (`0.0 ..= 8.0`).
@@ -215,12 +220,16 @@ pub const MAX_MAGIC_SCAN_BYTES: usize = 16 * 1024 * 1024;
 /// that produced it, and a bounded human-readable detail line.
 ///
 /// Pinned contract (FOR-001, plan spec 03): `scan_bytes` fills
-/// [`ForensicScan::container_findings`] for ZIP-family inputs. `path` is the
-/// evidence location (a ZIP entry name, or `<package>` for package-level
-/// evidence); `family` is a stable detector family ID —
-/// `ooxml::ZIP_TOPOLOGY_FAMILY` (inventory observation, never triggers
-/// `detected`), `ooxml::DOC_001_FAMILY` (package anomalies), or
-/// `ooxml::DOC_002_FAMILY` (WordprocessingML concealment; triggers
+/// [`ForensicScan::container_findings`] for ZIP-family and PDF inputs.
+/// `path` is the evidence location (a ZIP entry name, a PDF structural
+/// location, or `<package>`/`<pdf>` for package-level evidence); `family`
+/// is a stable detector family ID — `ooxml::ZIP_TOPOLOGY_FAMILY`
+/// (inventory observation, never triggers `detected`),
+/// `ooxml::DOC_001_FAMILY` (package anomalies), `ooxml::DOC_002_FAMILY`
+/// (WordprocessingML concealment; triggers `detected`),
+/// `ooxml::DOC_003_FAMILY` (extended-part concealment; triggers
+/// `detected`), `pdf::PDF_FAMILY` (PDF structural observations), or
+/// `pdf::DOC_004_FAMILY` (PDF concealment/anomaly evidence; triggers
 /// `detected`); `detail` is bounded, human-readable evidence that never
 /// reconstructs a hidden payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -259,9 +268,9 @@ pub struct DetectorInfo {
 /// Statistical adapters (`STAT_*`) run first, then the magic probes
 /// (`MAGIC_*`), the Unicode/text detectors (stable IDs shared with
 /// [`crate::unicode_text`]), and finally the container detectors
-/// (`ZIP_TOPOLOGY`, `DOC-001`, `DOC-002`). The calibration corpus
-/// (`testdata/corpus/manifest.json`) maps every ID here to benign/triggered
-/// samples; `tests/calibration.rs` asserts the outcomes.
+/// (`ZIP_TOPOLOGY`, `DOC-001`, `DOC-002`, `DOC-003`, `DOC-004`). The
+/// calibration corpus (`testdata/corpus/manifest.json`) maps every ID here
+/// to benign/triggered samples; `tests/calibration.rs` asserts the outcomes.
 pub fn detector_registry() -> &'static [DetectorInfo] {
     &[
         DetectorInfo {
@@ -352,8 +361,22 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
             id: "DOC-002",
             summary: "WordprocessingML concealment in word/document.xml: Unicode/text stego channels plus long ASCII whitespace runs inside XML text nodes.",
             budget: "main part inflated within the DOC-001 budgets and capped at unicode_text::MAX_TEXT_SCAN_BYTES (1048576) bytes for text analysis",
-            fp_limits: "only the main part is scanned (headers/footers and embedded media are DOC-003/DOC-005); pretty-printed XML with >= 8-space text-node runs can flag",
+            fp_limits: "only the main part is scanned (headers/footers, slides/notes, sharedStrings, and embedded media are DOC-003); pretty-printed XML with >= 8-space text-node runs can flag",
             calibration: "benign: minimal clean docx; triggered: docx with a zero-width-laced document.xml (corpus DOC-002)",
+        },
+        DetectorInfo {
+            id: "DOC-003",
+            summary: "Extended OOXML part coverage: pptx slides/notes and presentation header/footer placeholders, xlsx sharedStrings/worksheets, docx headers/footers, and embedded-media entry anomalies.",
+            budget: "parts inflated within the DOC-001 budgets (4 MiB per entry, 8 MiB package total); text analysis capped at unicode_text::MAX_TEXT_SCAN_BYTES (1048576) bytes per part",
+            fp_limits: "presentation.xml placeholder markup is structural evidence and flags on masters-style packages; media entries with unrecognized extensions can flag on legitimately mixed packages",
+            calibration: "benign: minimal clean pptx (no DOC-003 findings); triggered: pptx with a zero-width-laced slide (corpus DOC-003)",
+        },
+        DetectorInfo {
+            id: "DOC-004",
+            summary: "Bounded PDF structural scan: header/version, %%EOF inventory and trailing data, trailer/startxref sanity, object-keyword scan (/EmbeddedFile, /JavaScript, /JS, /OpenAction, /Launch, /URI, /AcroForm), XMP presence, suspicious /Filter chains, and a literal-string text channel.",
+            budget: "first pdf::PDF_MAX_FILE_BYTES (67108864) bytes; at most pdf::PDF_MAX_OBJECTS_SCANNED (8192) objects and pdf::PDF_MAX_STRING_LENGTH (4096) bytes per literal string; extracted text capped at unicode_text::MAX_TEXT_SCAN_BYTES (1048576) bytes; stream inflate capped at 262144 bytes per stream / 1048576 bytes total",
+            fp_limits: "AcroForm and http(s)/mailto /URI links stay observational (common in legitimate PDFs); stacked-filter and appended-data evidence is suspicious but does not prove payload recovery; invisible-text rendering heuristics (text render mode 3, off-page Td positioning) are out of scope and skipped",
+            calibration: "benign: minimal clean PDF (no DOC-004 findings); triggered: PDF with an /EmbeddedFile object (corpus DOC-004)",
         },
     ]
 }
@@ -371,16 +394,17 @@ pub struct ForensicScan {
     pub magic_matches: Vec<EmbeddedMagicMatch>,
     /// Unicode/text steganography findings (FOR-005 detector IDs).
     pub text_findings: Vec<unicode_text::TextFinding>,
-    /// Container findings from ZIP-family analysis (DOC-001/DOC-002 slice;
-    /// empty for non-container inputs).
+    /// Container findings from container-aware analysis (OOXML
+    /// DOC-001/DOC-002/DOC-003, PDF DOC-004; empty for non-container
+    /// inputs).
     pub container_findings: Vec<ContainerFinding>,
     /// Aggregated statistical detector results.
     pub statistical: CombinedResult,
     /// `true` if a content-derived detector (inline magic, Unicode/text, or
-    /// DOC-002 container) flags the buffer as suspicious. Statistical
-    /// detector results are observations (see [`statistical`]): high-entropy
-    /// or structured input can trip them on clean data, so they never trigger
-    /// the verdict by themselves.
+    /// a DOC-002/DOC-003/DOC-004 container concealment finding) flags the
+    /// buffer as suspicious. Statistical detector results are observations
+    /// (see [`statistical`]): high-entropy or structured input can trip them
+    /// on clean data, so they never trigger the verdict by themselves.
     pub detected: bool,
     /// Human-readable summary of the strongest finding.
     pub message: String,
@@ -389,28 +413,30 @@ pub struct ForensicScan {
 /// Run every forensic detector over `data`.
 ///
 /// A buffer is reported `detected` when an inline `STEG`/`STG3` magic is
-/// present, a Unicode/text detector fires, or a DOC-002 WordprocessingML
-/// concealment finding exists. Statistical detector results are observations
-/// that accompany the verdict but never trigger it by themselves (their
-/// false-positive limits are documented in the detector registry); entropy,
-/// file family, ZIP topology, and DOC-001 topology anomalies likewise stay
-/// observational.
+/// present, a Unicode/text detector fires, or a DOC-002/DOC-003/DOC-004
+/// container concealment finding exists. Statistical detector results are
+/// observations that accompany the verdict but never trigger it by
+/// themselves (their false-positive limits are documented in the detector
+/// registry); entropy, file family, ZIP topology, DOC-001 topology
+/// anomalies, and PDF structural observations likewise stay observational.
 pub fn scan_bytes(data: &[u8]) -> ForensicScan {
     let statistical = steganalysis::analyze_combined(data);
     let entropy = shannon_entropy(data);
     let file_family = detect_file_family(data);
     let magic_matches =
         detect_embedded_magics_detailed(&data[..data.len().min(MAX_MAGIC_SCAN_BYTES)]);
-    let text_findings = detect_text_stego(data);
-    let container_findings = if file_family == FileFamily::Zip {
-        ooxml::analyze_package(data)
-    } else {
-        Vec::new()
+    let container_findings = match file_family {
+        FileFamily::Zip => ooxml::analyze_package(data),
+        FileFamily::Pdf => pdf::analyze_pdf(data),
+        _ => Vec::new(),
     };
     let embedded_magic = magic_matches.first().map(|m| m.magic);
-    let container_detected = container_findings
-        .iter()
-        .any(|f| f.family == ooxml::DOC_002_FAMILY);
+    let text_findings = unicode_text::analyze_bytes(data);
+    let container_detected = container_findings.iter().any(|f| {
+        f.family == ooxml::DOC_002_FAMILY
+            || f.family == ooxml::DOC_003_FAMILY
+            || f.family == pdf::DOC_004_FAMILY
+    });
     let detected = embedded_magic.is_some() || !text_findings.is_empty() || container_detected;
     let message = if let Some(magic) = embedded_magic {
         format!("embedded {} magic found inline", magic.as_str())
@@ -424,11 +450,17 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
             parts.push(format!("unicode text anomalies: {}", ids.join(", ")));
         }
         if container_detected {
-            let families: Vec<String> = container_findings
+            let mut families: Vec<&str> = container_findings
                 .iter()
-                .filter(|f| f.family == ooxml::DOC_002_FAMILY)
-                .map(|f| f.family.clone())
+                .filter(|f| {
+                    f.family == ooxml::DOC_002_FAMILY
+                        || f.family == ooxml::DOC_003_FAMILY
+                        || f.family == pdf::DOC_004_FAMILY
+                })
+                .map(|f| f.family.as_str())
                 .collect();
+            families.sort_unstable();
+            families.dedup();
             parts.push(format!("container findings: {}", families.join(", ")));
         }
         parts.join("; ")
@@ -576,7 +608,7 @@ mod tests {
         // Registry ordering drives scan order: statistical → magic → text →
         // container.
         assert_eq!(registry.first().map(|d| d.id), Some("STAT_CHI2"));
-        assert_eq!(registry.last().map(|d| d.id), Some("DOC-002"));
+        assert_eq!(registry.last().map(|d| d.id), Some("DOC-004"));
     }
 
     #[test]

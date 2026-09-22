@@ -9,7 +9,7 @@ Web-based live dashboard for real-time round-trip steganography verification. Se
 | File | Lines | Key Functions |
 | ------ | ------- | --------------- |
 | `src/lib.rs` | 648 | `DashboardState` (incl. `signer`, `audio_key`, `ots_config`, `ots_client`), `LiveConfig` (incl. `transport: Transport`), `create_router()`, `start_server()`, `check_auth()`, `validate_live_config()`, OTS endpoints, embedded static assets, docs API |
-| `src/ws_handler.rs` | 1367 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `ws_gate()` (origin 403 + `?token=`/`bearer-<token>` 401), shared `FramePipeline`/`FrameVerifier` (sign → LSB embed → verify, reused by the WebRTC path), `verify_signature()`, `EncodedFrame`/`EncodedAudioChunk` (pre-embed snapshots), `ots_metrics_json()` |
+| `src/ws_handler.rs` | 1367 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `ws_gate()` (origin 403 + `?token=`/`bearer-<token>` 401), shared `FramePipeline` (sign → LSB embed → async bounded verify via `store_frame_and_enqueue_verify`, reused by the WebRTC path), `verify_signature()`, `EncodedFrame`/`EncodedAudioChunk` (pre-embed snapshots), `ots_metrics_json()` |
 | `src/webrtc.rs` | 409 | `api_webrtc_offer()` (WHIP-style POST, auth-gated, non-trickle answer), `WebrtcHandler` (`on_data_channel` frame loop), `reap_connection()` — webrtc-rs 0.21 data-channel transport into the shared pipeline |
 
 ## Routes

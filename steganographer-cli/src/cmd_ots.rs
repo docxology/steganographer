@@ -68,6 +68,9 @@ pub fn stamp(
     force: bool,
     format: &str,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        crate::envelope::activate_json_mode("ots stamp");
+    }
     let cfg = steganographer_core::config::Config::from_file(config_path).unwrap_or_else(|e| {
         log::warn!("Could not load config ({}), using defaults", e);
         steganographer_core::config::Config {
@@ -241,6 +244,9 @@ pub fn verify(
     proof_file: &str,
     format: &str,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        crate::envelope::activate_json_mode("ots verify");
+    }
     let cfg = steganographer_core::config::Config::from_file(config_path).unwrap_or_else(|e| {
         log::warn!("Could not load config ({}), using defaults", e);
         steganographer_core::config::Config {
@@ -357,7 +363,13 @@ pub fn verify(
 
 fn print_stamp_result(result: &OtsStampResult, format: &str) -> anyhow::Result<()> {
     match format {
-        "json" => println!("{}", serde_json::to_string_pretty(result)?),
+        "json" => {
+            crate::envelope::activate_json_mode("ots stamp");
+            crate::envelope::print(&crate::envelope::success(
+                "ots stamp",
+                serde_json::to_value(result)?,
+            ));
+        }
         _ => {
             println!("=== OpenTimestamps Stamp ===");
             println!("  Input:       {}", result.input);
@@ -368,7 +380,7 @@ fn print_stamp_result(result: &OtsStampResult, format: &str) -> anyhow::Result<(
                 "  Segment:     {} ({} frames)",
                 result.segment_index, result.frame_count
             );
-            if let Some(ref path) = result.proof_path {
+            if let Some(path) = &result.proof_path {
                 println!("  Proof file:  {} ({} bytes)", path, result.proof_bytes);
             }
             println!("  Status:      {}", result.status);
@@ -380,7 +392,13 @@ fn print_stamp_result(result: &OtsStampResult, format: &str) -> anyhow::Result<(
 
 fn print_verify_result(result: &OtsVerifyResult, format: &str) -> anyhow::Result<()> {
     match format {
-        "json" => println!("{}", serde_json::to_string_pretty(result)?),
+        "json" => {
+            crate::envelope::activate_json_mode("ots verify");
+            crate::envelope::print(&crate::envelope::success(
+                "ots verify",
+                serde_json::to_value(result)?,
+            ));
+        }
         _ => {
             let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
             let green = if is_tty { "\x1b[32m" } else { "" };

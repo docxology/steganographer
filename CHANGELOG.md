@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (2026-09-22 final round)
+
+- **JSON v1 envelope (`SUR-003`).** Every command's `--format json`/`jsonl`
+  output is now wrapped in the `steganographer.cli/v1` envelope
+  (`schema`/`command`/`status`/`result`/`warnings`/`errors`/`timing`/`tool`),
+  with a global `--schema-version` flag. Plain-mode output is unchanged.
+  Exit codes finalized to the plan table: 0 success / 1 usage+config /
+  2 packet-not-found / 3 verification failed / 4 findings-threshold /
+  5 inconclusive (truncated scan) / 6 internal error.
+- **OOXML deep analysis (`DOC-003`).** pptx slides/notes, xlsx
+  sharedStrings/worksheets, and docx headers/footers now run through the
+  Unicode/text detectors; media-entry anomalies flagged.
+- **PDF structural scan (`DOC-004`).** Bounded hand-rolled PDF tokenizer
+  (no rendering, no JS execution): embedded files, JavaScript/OpenAction/
+  Launch, dangerous URI schemes, /Crypt and stacked filters, trailing data
+  after %%EOF, oversized /Length claims, string-channel text detection over
+  decoded (incl. inflated) streams. Zero new dependencies.
+- **Learned-watermarking H.264 acceptance eval (`learned-eval` feature).**
+  Real openh264 encode/decode roundtrip (QP 24–28): **0.00% BER across all
+  8 payloads** — the < 5% acceptance is met. At the CRF~28-equivalent
+  QP 26–30 window the committed weights measure 6.45% BER — closing that
+  fully requires retraining against real-codec quantization. Per-frame
+  CPU: ~82 ms embed + ~154 ms extract in debug (release gate 50 ms).
+- **Golden vectors frozen (`QUA-003`).** `testdata/packets/` labels moved
+  to stable (owner-approved); CI gains `immutability` (vector/corpus drift
+  gate), `test-windows`, and `packaging-metadata` jobs.
+- **Compatibility policy** (`docs/compatibility.md`): SemVer, wire-format,
+  golden-vector, deprecation, and MSRV rules.
+- **Dashboard verify worker + WebRTC verification fix.** Frame verification
+  moved off the intake critical path to a bounded async worker (drop-oldest,
+  cap 4); both WS and WebRTC data-channel paths verify through it. The
+  WebRTC pump signed frames with per-session throwaway keys — every frame
+  failed verification; it now signs with the session-wide signer. Measured
+  live (headless Chromium, 720p, 60 ms sign interval): **8.3 fps, 84/84
+  verifications passing, sign 11.5 ms / verify 42.7 ms** — verification and
+  latency acceptance met; the 15 fps target needs further encode-path work
+  (honest shortfall recorded in TODO.md).
+- **`--password`/`--password-file` on packet encode/decode/extract**
+  (Argon2id KDF transform, PKT-007 slice landed this round), `scan
+  --profile/--follow-input-symlink`, `[limits]`/`[profiles]` config tables,
+  and the `steganographer-wasm` crate (WASM-001) were landed in the
+  2026-09-21 continuation commits included in this release train.
+
+### Added (2026-09-21 continuation round)
 ### Added (2026-09-21 continuation round)
 
 - **Argon2id password-KDF transform (`PKT-007`).** Generic packet bodies can

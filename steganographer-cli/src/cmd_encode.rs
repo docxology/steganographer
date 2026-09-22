@@ -19,6 +19,7 @@ use steganographer_core::{
 };
 
 use crate::carrier_binding;
+use crate::envelope;
 use crate::media_io;
 
 // ─── Options & Results ──────────────────────────────────────────────
@@ -39,6 +40,9 @@ pub struct EncodeOptions {
     pub input_format: Option<String>,
     pub raw_width: Option<u32>,
     pub raw_height: Option<u32>,
+    /// Suppress the per-file stdout report (used by `--dir` batch mode in
+    /// JSON, where the batch emits exactly one envelope).
+    pub quiet_report: bool,
 }
 
 /// Machine-readable encode result (serializable to JSON).
@@ -117,10 +121,15 @@ impl From<steganalysis::DetectionResult> for DetectorResult {
     }
 }
 
-// ─── Keygen ─────────────────────────────────────────────────────────
-
 /// Generate a new Ed25519 key pair and save to files.
-pub fn keygen(output_path: &str) -> anyhow::Result<()> {
+///
+/// In JSON mode the report is the `steganographer.cli/v1` envelope; the
+/// private key material is never serialized (plain mode hands the raw hex
+/// to the user on the terminal instead).
+pub fn keygen(output_path: &str, format: &str) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("keygen");
+    }
     let signer = Signer::generate();
     let private_key_path = format!("{}.key", output_path);
     let public_key_path = format!("{}.pub", output_path);
@@ -139,10 +148,22 @@ pub fn keygen(output_path: &str) -> anyhow::Result<()> {
 
     log::info!("Private key written to: {} (0600)", private_key_path);
     log::info!("Public key written to:  {}", public_key_path);
-    println!("Key pair generated:");
-    println!("  Private key: {} (0600)", private_key_path);
-    println!("  Public key:  {}", public_key_path);
-    println!("  Public key (hex): {}", public_hex);
+    if format == "json" {
+        envelope::activate_json_mode("keygen");
+        envelope::print(&envelope::success(
+            "keygen",
+            serde_json::json!({
+                "private_key_path": private_key_path,
+                "public_key_path": public_key_path,
+                "public_key": public_hex,
+            }),
+        ));
+    } else {
+        println!("Key pair generated:");
+        println!("  Private key: {} (0600)", private_key_path);
+        println!("  Public key:  {}", public_key_path);
+        println!("  Public key (hex): {}", public_hex);
+    }
     Ok(())
 }
 
@@ -150,7 +171,13 @@ pub fn keygen(output_path: &str) -> anyhow::Result<()> {
 
 /// Derive signing, encryption, and embedding keys from a master secret using
 /// the high-entropy BLAKE3 KDF.
-pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<()> {
+///
+/// JSON mode emits the `steganographer.cli/v1` envelope with the written
+/// file paths; key material itself is never serialized.
+pub fn derive_keys(master_secret_hex: &str, output_dir: &str, format: &str) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("derive");
+    }
     let master = hex_decode(master_secret_hex)?;
     if master.is_empty() {
         anyhow::bail!("Master secret cannot be empty");
@@ -160,7 +187,17 @@ pub fn derive_keys(master_secret_hex: &str, output_dir: &str) -> anyhow::Result<
     // context strings — previously these were hand-copied here, which risked
     // silent desync if kdf.rs's contexts changed)
     let keys = steganographer_core::kdf::derive_all(&master);
-    write_derived_keys(&keys, output_dir)
+    let key_files = write_derived_keys(&keys, output_dir, format == "json")?;
+    if format == "json" {
+        envelope::print(&envelope::success(
+            "derive",
+            serde_json::json!({
+                "output_dir": output_dir,
+                "key_files": key_files,
+            }),
+        ));
+    }
+    Ok(())
 }
 
 /// Derive signing, encryption, and embedding keys from a human-chosen password
@@ -175,29 +212,53 @@ pub fn derive_keys_from_password(
     salt_hex: Option<&str>,
     params: &steganographer_core::Argon2Params,
     output_dir: &str,
+    format: &str,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("derive");
+    }
     let salt = match salt_hex {
         Some(hex) => hex_decode(hex)?,
         None => {
             let salt = steganographer_core::password::generate_salt();
-            println!(
-                "Generated salt (hex, save it to re-derive these keys): {}",
-                hex_encode(&salt)
-            );
+            let salt_hex = hex_encode(&salt);
+            // The salt is public information, but JSON stdout must stay a
+            // single pure payload — the hint moves to stderr there.
+            if format == "json" {
+                eprintln!("Generated salt (hex, save it to re-derive these keys): {salt_hex}");
+            } else {
+                println!("Generated salt (hex, save it to re-derive these keys): {salt_hex}");
+            }
             salt.to_vec()
         }
     };
 
     let keys = steganographer_core::password::derive_all_from_password(password, &salt, params)
         .map_err(|e| anyhow::anyhow!("Password key derivation failed: {e}"))?;
-    write_derived_keys(&keys, output_dir)
+    let key_files = write_derived_keys(&keys, output_dir, format == "json")?;
+    if format == "json" {
+        envelope::activate_json_mode("derive");
+        envelope::print(&envelope::success(
+            "derive",
+            serde_json::json!({
+                "output_dir": output_dir,
+                "key_files": key_files,
+                "salt": hex_encode(&salt),
+            }),
+        ));
+    }
+    Ok(())
 }
 
-/// Write a derived key set to `output_dir` as hex files with 0600 permissions.
+/// Write a derived key set to `output_dir` as hex files with 0600
+/// permissions, returning the written file paths. When `json_mode`, no
+/// per-key stdout report is emitted (the envelope carries the paths; raw
+/// key material is never serialized).
 fn write_derived_keys(
     keys: &steganographer_core::DerivedKeys,
     output_dir: &str,
-) -> anyhow::Result<()> {
+    json_mode: bool,
+) -> anyhow::Result<Vec<String>> {
     std::fs::create_dir_all(output_dir)?;
 
     let signing_pub = {
@@ -228,6 +289,7 @@ fn write_derived_keys(
         ),
     ];
 
+    let mut written: Vec<String> = Vec::new();
     for (path, key_bytes, desc) in &paths {
         let hex_str = hex_encode(key_bytes);
         std::fs::write(path, &hex_str)?;
@@ -238,11 +300,16 @@ fn write_derived_keys(
             perms.set_mode(0o600);
             std::fs::set_permissions(path, perms)?;
         }
-        println!("  {}: {} (0600) — {}", path, hex_str, desc);
+        if !json_mode {
+            println!("  {}: {} (0600) — {}", path, hex_str, desc);
+        }
+        written.push(path.clone());
     }
 
-    println!("\nKeys derived and written to {}", output_dir);
-    Ok(())
+    if !json_mode {
+        println!("\nKeys derived and written to {}", output_dir);
+    }
+    Ok(written)
 }
 
 // ─── Run (main encode entry point) ──────────────────────────────────
@@ -257,6 +324,9 @@ pub fn run(
     format: &str,
     opts: &EncodeOptions,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("encode");
+    }
     if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
         anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
     }
@@ -515,29 +585,31 @@ pub fn run(
         hash_algorithm: Some(hash_algo.name().to_string()),
     };
 
-    match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
-        _ => {
-            println!("Public key (for verification): {}", pub_hex);
-            if let Some(ref ek) = result.encryption_key_hex {
-                println!("Encryption key: {}", ek);
+    if !opts.quiet_report {
+        match format {
+            "json" => envelope::print(&envelope::success("encode", serde_json::to_value(&result)?)),
+            _ => {
+                println!("Public key (for verification): {}", pub_hex);
+                if let Some(ek) = &result.encryption_key_hex {
+                    println!("Encryption key: {}", ek);
+                }
+                if let Some(ak) = &result.embedding_key_hex {
+                    println!("Embedding key (for extraction): {}", ak);
+                }
+                if let Some(ha) = &result.hash_algorithm {
+                    println!("Hash algorithm: {}", ha);
+                }
+                if result.encrypted == Some(true) {
+                    println!("Payload: encrypted (ChaCha20-Poly1305)");
+                }
+                if result.error_correction == Some(true) {
+                    println!(
+                        "Error correction: Reed-Solomon (parity={})",
+                        opts.ecc_parity
+                    );
+                }
+                println!("Encoded file written to: {}", output);
             }
-            if let Some(ref ak) = result.embedding_key_hex {
-                println!("Embedding key (for extraction): {}", ak);
-            }
-            if let Some(ha) = &result.hash_algorithm {
-                println!("Hash algorithm: {}", ha);
-            }
-            if result.encrypted == Some(true) {
-                println!("Payload: encrypted (ChaCha20-Poly1305)");
-            }
-            if result.error_correction == Some(true) {
-                println!(
-                    "Error correction: Reed-Solomon (parity={})",
-                    opts.ecc_parity
-                );
-            }
-            println!("Encoded file written to: {}", output);
         }
     }
 
@@ -925,12 +997,14 @@ fn encode_multi_frame(
         hash_algorithm: opts.hash_algorithm.clone(),
     };
 
-    match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
-        _ => {
-            println!("Public key: {}", pub_hex);
-            println!("Spread across {} frames", n);
-            println!("Shards written to {}_001..{}_{:03}", output, output, n);
+    if !opts.quiet_report {
+        match format {
+            "json" => envelope::print(&envelope::success("encode", serde_json::to_value(&result)?)),
+            _ => {
+                println!("Public key: {}", pub_hex);
+                println!("Spread across {} frames", n);
+                println!("Shards written to {}_001..{}_{:03}", output, output, n);
+            }
         }
     }
     Ok(())
@@ -980,6 +1054,9 @@ pub fn info(
     raw_height: Option<u32>,
     embedding_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("info");
+    }
     if matches!(stego_type, "lsb_video" | "lsb_audio") && !(1..=4).contains(&bits) {
         anyhow::bail!("LSB bits must be in the range 1-4, got {}", bits);
     }
@@ -1058,7 +1135,7 @@ pub fn info(
     };
 
     match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
+        "json" => envelope::print(&envelope::success("info", serde_json::to_value(&result)?)),
         _ => {
             println!("File: {}", result.file);
             println!("File size: {} bytes", result.file_size);
@@ -1090,8 +1167,12 @@ pub fn info(
 ///
 /// The revoked-keys file is a JSON array of hex-encoded public keys.
 /// The `verify` command can check this list and warn if a signature
-/// was made with a revoked key.
-pub fn revoke_key(public_key_hex: &str, output_path: &str) -> anyhow::Result<()> {
+/// was made with a revoked key. JSON mode emits the
+/// `steganographer.cli/v1` envelope.
+pub fn revoke_key(public_key_hex: &str, output_path: &str, format: &str) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("revoke");
+    }
     // Validate the public key format
     let key_bytes = hex_decode(public_key_hex)?;
     if key_bytes.len() != 32 {
@@ -1112,7 +1193,20 @@ pub fn revoke_key(public_key_hex: &str, output_path: &str) -> anyhow::Result<()>
     // Check if already revoked
     let key_lower = public_key_hex.to_lowercase();
     if revoked.iter().any(|k| k.to_lowercase() == key_lower) {
-        println!("Key already revoked: {}", public_key_hex);
+        if format == "json" {
+            envelope::activate_json_mode("revoke");
+            envelope::print(&envelope::success(
+                "revoke",
+                serde_json::json!({
+                    "public_key": public_key_hex,
+                    "output_path": output_path,
+                    "already_revoked": true,
+                    "total_keys": revoked.len(),
+                }),
+            ));
+        } else {
+            println!("Key already revoked: {}", public_key_hex);
+        }
         return Ok(());
     }
 
@@ -1126,16 +1220,32 @@ pub fn revoke_key(public_key_hex: &str, output_path: &str) -> anyhow::Result<()>
     let json = serde_json::to_string_pretty(&revoked)?;
     std::fs::write(output_path, json)?;
 
-    println!("Key revoked: {}", public_key_hex);
-    println!(
-        "Revoked-keys list: {} ({} keys total)",
-        output_path,
-        revoked.len()
-    );
+    if format == "json" {
+        envelope::activate_json_mode("revoke");
+        envelope::print(&envelope::success(
+            "revoke",
+            serde_json::json!({
+                "public_key": public_key_hex,
+                "output_path": output_path,
+                "already_revoked": false,
+                "total_keys": revoked.len(),
+            }),
+        ));
+    } else {
+        println!("Key revoked: {}", public_key_hex);
+        println!(
+            "Revoked-keys list: {} ({} keys total)",
+            output_path,
+            revoked.len()
+        );
+    }
     Ok(())
 }
 
 pub fn analyze(input: &str, analysis_type: &str, format: &str) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("analyze");
+    }
     let data = std::fs::read(input)?;
     log::info!(
         "Analyzing {} ({} bytes) with {}",
@@ -1206,7 +1316,10 @@ pub fn analyze(input: &str, analysis_type: &str, format: &str) -> anyhow::Result
     };
 
     match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
+        "json" => envelope::print(&envelope::success(
+            "analyze",
+            serde_json::to_value(&result)?,
+        )),
         _ => {
             println!("File: {}", result.file);
             println!("Analysis: {}", result.analysis_type);
@@ -1275,6 +1388,9 @@ pub fn batch_process(
     format: &str,
     opts: &EncodeOptions,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        envelope::activate_json_mode("encode");
+    }
     log::info!("Batch processing: {} -> {}", input_dir, output_dir);
     std::fs::create_dir_all(output_dir)?;
 
@@ -1297,6 +1413,10 @@ pub fn batch_process(
         );
 
         log::info!("Processing: {}", input_path);
+        // In JSON batch mode each file encodes silently; the batch emits
+        // exactly one envelope on stdout.
+        let mut file_opts = opts.clone();
+        file_opts.quiet_report = format == "json";
         match run(
             config_path,
             &input_path,
@@ -1304,7 +1424,7 @@ pub fn batch_process(
             stego_type,
             bits,
             format,
-            opts,
+            &file_opts,
         ) {
             Ok(_) => {
                 success_count += 1;
@@ -1317,10 +1437,25 @@ pub fn batch_process(
         }
     }
 
-    println!(
-        "Batch complete: {} succeeded, {} failed",
-        success_count, error_count
-    );
+    if format == "json" {
+        envelope::activate_json_mode("encode");
+        let result = serde_json::json!({
+            "input_dir": input_dir,
+            "output_dir": output_dir,
+            "succeeded": success_count,
+            "failed": error_count,
+        });
+        if error_count > 0 {
+            envelope::print(&envelope::partial("encode", result, Vec::new()));
+        } else {
+            envelope::print(&envelope::success("encode", result));
+        }
+    } else {
+        println!(
+            "Batch complete: {} succeeded, {} failed",
+            success_count, error_count
+        );
+    }
     if error_count > 0 {
         std::process::exit(1);
     }

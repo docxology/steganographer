@@ -2,7 +2,7 @@
 //! placement (QUA-003 partial; roadmap v0.7.0 "Freeze immutable packet and
 //! placement vectors").
 //!
-//! # STATUS: alpha-provisional, non-stable
+//! # STATUS: stable (owner-approved 2026-09-21)
 //!
 //! Every vector here is **generated deterministically by the test itself**
 //! from fixed, documented seeds, keys, packet identifiers, and nonce

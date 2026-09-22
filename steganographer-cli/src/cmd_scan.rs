@@ -75,12 +75,13 @@ impl ScanFinding {
             .collect();
         let statistical_detected = scan.statistical.detected && detectors.statistical;
         // The profile's detector set filters which findings are reported;
-        // detection and the exit-1 policy follow the filtered report.
+        // detection and the exit-4 policy follow the filtered report.
         // Container findings have no detector knob and always contribute.
-        let detected = statistical_detected
-            || embedded_magic.is_some()
-            || !text_findings.is_empty()
-            || !container_findings.is_empty();
+        // Verdict follows the core content-derived verdict (magic, text,
+        // container concealment); statistical results are observations and
+        // never trigger the exit-4 threshold by themselves.
+        let detected =
+            embedded_magic.is_some() || !text_findings.is_empty() || !container_findings.is_empty();
         ScanFinding {
             file: path.display().to_string(),
             size,
@@ -251,11 +252,7 @@ fn walk(
         } else if file_type.is_file() {
             *files_scanned += 1;
             match scan_one(&path, max_bytes, detectors) {
-                Ok(finding) => {
-                    if finding.detected {
-                        findings.push(finding);
-                    }
-                }
+                Ok(finding) => findings.push(finding),
                 Err(error) => errors.push(format!("{}: {error}", path.display())),
             }
         }
@@ -284,10 +281,13 @@ pub fn check_input_symlink(path: &Path, follow_input_symlink: bool) -> Result<()
     Ok(())
 }
 
-/// Run the scan and return the process exit code: `0` clean, `1` findings.
+/// Run the scan and return the process exit code per the finalized table:
+/// `0` clean, `4` findings meet the caller-selected failure threshold,
+/// `5` a resource limit truncated files without producing findings (the
+/// result is inconclusive).
 ///
-/// Errors during the scan are collected into the report and do not abort the
-/// run; only argument/usage errors return `Err`. A symlinked input is
+/// Errors during the scan are collected into the report and do not abort
+/// the run; only argument/usage errors return `Err`. A symlinked input is
 /// rejected unless `follow_input_symlink` is set. `profile` (resolved from
 /// the config's `[profiles]` table by the caller) selects the reported
 /// detector set.
@@ -309,6 +309,9 @@ pub fn run(
         .map(ScanDetectors::from_profile)
         .unwrap_or_else(ScanDetectors::all);
 
+    // Every scanned file is recorded (not only detections): the JSONL
+    // contract is one record per file, and truncation of a clean file makes
+    // the whole run inconclusive (exit 5).
     let mut findings: Vec<ScanFinding> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut files_scanned = 0usize;
@@ -316,11 +319,7 @@ pub fn run(
     if metadata.is_file() {
         files_scanned = 1;
         match scan_one(path, max_bytes, &detectors) {
-            Ok(finding) => {
-                if finding.detected {
-                    findings.push(finding);
-                }
-            }
+            Ok(finding) => findings.push(finding),
             Err(error) => errors.push(format!("{input}: {error}")),
         }
     } else if metadata.is_dir() {
@@ -339,8 +338,33 @@ pub fn run(
         anyhow::bail!("'{input}' is not a regular file or directory");
     }
 
+    if format == "json" || format == "jsonl" {
+        crate::envelope::activate_json_mode("scan");
+    }
     emit(format, &findings, &errors, files_scanned)?;
-    Ok(if findings.is_empty() { 0 } else { 1 })
+    let any_detected = findings.iter().any(|finding| finding.detected);
+    let any_truncated = findings.iter().any(|finding| finding.truncated);
+    Ok(if any_detected {
+        4
+    } else if any_truncated {
+        5
+    } else {
+        0
+    })
+}
+
+/// Minimal per-file JSONL record: the scan result wrapped with the schema
+/// identifier and the record's status. `success` = fully scanned,
+/// `partial` = truncated by the byte budget (inconclusive), `error` = the
+/// file could not be scanned.
+#[derive(serde::Serialize)]
+struct JsonlRecord<'a> {
+    schema: &'static str,
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<crate::envelope::EnvelopeError>,
 }
 
 fn emit(
@@ -349,34 +373,81 @@ fn emit(
     errors: &[String],
     files_scanned: usize,
 ) -> anyhow::Result<()> {
+    let detected: Vec<&ScanFinding> = findings.iter().filter(|f| f.detected).collect();
+    let truncated = findings.iter().any(|finding| finding.truncated);
     let summary = ScanSummary {
         files_scanned,
-        findings: findings.len(),
+        findings: detected.len(),
         errors: errors.len(),
+    };
+    let scan_error = |message: &String| crate::envelope::EnvelopeError {
+        code: crate::envelope::SCAN_ERROR.to_string(),
+        message: message.clone(),
     };
     match format {
         "jsonl" => {
+            // One record per scanned file (including clean and truncated
+            // ones), then the final summary envelope on the last line.
             for finding in findings {
-                println!("{}", serde_json::to_string(finding)?);
+                let record = JsonlRecord {
+                    schema: crate::envelope::SCHEMA,
+                    status: if finding.truncated {
+                        "partial"
+                    } else {
+                        "success"
+                    },
+                    result: Some(serde_json::to_value(finding)?),
+                    errors: Vec::new(),
+                };
+                println!("{}", serde_json::to_string(&record)?);
             }
             for error in errors {
-                println!(
-                    "{}",
-                    serde_json::json!({ "type": "error", "message": error })
-                );
+                let record = JsonlRecord {
+                    schema: crate::envelope::SCHEMA,
+                    status: "error",
+                    result: None,
+                    errors: vec![scan_error(error)],
+                };
+                println!("{}", serde_json::to_string(&record)?);
             }
-            eprintln!("{}", serde_json::to_string(&summary)?);
+            let mut envelope = if truncated {
+                crate::envelope::partial(
+                    "scan",
+                    serde_json::json!({"summary": summary}),
+                    Vec::new(),
+                )
+            } else {
+                crate::envelope::success("scan", serde_json::json!({"summary": summary}))
+            };
+            envelope.errors = errors.iter().map(scan_error).collect();
+            println!("{}", serde_json::to_string(&envelope)?);
         }
         "json" => {
             let output = serde_json::json!({
-                "findings": findings,
+                "findings": detected,
                 "summary": summary,
-                "errors": errors,
+                "errors": errors.iter().map(scan_error).collect::<Vec<_>>(),
             });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let warnings: Vec<String> = findings
+                .iter()
+                .filter(|finding| finding.truncated)
+                .map(|finding| {
+                    format!(
+                        "file '{}' exceeded the byte budget and was truncated; \
+                         result may be incomplete",
+                        finding.file
+                    )
+                })
+                .collect();
+            let envelope = if truncated {
+                crate::envelope::partial("scan", output, warnings)
+            } else {
+                crate::envelope::success("scan", output)
+            };
+            crate::envelope::print(&envelope);
         }
         _ => {
-            for finding in findings {
+            for finding in &detected {
                 print!(
                     "{} (family={}, entropy={:.2}, statistical_detected={}",
                     finding.file,
