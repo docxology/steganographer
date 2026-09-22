@@ -355,8 +355,8 @@ impl LearnedModel {
             );
         }
         let mut vals = Vec::with_capacity(PARAM_COUNT);
-        for chunk in bytes.chunks_exact(4) {
-            vals.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        for chunk in bytes.as_chunks::<4>().0 {
+            vals.push(f32::from_le_bytes(*chunk));
         }
         let mut it = vals.into_iter();
         let w1: Vec<f32> = it.by_ref().take(MODEL_INPUT * HIDDEN).collect();

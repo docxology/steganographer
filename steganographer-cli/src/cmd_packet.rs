@@ -126,6 +126,9 @@ pub fn encode(
     format: &str,
     options: &GenericEncodeOptions,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        crate::envelope::activate_json_mode("encode");
+    }
     validate_format(format)?;
     validate_kernel(stego_type)?;
     let audio = is_audio_kernel(stego_type);
@@ -319,6 +322,9 @@ pub fn decode(
     force: bool,
     options: &GenericDecodeOptions,
 ) -> anyhow::Result<()> {
+    if format == "json" {
+        crate::envelope::activate_json_mode("decode");
+    }
     validate_format(format)?;
     // PKT-007: resolve the password path up front, before any media work,
     // so conflicting credentials fail fast.
@@ -477,10 +483,15 @@ pub fn run_extract_with_password(
     force: bool,
     password: Option<String>,
     password_file: Option<String>,
+    format: &str,
 ) -> anyhow::Result<()> {
     let output_str = output
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8"))?;
+    if format == "json" {
+        crate::envelope::activate_json_mode("extract");
+    }
+    validate_format(format)?;
     validate_extract_output_name(output_str)?;
     let input_str = input
         .to_str()
@@ -557,17 +568,31 @@ pub fn run_extract_with_password(
         anyhow::bail!("recovered payload digest does not match the packet envelope");
     }
 
-    std::fs::write(output, &payload)?;
     let digest = blake3::hash(&payload);
     let kind = payload_kind_name(report.packet.envelope.payload_kind);
-    println!(
-        "Extracted payload: {} bytes (kind: {})",
-        payload.len(),
-        kind
-    );
-    println!("Saved to: {}", output_str);
-    print_kdf_line(&kdf);
-    println!("BLAKE3 digest: {}", digest);
+    std::fs::write(output, &payload)?;
+    if format == "json" {
+        crate::envelope::activate_json_mode("extract");
+        crate::envelope::print(&crate::envelope::success(
+            "extract",
+            serde_json::json!({
+                "payload_bytes": payload.len(),
+                "payload_kind": kind,
+                "output": output_str,
+                "blake3_digest": digest.to_string(),
+                "kdf": kdf,
+            }),
+        ));
+    } else {
+        println!(
+            "Extracted payload: {} bytes (kind: {})",
+            payload.len(),
+            kind
+        );
+        println!("Saved to: {}", output_str);
+        print_kdf_line(&kdf);
+        println!("BLAKE3 digest: {}", digest);
+    }
     Ok(())
 }
 /// The final path component of an extract target must be a safe file name;
@@ -866,7 +891,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Result<()> {
     if format == "json" {
-        println!("{}", serde_json::to_string_pretty(result)?);
+        crate::envelope::activate_json_mode("encode");
+        crate::envelope::print(&crate::envelope::success(
+            "encode",
+            serde_json::to_value(result)?,
+        ));
     } else {
         println!("Generic packet: {}", result.protocol);
         println!("Packet ID: {}", result.packet_id);
@@ -894,7 +923,11 @@ fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Re
 
 fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Result<()> {
     if format == "json" {
-        println!("{}", serde_json::to_string_pretty(result)?);
+        crate::envelope::activate_json_mode("decode");
+        crate::envelope::print(&crate::envelope::success(
+            "decode",
+            serde_json::to_value(result)?,
+        ));
     } else {
         println!("Generic packet: {}", result.protocol);
         println!("Packet ID: {}", result.packet_id);

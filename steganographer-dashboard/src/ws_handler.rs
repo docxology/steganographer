@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use image::{ImageFormat, ImageReader, Limits};
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -225,9 +226,10 @@ pub(crate) fn ots_metrics_json(state: &DashboardState) -> serde_json::Value {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Per-stream video pipeline state: frame counter, LSB module and the LSB
-/// bit-depth it was built with. Both the WebSocket encode handler and the
-/// WebRTC data-channel handler run one `FramePipeline` per connection so the
-/// two transports feed an identical sign → LSB-embed → re-encode pipeline.
+/// bit-depth it was built with. The WebSocket encode handler runs one
+/// `FramePipeline` per connection; the WebRTC data-channel handler runs the
+/// equivalent `EncodeSession` (both feed an identical sign → LSB-embed →
+/// re-encode pipeline signing with the session-wide `state.signer`).
 pub(crate) struct FramePipeline {
     frame_counter: u64,
     lsb: LsbVideo,
@@ -343,23 +345,18 @@ impl FramePipeline {
         let encoded_jpeg = jpeg_out.into_inner();
         let b64_frame = base64_encode(&encoded_jpeg);
 
-        {
-            let mut last = state
-                .last_encoded_frame
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *last = Some(EncodedFrame {
-                // Post-embed pixels: extraction source and displayed image.
-                rgb_data,
-                // Pre-embed pixels: exactly what the signature covers, kept
-                // so the decode handler can perform real verification (the
-                // post-embed pixels differ in their LSBs).
-                signed_rgb,
-                width,
-                height,
-                frame_index: frame_idx,
-            });
-        }
+        // Store the frame for the decode side and hand verification off to
+        // the bounded async worker (sign + embed stay on the critical path;
+        // extract + BLAKE3 + Ed25519 do not).
+        store_frame_and_enqueue_verify(
+            state,
+            frame_idx,
+            rgb_data,
+            signed_rgb,
+            width,
+            height,
+            self.current_lsb_bits,
+        );
 
         let metrics_json = state.metrics.to_json();
         Ok(serde_json::json!({
@@ -378,163 +375,288 @@ impl FramePipeline {
     }
 }
 
-/// Per-stream verification state: LSB module used to extract payloads plus
-/// the bit-depth it was built with. Shared by the WebSocket decode handler
-/// and the WebRTC data-channel handler so both verify identically.
-pub(crate) struct FrameVerifier {
-    lsb: LsbVideo,
-    current_lsb_bits: u8,
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASYNCHRONOUS FRAME VERIFICATION (bounded worker, drop-oldest backpressure)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Signature verification (LSB extract + BLAKE3 + Ed25519) costs ~60-80 ms per
+// 720p frame and previously ran synchronously inside the encode/decode
+// pipelines, capping throughput at ~1 fps. Verification is now decoupled:
+//
+// - The encode path (sign + embed) stays synchronous and submits each stored
+//   frame to a dedicated worker thread through a BOUNDED queue
+//   (`VERIFY_QUEUE_CAP` = 4 entries, ~4 × verify latency of backlog).
+//   Backpressure policy: drop-OLDEST — when the queue is full the oldest
+//   queued (not yet verified) frame is discarded to make room, so the newest
+//   frame is always the one verified and JPEG intake never queues unboundedly.
+//   Dropped frames are simply never verified (no metric is recorded for them);
+//   the decode side reports them as stale.
+// - The worker performs the REAL verification (LSB extraction + signature
+//   check against the pre-embed bytes) and records the per-frame outcome
+//   (`frames_verified_ok` / `frames_verified_fail` / verify latency) plus the
+//   result into the frame's `VerifySlot`.
+// - The decode-poll path reports the LATEST verification result by frame
+//   counter instead of re-verifying synchronously. If the result for the
+//   freshest stored frame is not ready yet, the poll waits briefly (bounded)
+//   and otherwise reports `verified: false` + `verified_stale: true` with
+//   `payload_found: false` — consumers keep the existing field names; only
+//   additive fields (`verified_stale`, `payload.stale`) were introduced.
+
+/// Maximum frames allowed to sit in the asynchronous verify queue. At the
+/// measured ~60-80 ms per verification this bounds the backlog at ~0.3 s.
+const VERIFY_QUEUE_CAP: usize = 4;
+
+/// Outcome of one asynchronous verification of an actually-embedded frame.
+#[derive(Clone)]
+pub(crate) struct VerifyOutcome {
+    frame_index: u64,
+    verified: bool,
+    payload_info: Option<serde_json::Value>,
+    verify_us: u64,
 }
 
-impl FrameVerifier {
-    pub(crate) fn new() -> Self {
-        Self {
-            lsb: LsbVideo::new(1),
-            current_lsb_bits: 1,
-        }
-    }
+/// Per-frame slot holding the latest completed asynchronous verification
+/// result. Shared between the encode handler (via the stored
+/// [`EncodedFrame`]) and the decode-poll path.
+#[derive(Default)]
+pub struct VerifySlot {
+    latest: std::sync::Mutex<Option<VerifyOutcome>>,
+}
 
-    /// Extract the LSB payload from the latest encoded frame, verify the
-    /// signature against the pre-embed pixels using the session-wide
-    /// keypair's public half, update verification metrics, and return the
-    /// `decoded_frame` reply JSON (same message shape as the WebSocket decode
-    /// path). When no frame has been encoded yet, returns a `verify_status`
-    /// waiting reply instead.
-    pub(crate) fn verify_latest(&mut self, state: &DashboardState) -> serde_json::Value {
-        let encoded = {
-            let last = state
-                .last_encoded_frame
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            last.clone()
-        };
-        let Some(ef) = encoded else {
-            let metrics_json = state.metrics.to_json();
-            return serde_json::json!({
-                "type": "verify_status",
-                "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-                "backend": state.signing_backend,
-                "waiting": true,
-                "ots": ots_metrics_json(state),
-            });
-        };
-
-        let verify_start = Instant::now();
-        let mut data_copy = ef.rgb_data.clone();
-        let frame = VideoFrame {
-            width: ef.width,
-            height: ef.height,
-            stride: ef.width * 3,
-            format: VideoFormat::Rgb8,
-            data: &mut data_copy,
-            frame_index: ef.frame_index,
-        };
-
-        // Update LSB bits from live config if changed. Clamped so a
-        // stale config can never reach the panicking constructor.
-        {
-            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
-            let bits = cfg.lsb_bits.clamp(1, 4);
-            if bits != self.current_lsb_bits {
-                self.current_lsb_bits = bits;
-                self.lsb = LsbVideo::new(bits);
-                log::info!(
-                    "Video decode: LSB bits updated to {}",
-                    self.current_lsb_bits
-                );
-            }
-        }
-
-        let extracted = self.lsb.extract(&frame);
-
-        // Real signature verification: check the extracted payload
-        // against the pre-embed pixel data the signature covers, using
-        // the session-wide keypair's public half. Merely *finding* a
-        // payload is NOT proof of authenticity.
-        let (verified, payload_info) = match extracted {
-            Ok(Some(payload)) => {
-                let verified = verify_signature(&state.signer, &payload, &ef.signed_rgb);
-                if verified {
-                    state.metrics.record_verify_ok();
-                } else {
-                    state.metrics.record_verify_fail();
+impl VerifySlot {
+    /// Wait (bounded) until the slot carries a verification result for
+    /// `frame_index`. Returns the matching outcome, or `None` on timeout.
+    fn wait_for(&self, frame_index: u64, timeout: std::time::Duration) -> Option<VerifyOutcome> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let guard = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(o) = guard.as_ref() {
+                    if o.frame_index == frame_index {
+                        return Some(o.clone());
+                    }
                 }
-                let hash_hex: String = payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
-                let sig_preview: String = payload
-                    .signature
-                    .to_bytes()
-                    .iter()
-                    .take(16)
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                let sig_full: String = payload
-                    .signature
-                    .to_bytes()
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                (
-                    verified,
-                    serde_json::json!({
-                        "payload_found": true,
-                        "frame_index": payload.frame_index,
-                        "hash": hash_hex,
-                        "signature_preview": sig_preview,
-                        "signature_full": sig_full,
-                    }),
-                )
             }
-            Ok(None) => {
-                state.metrics.record_verify_fail();
-                (
-                    false,
-                    serde_json::json!({"payload_found": false, "error": "no payload found"}),
-                )
+            if Instant::now() >= deadline {
+                return None;
             }
-            Err(e) => {
-                state.metrics.record_verify_fail();
-                (
-                    false,
-                    serde_json::json!({"payload_found": false, "error": e.to_string()}),
-                )
-            }
-        };
-        let verify_duration = verify_start.elapsed();
-        state.metrics.record_verify_duration(verify_duration);
-
-        let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data.clone())
-            .expect("invalid raw RGB dimensions");
-        let mut jpeg_out = Cursor::new(Vec::new());
-        let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
-        let b64_frame = base64_encode(&jpeg_out.into_inner());
-
-        let metrics_json = state.metrics.to_json();
-        let now = {
-            let d = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            let secs = d.as_secs();
-            // Simple ISO 8601 UTC timestamp
-            let s = secs % 60;
-            let m = (secs / 60) % 60;
-            let h = (secs / 3600) % 24;
-            format!("{:02}:{:02}:{:02}.{:03}Z", h, m, s, d.subsec_millis())
-        };
-        serde_json::json!({
-            "type": "decoded_frame",
-            "frame": b64_frame,
-            "width": ef.width,
-            "height": ef.height,
-            "verified": verified,
-            "payload": payload_info,
-            "verify_us": verify_duration.as_micros() as u64,
-            "timestamp": now,
-            "lsb_bits": self.current_lsb_bits,
-            "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-            "backend": state.signing_backend,
-            "ots": ots_metrics_json(state),
-        })
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
+}
+
+/// One encoded frame awaiting asynchronous verification.
+struct VerifyJob {
+    frame_index: u64,
+    /// Pre-embed pixels: exactly what the signature covers.
+    signed_rgb: Vec<u8>,
+    /// Post-embed pixels: LSB extraction source.
+    rgb_data: Vec<u8>,
+    width: u32,
+    height: u32,
+    lsb_bits: u8,
+    /// Ed25519 public key bytes of the session-wide signer.
+    verify_key: [u8; 32],
+    metrics: Arc<steganographer_core::StegoMetrics>,
+    slot: Arc<VerifySlot>,
+}
+
+/// Run one verification job: extract the LSB payload from the post-embed
+/// pixels, verify the signature against the pre-embed bytes, update the
+/// verification metrics (real outcomes of actually-embedded frames), and
+/// publish the result into the job's slot.
+fn run_verify(job: VerifyJob) {
+    let VerifyJob {
+        frame_index,
+        signed_rgb,
+        rgb_data,
+        width,
+        height,
+        lsb_bits,
+        verify_key,
+        metrics,
+        slot,
+    } = job;
+    let verify_start = Instant::now();
+    let mut data = rgb_data;
+    let frame = VideoFrame {
+        width,
+        height,
+        stride: width * 3,
+        format: VideoFormat::Rgb8,
+        data: &mut data,
+        frame_index,
+    };
+    let lsb = LsbVideo::new(lsb_bits);
+    let (verified, payload_info) = match lsb.extract(&frame) {
+        Ok(Some(payload)) => {
+            // Real signature verification against the pre-embed pixels the
+            // signature covers (finding a payload is not proof of
+            // authenticity).
+            let verified = Verifier::from_bytes(&verify_key)
+                .map(|v| v.verify(&payload, &signed_rgb, None))
+                .unwrap_or(false);
+            let hash_hex: String = payload.hash.iter().map(|b| format!("{b:02x}")).collect();
+            let sig_preview: String = payload
+                .signature
+                .to_bytes()
+                .iter()
+                .take(16)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let sig_full: String = payload
+                .signature
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            (
+                verified,
+                Some(serde_json::json!({
+                    "payload_found": true,
+                    "frame_index": payload.frame_index,
+                    "hash": hash_hex,
+                    "signature_preview": sig_preview,
+                    "signature_full": sig_full,
+                })),
+            )
+        }
+        Ok(None) => (
+            false,
+            Some(serde_json::json!({"payload_found": false, "error": "no payload found"})),
+        ),
+        Err(e) => (
+            false,
+            Some(serde_json::json!({"payload_found": false, "error": e.to_string()})),
+        ),
+    };
+    metrics.record_verify_duration(verify_start.elapsed());
+    if verified {
+        metrics.record_verify_ok();
+    } else {
+        metrics.record_verify_fail();
+    }
+    *slot.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(VerifyOutcome {
+        frame_index,
+        verified,
+        payload_info,
+        verify_us: verify_start.elapsed().as_micros() as u64,
+    });
+}
+
+/// Dedicated verification worker: bounded queue + drop-oldest backpressure.
+struct VerifyEngine {
+    queue: std::sync::Mutex<VecDeque<VerifyJob>>,
+    cv: std::sync::Condvar,
+}
+
+static VERIFY_ENGINE: std::sync::LazyLock<Arc<VerifyEngine>> = std::sync::LazyLock::new(|| {
+    let engine = Arc::new(VerifyEngine {
+        queue: std::sync::Mutex::new(VecDeque::new()),
+        cv: std::sync::Condvar::new(),
+    });
+    let worker = engine.clone();
+    // Dedicated worker thread: verification is CPU-bound and fully
+    // detached from the async encode/decode paths.
+    let _ = std::thread::Builder::new()
+        .name("frame-verify-worker".into())
+        .spawn(move || verify_worker_loop(worker));
+    engine
+});
+
+/// Accessor for the process-wide verification worker engine.
+fn verify_engine() -> &'static Arc<VerifyEngine> {
+    &VERIFY_ENGINE
+}
+
+fn verify_worker_loop(engine: Arc<VerifyEngine>) {
+    loop {
+        let job = {
+            let mut q = engine.queue.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if let Some(job) = q.pop_front() {
+                    break job;
+                }
+                q = engine.cv.wait(q).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        // A panicking job (e.g. a bad bit-depth slipping through) must never
+        // take down the shared worker permanently.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_verify(job)));
+    }
+}
+
+/// Pure bounded-queue push used by [`enqueue_verify`]. Pushes `job` onto
+/// `queue`, dropping the OLDEST queued job when the queue is already at
+/// `cap`. Returns `true` when an oldest job was dropped.
+fn queue_push(queue: &mut VecDeque<VerifyJob>, job: VerifyJob, cap: usize) -> bool {
+    let mut dropped_oldest = false;
+    if queue.len() >= cap {
+        queue.pop_front();
+        dropped_oldest = true;
+    }
+    queue.push_back(job);
+    dropped_oldest
+}
+
+/// Submit one freshly embedded frame for asynchronous verification.
+///
+/// The queue is bounded at [`VERIFY_QUEUE_CAP`]; when full, the OLDEST
+/// queued frame is dropped so the newest frame is always verified. Returns
+/// `true` when an oldest job was dropped under backpressure.
+fn enqueue_verify(job: VerifyJob) -> bool {
+    let engine = verify_engine();
+    let mut q = engine.queue.lock().unwrap_or_else(|e| e.into_inner());
+    let dropped = queue_push(&mut q, job, VERIFY_QUEUE_CAP);
+    drop(q);
+    engine.cv.notify_one();
+    if dropped {
+        log::warn!("Verify queue full: dropped oldest pending verification");
+    }
+    dropped
+}
+
+/// Store a freshly embedded frame for the decode side and hand verification
+/// off to the bounded async worker (drop-oldest backpressure). Returns the
+/// slot the decode-poll path reads the verification result from.
+fn store_frame_and_enqueue_verify(
+    state: &DashboardState,
+    frame_idx: u64,
+    rgb_data: Vec<u8>,
+    signed_rgb: Vec<u8>,
+    width: u32,
+    height: u32,
+    lsb_bits: u8,
+) -> std::sync::Arc<VerifySlot> {
+    let slot = std::sync::Arc::new(VerifySlot::default());
+    {
+        let mut last = state
+            .last_encoded_frame
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *last = Some(EncodedFrame {
+            // Post-embed pixels: extraction source and displayed image. The
+            // worker extracts from its own copy; the stored frame serves the
+            // decode-side display.
+            rgb_data: rgb_data.clone(),
+            width,
+            height,
+            frame_index: frame_idx,
+            verify: slot.clone(),
+        });
+    }
+    let _ = enqueue_verify(VerifyJob {
+        frame_index: frame_idx,
+        signed_rgb,
+        rgb_data,
+        width,
+        height,
+        lsb_bits,
+        verify_key: state.signer.verifying_key().to_bytes(),
+        metrics: state.metrics.clone(),
+        slot: slot.clone(),
+    });
+    slot
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -576,6 +698,7 @@ pub async fn ws_decode_handler(
     let ws = ws_configure(ws, &headers, &state);
     ws.on_upgrade(move |socket| handle_decode_socket(socket, state))
 }
+
 /// WebSocket upgrade handler for audio encode.
 pub async fn ws_audio_encode_handler(
     State(state): State<Arc<DashboardState>>,
@@ -618,18 +741,21 @@ pub async fn ws_audio_decode_handler(
 
 /// Per-connection encode pipeline state shared by the WebSocket and
 /// WebRTC DataChannel transports.
+///
+/// Signing uses the session-wide [`DashboardState::signer`] (what the
+/// verify worker checks against), so the session carries only per-frame
+/// pipeline state: the LSB module, its active bit depth, and the frame
+/// counter.
 pub struct EncodeSession {
-    signer: Signer,
     lsb: LsbVideo,
     current_lsb_bits: u8,
     frame_counter: AtomicU64,
 }
 
 impl EncodeSession {
-    /// Create a fresh encode session (fresh signer, 1-bit LSB, frame 0).
+    /// Create a fresh encode session (1-bit LSB, frame 0).
     pub fn new() -> Self {
         Self {
-            signer: Signer::generate(),
             lsb: LsbVideo::new(1),
             current_lsb_bits: 1,
             frame_counter: AtomicU64::new(0),
@@ -679,15 +805,18 @@ pub fn process_encode_frame(
     let signed_rgb = rgb_data.clone();
 
     let sign_start = Instant::now();
-    let payload = session.signer.sign_frame(frame_idx, &rgb_data, None);
+    let payload = state.signer.sign_frame(frame_idx, &rgb_data, None);
     let sign_duration = sign_start.elapsed();
     state.metrics.record_sign_duration(sign_duration);
 
-    // Update LSB bits from live config if changed
+    // Update LSB bits from live config if changed. The API validates
+    // 1..=4, but clamp defensively so a stale/other-source config can
+    // never reach the panicking constructor.
     {
         let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
-        if cfg.lsb_bits != session.current_lsb_bits {
-            session.current_lsb_bits = cfg.lsb_bits;
+        let bits = cfg.lsb_bits.clamp(1, 4);
+        if bits != session.current_lsb_bits {
+            session.current_lsb_bits = bits;
             session.lsb = LsbVideo::new(session.current_lsb_bits);
             log::info!(
                 "Video encode: LSB bits updated to {}",
@@ -729,19 +858,18 @@ pub fn process_encode_frame(
     let encoded_jpeg = jpeg_out.into_inner();
     let b64_frame = base64_encode(&encoded_jpeg);
 
-    {
-        let mut last = state
-            .last_encoded_frame
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *last = Some(EncodedFrame {
-            rgb_data,
-            signed_rgb,
-            width,
-            height,
-            frame_index: frame_idx,
-        });
-    }
+    // Store the frame for the decode side and hand verification off to the
+    // bounded async worker (never blocks intake: sign + embed stay on the
+    // critical path; extract + BLAKE3 + Ed25519 do not).
+    store_frame_and_enqueue_verify(
+        state,
+        frame_idx,
+        rgb_data,
+        signed_rgb,
+        width,
+        height,
+        session.current_lsb_bits,
+    );
 
     let metrics_json = state.metrics.to_json();
     Some(serde_json::json!({
@@ -847,12 +975,13 @@ async fn drain_queued(socket: &mut WebSocket) -> bool {
         }
     }
 }
-/// Handle the decode WebSocket — extracts LSB payloads from the latest encoded
-/// frame and streams verification results to the right panel.
+/// Handle the decode WebSocket — reports the latest asynchronous verification
+/// result for the stored frame and streams it to the right panel (the same
+/// pipeline as the WebRTC decode poll).
 async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     log::info!("Decode WebSocket client connected");
 
-    let mut verifier = FrameVerifier::new();
+    let mut session = DecodeSession::new();
 
     loop {
         let msg = match socket.recv().await {
@@ -883,7 +1012,7 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
             continue;
         }
 
-        let reply = verifier.verify_latest(&state);
+        let reply = process_decode_poll(&state, &mut session);
 
         if socket
             .send(Message::Text(reply.to_string().into()))
@@ -902,18 +1031,17 @@ async fn handle_decode_socket(mut socket: WebSocket, state: Arc<DashboardState>)
         }
     }
 }
-/// Per-connection decode pipeline state shared by the WebSocket and
-/// WebRTC DataChannel transports.
+/// Per-connection decode-poll metadata shared by the WebSocket and WebRTC
+/// DataChannel transports. Verification itself runs on the async worker;
+/// the session only tracks the configured LSB bit depth for reply metadata.
 pub struct DecodeSession {
-    lsb: LsbVideo,
     current_lsb_bits: u8,
 }
 
 impl DecodeSession {
-    /// Create a fresh decode session (1-bit LSB extractor).
+    /// Create a fresh decode session (1-bit LSB default).
     pub fn new() -> Self {
         Self {
-            lsb: LsbVideo::new(1),
             current_lsb_bits: 1,
         }
     }
@@ -925,13 +1053,25 @@ impl Default for DecodeSession {
     }
 }
 
-/// Run one decode poll: extract the LSB payload from the latest encoded
-/// frame, verify it, and build the JSON reply shared by the WebSocket and
-/// WebRTC transports.
+/// Run one decode poll: report the LATEST asynchronous verification result
+/// for the freshest stored frame and build the JSON reply shared by the
+/// WebSocket and WebRTC transports.
+///
+/// The synchronous verify (LSB extract + BLAKE3 + Ed25519) no longer runs on
+/// the poll path — it happens on the bounded worker thread. The poll waits
+/// briefly (bounded by `DECODE_VERIFY_WAIT`) for the worker's result of the
+/// current frame; if it is not ready yet the reply carries
+/// `verified: false` + `verified_stale: true` (additive field; existing field
+/// names unchanged).
 pub fn process_decode_poll(
     state: &DashboardState,
     session: &mut DecodeSession,
 ) -> serde_json::Value {
+    /// Bounded wait for the async verifier to publish the current frame's
+    /// result. Typically <100 ms (one verification); only pays on the
+    /// low-rate decode-poll path, never on frame intake.
+    const DECODE_VERIFY_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
     let encoded = {
         let last = state
             .last_encoded_frame
@@ -940,114 +1080,78 @@ pub fn process_decode_poll(
         last.clone()
     };
 
-    if let Some(ef) = encoded {
-        let verify_start = Instant::now();
-        let mut data_copy = ef.rgb_data.clone();
-        let frame = VideoFrame {
-            width: ef.width,
-            height: ef.height,
-            stride: ef.width * 3,
-            format: VideoFormat::Rgb8,
-            data: &mut data_copy,
-            frame_index: ef.frame_index,
-        };
-
-        // Update LSB bits from live config if changed
-        {
-            let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
-            if cfg.lsb_bits != session.current_lsb_bits {
-                session.current_lsb_bits = cfg.lsb_bits;
-                session.lsb = LsbVideo::new(session.current_lsb_bits);
-                log::info!(
-                    "Video decode: LSB bits updated to {}",
-                    session.current_lsb_bits
-                );
-            }
-        }
-
-        let extracted = session.lsb.extract(&frame);
-        let verify_duration = verify_start.elapsed();
-        state.metrics.record_verify_duration(verify_duration);
-
-        let (verified, payload_info) = match extracted {
-            Ok(Some(payload)) => {
-                state.metrics.record_verify_ok();
-                let hash_hex: String = payload.hash.iter().map(|b| format!("{:02x}", b)).collect();
-                let sig_preview: String = payload
-                    .signature
-                    .to_bytes()
-                    .iter()
-                    .take(16)
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                let sig_full: String = payload
-                    .signature
-                    .to_bytes()
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                (
-                    true,
-                    serde_json::json!({
-                        "frame_index": payload.frame_index,
-                        "hash": hash_hex,
-                        "signature_preview": sig_preview,
-                        "signature_full": sig_full,
-                    }),
-                )
-            }
-            Ok(None) => {
-                state.metrics.record_verify_fail();
-                (false, serde_json::json!({"error": "no payload found"}))
-            }
-            Err(e) => {
-                state.metrics.record_verify_fail();
-                (false, serde_json::json!({"error": e.to_string()}))
-            }
-        };
-
-        let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data)
-            .expect("invalid raw RGB dimensions");
-        let mut jpeg_out = Cursor::new(Vec::new());
-        let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
-        let b64_frame = base64_encode(&jpeg_out.into_inner());
-
+    let Some(ef) = encoded else {
         let metrics_json = state.metrics.to_json();
-        let now = {
-            let d = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            let secs = d.as_secs();
-            // Simple ISO 8601 UTC timestamp
-            let s = secs % 60;
-            let m = (secs / 60) % 60;
-            let h = (secs / 3600) % 24;
-            format!("{:02}:{:02}:{:02}.{:03}Z", h, m, s, d.subsec_millis())
-        };
-        serde_json::json!({
-            "type": "decoded_frame",
-            "frame": b64_frame,
-            "width": ef.width,
-            "height": ef.height,
-            "verified": verified,
-            "payload": payload_info,
-            "verify_us": verify_duration.as_micros() as u64,
-            "timestamp": now,
-            "lsb_bits": session.current_lsb_bits,
-            "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
-            "backend": state.signing_backend,
-            "ots": ots_metrics_json(state),
-        })
-    } else {
-        let metrics_json = state.metrics.to_json();
-        serde_json::json!({
+        return serde_json::json!({
             "type": "verify_status",
             "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
             "backend": state.signing_backend,
             "waiting": true,
             "ots": ots_metrics_json(state),
-        })
+        });
+    };
+    // Reply metadata only: the actual extraction runs on the verify worker
+    // with the frame's own bit depth.
+    {
+        let cfg = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
+        session.current_lsb_bits = cfg.lsb_bits;
     }
+
+    // Latest verification result by frame counter. Bounded wait for the
+    // async worker; stale if it does not land in time.
+    let outcome = ef.verify.wait_for(ef.frame_index, DECODE_VERIFY_WAIT);
+    let verified_stale = outcome.is_none();
+    let (verified, payload_info, verify_us) = match outcome {
+        Some(o) => (
+            o.verified,
+            o.payload_info
+                .unwrap_or_else(|| serde_json::json!({"payload_found": false})),
+            o.verify_us,
+        ),
+        None => (
+            false,
+            serde_json::json!({
+                "payload_found": false,
+                "error": "verification pending",
+                "stale": true,
+            }),
+            0,
+        ),
+    };
+
+    let decoded_image = image::RgbImage::from_raw(ef.width, ef.height, ef.rgb_data)
+        .expect("invalid raw RGB dimensions");
+    let mut jpeg_out = Cursor::new(Vec::new());
+    let _ = decoded_image.write_to(&mut jpeg_out, ImageFormat::Jpeg);
+    let b64_frame = base64_encode(&jpeg_out.into_inner());
+
+    let metrics_json = state.metrics.to_json();
+    let now = {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = d.as_secs();
+        // Simple ISO 8601 UTC timestamp
+        let s = secs % 60;
+        let m = (secs / 60) % 60;
+        let h = (secs / 3600) % 24;
+        format!("{:02}:{:02}:{:02}.{:03}Z", h, m, s, d.subsec_millis())
+    };
+    serde_json::json!({
+        "type": "decoded_frame",
+        "frame": b64_frame,
+        "width": ef.width,
+        "height": ef.height,
+        "verified": verified,
+        "verified_stale": verified_stale,
+        "payload": payload_info,
+        "verify_us": verify_us,
+        "timestamp": now,
+        "lsb_bits": session.current_lsb_bits,
+        "data": serde_json::from_str::<serde_json::Value>(&metrics_json).unwrap_or_default(),
+        "backend": state.signing_backend,
+        "ots": ots_metrics_json(state),
+    })
 }
 
 /// Verify an extracted [`steganographer_core::crypto::SignaturePayload`]
@@ -1450,12 +1554,12 @@ async fn handle_audio_decode_socket(mut socket: WebSocket, state: Arc<DashboardS
 pub struct EncodedFrame {
     /// Post-embed pixels: extraction source and displayed image.
     pub rgb_data: Vec<u8>,
-    /// Pre-embed pixels: exactly what the signature covers; used by the
-    /// decode handler for real signature verification.
-    pub signed_rgb: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub frame_index: u64,
+    /// Async verification slot: filled by the bounded verify worker once the
+    /// frame's signature has been checked against the pre-embed pixels.
+    pub verify: std::sync::Arc<VerifySlot>,
 }
 
 /// Encoded audio chunk data stored for cross-WS-handler sharing.
@@ -1647,5 +1751,88 @@ mod tests {
         // its LSBs differ from the signed snapshot (why the decode handlers
         // verify against the stored pre-embed bytes).
         let _ = extract_frame;
+    }
+
+    // ─── Asynchronous verification (bounded worker, drop-oldest) ──────────
+
+    fn dummy_job(frame_index: u64) -> VerifyJob {
+        VerifyJob {
+            frame_index,
+            signed_rgb: Vec::new(),
+            rgb_data: Vec::new(),
+            width: 1,
+            height: 1,
+            lsb_bits: 1,
+            verify_key: [0u8; 32],
+            metrics: Arc::new(steganographer_core::StegoMetrics::new()),
+            slot: Arc::new(VerifySlot::default()),
+        }
+    }
+
+    /// Bounded verify queue: capacity 4, drop-OLDEST when full.
+    #[test]
+    fn verify_queue_drops_oldest_under_backpressure() {
+        let mut q = VecDeque::new();
+        for i in 0u64..7 {
+            let dropped = queue_push(&mut q, dummy_job(i), VERIFY_QUEUE_CAP);
+            if i < 4 {
+                assert!(!dropped, "first 4 pushes must not drop");
+            } else {
+                assert!(dropped, "push {i} must evict the oldest job");
+            }
+        }
+        assert_eq!(q.len(), VERIFY_QUEUE_CAP, "queue must stay bounded");
+        assert_eq!(
+            q.front().unwrap().frame_index,
+            3,
+            "frames 0-2 dropped first"
+        );
+        assert_eq!(q.back().unwrap().frame_index, 6, "newest frame always kept");
+    }
+
+    /// End-to-end async verification: sign + embed (the encode critical
+    /// path), enqueue for the worker, and observe the published outcome —
+    /// REAL Ed25519 verification of an actually-embedded frame.
+    #[tokio::test]
+    async fn async_verify_worker_publishes_outcome() {
+        let signer = Signer::generate();
+        let original: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let payload = signer.sign_frame(3, &original, None);
+
+        let mut data = original.clone();
+        let mut frame = VideoFrame {
+            width: 64,
+            height: 64,
+            stride: 64 * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 3,
+        };
+        LsbVideo::new(1).embed(&mut frame, Some(&payload)).unwrap();
+
+        let slot = Arc::new(VerifySlot::default());
+        enqueue_verify(VerifyJob {
+            frame_index: 3,
+            signed_rgb: original,
+            rgb_data: data,
+            width: 64,
+            height: 64,
+            lsb_bits: 1,
+            verify_key: signer.verifying_key().to_bytes(),
+            metrics: Arc::new(steganographer_core::StegoMetrics::new()),
+            slot: slot.clone(),
+        });
+
+        // The worker runs off-thread; poll the slot like the decode-poll
+        // path does (bounded wait, then stale).
+        let outcome = slot
+            .wait_for(3, std::time::Duration::from_secs(10))
+            .expect("worker must publish the verification outcome");
+        assert!(outcome.verified, "embedded frame must verify");
+        assert!(outcome.payload_info.is_some());
+        assert_eq!(
+            outcome.payload_info.unwrap()["payload_found"],
+            serde_json::json!(true)
+        );
     }
 }

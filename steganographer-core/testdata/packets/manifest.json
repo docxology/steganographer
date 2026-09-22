@@ -1,6 +1,6 @@
 {
   "schema": "steganographer.testdata.packet-vectors/v1",
-  "status": "alpha-provisional, non-stable",
+  "status": "stable (owner-approved 2026-09-21)",
   "quality_id": "QUA-003 (partial): packet/placement vectors",
   "roadmap": "v0.7.0 — Freeze immutable packet and placement vectors",
   "generator": "steganographer-core/tests/golden_vectors.rs",
@@ -61,7 +61,7 @@
   "vectors": [
     {
       "id": "vector-01-untransformed-sequential",
-      "status": "alpha-provisional, non-stable",
+      "status": "stable (owner-approved 2026-09-21)",
       "fixtures": ["vector-01-untransformed-sequential.hex"],
       "derivation": "payload = byte_stream(label \"golden payload: vector-01\", 64); GenericPacket::new_untransformed with packet_id/locator_nonce from the vector id, placement sequential, no transforms, flags 0x0000",
       "packet": {
@@ -79,7 +79,7 @@
     },
     {
       "id": "vector-02-encrypted-aead",
-      "status": "alpha-provisional, non-stable",
+      "status": "stable (owner-approved 2026-09-21)",
       "fixtures": ["vector-02-encrypted-aead.hex"],
       "derivation": "payload = byte_stream(label \"golden payload: vector-02\", 72); body = salt a5 5a 5a a5 || ChaCha20-Poly1305-Seal(0x77x32, BLAKE3(salt||packet_id)[..12], payload, aad) — replicates encryption::encrypt with a pinned salt; cross-checked in the test against a fresh crate-side encryption parsed back through the same nonce derivation",
       "packet": {
@@ -97,7 +97,7 @@
     },
     {
       "id": "vector-03-keyed-placement",
-      "status": "alpha-provisional, non-stable",
+      "status": "stable (owner-approved 2026-09-21)",
       "fixtures": [
         "vector-03-keyed-placement-packet.hex",
         "vector-03-keyed-placement-carrier.hex"
@@ -123,7 +123,7 @@
     },
     {
       "id": "vector-04-keyed-interleaved",
-      "status": "alpha-provisional, non-stable",
+      "status": "stable (owner-approved 2026-09-21)",
       "fixtures": [
         "vector-04-keyed-interleaved-packet.hex",
         "vector-04-keyed-interleaved-carrier.hex"
@@ -149,7 +149,7 @@
     },
     {
       "id": "vector-05-deflate-sign",
-      "status": "alpha-provisional, non-stable",
+      "status": "stable (owner-approved 2026-09-21)",
       "fixtures": ["vector-05-deflate-sign.hex"],
       "derivation": "payload = b\"alpha-provisional golden vector; \" repeated to 198 bytes; Ed25519 signing seed 0x33x32; transforms::apply(sign, compress): sign the logical payload first, then DEFLATE (recorded because it shrinks); flags 0x0011",
       "packet": {

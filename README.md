@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust">
-  <img src="https://img.shields.io/badge/tests-664_passing-brightgreen?style=flat-square" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-705_passing-brightgreen?style=flat-square" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/crates-5-informational?style=flat-square" alt="5 crates">
 </p>
@@ -43,7 +43,7 @@ git clone https://github.com/docxology/steganographer.git
 cd steganographer
 cargo build --workspace
 cargo build -p steganographer-cli --no-default-features  # GStreamer-free binary
-cargo test --workspace   # 664 tests, 0 failures
+cargo test --workspace   # 705 tests, 0 failures
 ./run.sh                 # Interactive terminal menu
 ```
 
@@ -254,7 +254,7 @@ bits = 1
 
 ## ✅ Tests
 
-664 tests across 5 crates — all passing:
+705 tests across 5 crates — all passing:
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
@@ -267,7 +267,7 @@ bits = 1
 | **Total** | **664** | **0 failures** |
 
 ```bash
-cargo test --workspace                # All 664 tests
+cargo test --workspace                # All 705 tests
 cargo test -p steganographer-core     # Core only (506 tests)
 cargo test -p steganographer-dashboard # Dashboard only (58 tests)
 ```
@@ -312,6 +312,7 @@ cargo test -p steganographer-dashboard # Dashboard only (58 tests)
 | [**Platforms**](docs/platforms.md) | macOS, Linux, Docker setup |
 | [**Contributing**](docs/contributing.md) | Dev workflow, testing, PR checklist |
 | [**Roadmap**](docs/roadmap.md) | Current release sequence and program gates |
+| [**Compatibility**](docs/compatibility.md) | SemVer policy, wire-format compatibility, deprecation, MSRV, platform matrix |
 | [**Platform Expansion Plan**](docs/plans/steganography-platform/README.md) | Generic packet, formats, forensics, OOXML/PDF, WASM, quality, and migration workstreams |
 | [**FAQ**](docs/faq.md) | 30+ questions and answers |
 

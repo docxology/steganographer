@@ -199,3 +199,89 @@ jobs:
           cargo +nightly fuzz run fuzz_payload_from_bytes -- -max_total_time=60 -max_len=4096
           cargo +nightly fuzz run fuzz_rs_decode -- -max_total_time=60 -max_len=4096
           cargo +nightly fuzz run fuzz_packet_decode -- -max_total_time=60 -max_len=8192
+
+  immutability:
+    name: Golden-Vector Immutability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # The corpus is STABLE (owner-approved 2026-09-21). Any drift in the
+      # frozen wire vectors or the calibration data fails CI here.
+      - name: Run golden-vector and calibration drift gates
+        run: cargo test -p steganographer-core --test golden_vectors --test calibration --locked
+
+      - name: Validate corpus manifest
+        run: python3 -c "import json; json.load(open('steganographer-core/testdata/packets/manifest.json'))"
+
+  test-windows:
+    name: Test (windows-latest, gst-free)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # GStreamer (and the dashboard webrtc feature that needs it) is
+      # macOS/Linux-only; the Windows job builds the gst-free matrix.
+      - name: Build core, CLI, and WASM without GStreamer
+        run: cargo build -p steganographer-core -p steganographer-cli -p steganographer-wasm --no-default-features --locked
+
+      - name: Run tests without GStreamer
+        run: cargo test -p steganographer-core -p steganographer-cli -p steganographer-wasm --no-default-features --locked
+
+      - name: Run clippy without GStreamer
+        run: cargo clippy -p steganographer-core -p steganographer-cli -p steganographer-wasm --no-default-features --all-targets --locked -- -D warnings
+
+  packaging-metadata:
+    name: Packaging Metadata Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check crates.io metadata on every workspace member
+        run: |
+          python3 - <<'EOF'
+          import json, subprocess, sys
+          meta = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1"]))
+          missing = []
+          for pkg in meta["packages"]:
+              if pkg["source"] is not None:
+                  continue  # skip third-party deps
+              for field in ("description", "license", "repository"):
+                  if not pkg.get(field):
+                      missing.append(f"{pkg['name']}: missing {field}")
+          if missing:
+              print("\n".join(missing))
+              sys.exit(1)
+          print(f"ok: all {len(meta['packages'])} workspace packages carry description/license/repository")
+          EOF

@@ -119,8 +119,8 @@ fn augment(frame: &mut VideoFrame, kind: usize, seed: u64) {
         0..=2 => {
             let sigma = [2.0f64, 4.0, 8.0][kind];
             let mut rng = StdRng::seed_from_u64(seed);
-            for px in frame.data.chunks_exact_mut(3) {
-                for c in px.iter_mut() {
+            for px in frame.data.as_chunks_mut::<3>().0 {
+                for c in px {
                     let u1: f64 = rng.r#gen::<f64>().max(1e-9);
                     let u2: f64 = rng.r#gen();
                     let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
@@ -130,7 +130,7 @@ fn augment(frame: &mut VideoFrame, kind: usize, seed: u64) {
         }
         3 => {
             let mut rng = StdRng::seed_from_u64(seed);
-            for px in frame.data.chunks_exact_mut(3) {
+            for px in frame.data.as_chunks_mut::<3>().0 {
                 if rng.r#gen::<f64>() < 0.01 {
                     let v = if rng.r#gen::<bool>() { 255u8 } else { 0u8 };
                     px[0] = v;

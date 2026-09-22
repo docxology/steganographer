@@ -366,3 +366,48 @@ GST 24, WASM 9).
       `cargo test -p steganographer-core --test golden_vectors -- --ignored`
       (alpha-provisional corpus, unchanged).
 
+
+---
+
+## ✅ 2026-09-22 Final Round — v0.8 contract closure + acceptance measurements
+
+All items owner-approved ("proceed with all"). Workspace 664 → **705 tests**
+(`./scripts/status.sh --check` clean); clippy `-D warnings` clean; wasm32
+target check clean.
+
+- [x] **SUR-003 JSON v1 envelope** — `steganographer.cli/v1` envelope on all
+      json/jsonl outputs; `--schema-version`; finalized exit codes 0–6
+      (usage 1, packet-not-found 2, verification 3, findings 4, inconclusive
+      5, internal 6). All CLI tests updated.
+- [x] **DOC-003 pptx/xlsx/docx deep analysis** — extended-part text channels
+      (slides/notes/sharedStrings/headers/footers) + media anomalies.
+- [x] **DOC-004 bounded PDF structural scan** — embedded files, JS/ actions,
+      dangerous URIs, filter abuse, trailing data, string-channel detection;
+      no rendering, no new dependencies.
+- [x] **Learned watermarking eval** — real openh264 roundtrip: QP 24–28 →
+      0.00% BER (8/8 payloads), acceptance met; QP 26–30 (CRF~28) measures
+      6.45% with the committed weights — retraining against real-codec
+      quantization is the path to closing that window (weights are the
+      committed artifact; trainer is deterministic).
+- [x] **Golden vectors stable + CI immutability gate** — vector/corpus drift
+      fails CI (`immutability` job); `test-windows` + `packaging-metadata`
+      jobs added.
+- [x] **WebRTC measured live** (headless Chromium + fake camera, 720p,
+      60 ms sign interval): 8.3 fps, 84/84 verifications passing, sign
+      11.5 ms / verify 42.7 ms — verification ✓, latency ✓ (≪ 500 ms).
+      **Honest shortfall:** the 15 fps target is not met at 720p — the
+      encode pipeline (JPEG decode + sign + embed + re-encode ≈ 120 ms)
+      caps intake at ~8 fps; fixing it means optimizing the encode path
+      (e.g. zero-copy embed or encoder-side JPEG reuse), recorded here for
+      a future round.
+- [x] **WebRTC verify fix** — data-channel frames were signed with
+      per-session throwaway keys and verified against the session signer
+      (100% verify failure); the pump now shares one EncodeSession and
+      signs with `state.signer`. Regression test added
+      (`test_datachannel_encode_frame_verifies`).
+
+### Remaining (owner-gated)
+
+- [ ] 15 fps 720p encode-pipeline optimization (measured 8.3 fps; see above).
+- [ ] Learned-watermarking CRF-28 window: retrain against real-codec
+      quantization (current: 0.00% BER at QP 24–28, 6.45% at QP 26–30).

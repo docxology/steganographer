@@ -15,6 +15,7 @@ default = ["ots"]
 ots = ["dep:reqwest"]
 ethereum = ["k256"]
 learned = ["dep:ndarray"]
+learned-eval = ["learned", "dep:openh264"]
 
 [dependencies]
 serde = { workspace = true }
@@ -42,6 +43,13 @@ ml-dsa = { workspace = true }
 zeroize = { workspace = true }
 # Learned watermarking training/inference tensors (opt-in `learned` feature).
 ndarray = { version = "0.17.2", optional = true }
+# H.264 codec used only by `tests/learned_eval.rs` (the openh264-based CRF-28
+# re-encode acceptance eval). Optional regular dependency (optional
+# dev-dependencies are rejected by cargo) so a plain `cargo test` never pulls
+# in the bundled C OpenH264 build; the `learned-eval` feature enables it
+# together with `learned`:
+#   cargo test -p steganographer-core --features learned-eval --test learned_eval
+openh264 = { version = "0.9.8", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }

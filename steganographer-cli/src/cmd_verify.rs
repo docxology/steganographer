@@ -78,7 +78,7 @@ impl VerifyBits {
 /// Default location of the revoked-keys list.
 pub const DEFAULT_REVOKED_LIST: &str = "keys/revoked.json";
 
-/// Stego types `verify` supports. Anything else is a usage error (exit 2)
+/// Stego types `verify` supports. Anything else is a usage error (exit 1)
 /// rather than a silent `no_signature` result.
 pub const VALID_STEGO_TYPES: &[&str] = &[
     "lsb_video",
@@ -197,6 +197,9 @@ pub fn run_with_key(
     embedding_key_hex: Option<&str>,
     opts: &VerifyOptions,
 ) -> anyhow::Result<String> {
+    if format == "json" {
+        crate::envelope::activate_json_mode("verify");
+    }
     validate_stego_type(stego_type)?;
     log::info!("Verifying: {}", input);
     log::info!("Stego type: {}", stego_type);
@@ -1096,8 +1099,27 @@ fn resolve_decryption_key(opts: &VerifyOptions) -> anyhow::Result<encryption::En
 fn print_result(result: &VerifyResult, format: &str) -> anyhow::Result<()> {
     match format {
         "json" => {
-            let json = serde_json::to_string_pretty(result)?;
-            println!("{}", json);
+            let value = serde_json::to_value(result)?;
+            if result.status == "invalid" {
+                // Verification ran fine, but the signature failed: status
+                // "error" with the stable verification_failed code, exit 3
+                // (set by the caller). The full result is still attached.
+                crate::envelope::print(&crate::envelope::error_with_result(
+                    "verify",
+                    crate::envelope::VERIFICATION_FAILED,
+                    "signature verification failed",
+                    Some(value),
+                ));
+            } else {
+                let warnings = if result.status == "valid_revoked" {
+                    vec![result.message.clone()]
+                } else {
+                    Vec::new()
+                };
+                crate::envelope::print(&crate::envelope::success_with_warnings(
+                    "verify", value, warnings,
+                ));
+            }
         }
         _ => print_plain(result),
     }

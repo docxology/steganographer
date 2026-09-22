@@ -1033,3 +1033,53 @@ async fn test_api_config_get_includes_transport() {
     let cfg: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(cfg["transport"], "websocket");
 }
+
+// ─── DataChannel encode path verification ─────────────────────────────
+
+/// Encode a synthetic RGB8 image as JPEG — the client-side step the browser
+/// performs before sending a frame over the DataChannel.
+fn test_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(width, height, |x, y| {
+        let v = ((x * 7 + y * 13) % 251) as u8;
+        image::Rgb([v, v.wrapping_add(11), v.wrapping_add(29)])
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut out, image::ImageFormat::Jpeg)
+        .expect("jpeg encode");
+    out.into_inner()
+}
+
+/// The exact per-frame pipeline the WebRTC DataChannel pump runs:
+/// `process_encode_frame` (sign → embed → store → async VerifyEngine
+/// enqueue) followed by the `process_decode_poll` the pump serves. A
+/// synthetic frame MUST verify ok against the session-wide signer — pins
+/// the data-channel signer fix (the pump path must sign with
+/// `state.signer`, the same key the verify worker checks against).
+#[tokio::test]
+async fn test_datachannel_encode_frame_verifies() {
+    let (_app, state) = test_app();
+
+    let jpeg = test_jpeg(320, 240);
+    let mut session = steganographer_dashboard::ws_handler::EncodeSession::new();
+    let reply =
+        steganographer_dashboard::ws_handler::process_encode_frame(&state, &mut session, &jpeg)
+            .expect("data-channel encode must succeed");
+    assert_eq!(reply["type"], "encoded_frame");
+    assert_eq!(reply["frame_index"], 0);
+
+    // One pump session carries a monotonic frame counter across frames.
+    let second =
+        steganographer_dashboard::ws_handler::process_encode_frame(&state, &mut session, &jpeg)
+            .expect("second encode must succeed");
+    assert_eq!(second["frame_index"], 1);
+
+    // The decode poll the pump serves must report a verified payload.
+    let mut decode = steganographer_dashboard::ws_handler::DecodeSession::new();
+    let poll = steganographer_dashboard::ws_handler::process_decode_poll(&state, &mut decode);
+    assert_eq!(poll["type"], "decoded_frame");
+    assert_eq!(poll["verified"], true, "data-channel frame must verify ok");
+    assert_eq!(poll["verified_stale"], false);
+    assert_eq!(poll["payload"]["payload_found"], true);
+    assert!(poll["payload"]["hash"].as_str().is_some());
+}

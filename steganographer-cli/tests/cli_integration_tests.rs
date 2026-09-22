@@ -66,9 +66,21 @@ fn run_cli_with_bin(bin: &PathBuf, args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// Parse stdout as exactly one `steganographer.cli/v1` envelope document.
+fn parse_envelope(stdout: &str) -> serde_json::Value {
+    let document: serde_json::Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|error| panic!("invalid JSON output ({error}): {stdout}"));
+    assert_eq!(
+        document["schema"], "steganographer.cli/v1",
+        "missing cli/v1 envelope schema: {stdout}"
+    );
+    document
+}
+
+/// Parse `--format json` stdout as one envelope and return the command
+/// payload inside `result` (existing per-command assertions keep working).
 fn parse_json(stdout: &str) -> serde_json::Value {
-    serde_json::from_str(stdout)
-        .unwrap_or_else(|error| panic!("invalid JSON output ({error}): {stdout}"))
+    parse_envelope(stdout)["result"].clone()
 }
 
 fn assert_valid_verification(stdout: &str) -> serde_json::Value {
@@ -1929,11 +1941,26 @@ fn test_scan_detects_inline_packet_magic_and_exit_code() {
         "--format",
         "jsonl",
     ]);
-    assert_eq!(code, 1, "a finding must exit 1: {stdout}");
-    let line: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(line["detected"], true);
-    assert_eq!(line["embedded_magic"], "generic_packet");
-    assert_eq!(line["magic_offsets"], serde_json::json!([7]));
+    assert_eq!(
+        code, 4,
+        "findings must meet the threshold (exit 4): {stdout}"
+    );
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    // One per-file record, then the final summary envelope.
+    assert_eq!(lines.len(), 2, "record + summary lines expected: {stdout}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(record["schema"], "steganographer.cli/v1");
+    assert_eq!(record["status"], "success");
+    assert_eq!(record["result"]["detected"], true);
+    assert_eq!(record["result"]["embedded_magic"], "generic_packet");
+    assert_eq!(record["result"]["magic_offsets"], serde_json::json!([7]));
+    let summary: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(summary["schema"], "steganographer.cli/v1");
+    assert_eq!(summary["result"]["summary"]["files_scanned"], 1);
+    assert_eq!(summary["result"]["summary"]["findings"], 1);
 }
 
 #[test]
@@ -1953,8 +1980,11 @@ fn test_scan_directory_recurses_with_budget() {
         "--format",
         "json",
     ]);
-    assert_eq!(code, 1, "findings must exit 1: {stdout}");
-    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        code, 4,
+        "findings must meet the threshold (exit 4): {stdout}"
+    );
+    let result = parse_json(&stdout);
     assert_eq!(result["summary"]["files_scanned"], 2);
     assert_eq!(result["summary"]["findings"], 2);
 
@@ -1968,8 +1998,11 @@ fn test_scan_directory_recurses_with_budget() {
         "--format",
         "json",
     ]);
-    assert_eq!(code, 1, "top-level finding must exit 1: {stdout}");
-    let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        code, 4,
+        "findings must meet the threshold (exit 4): {stdout}"
+    );
+    let result = parse_json(&stdout);
     assert_eq!(result["summary"]["files_scanned"], 1);
     assert_eq!(result["summary"]["findings"], 1);
 }
@@ -2098,9 +2131,9 @@ fn test_verify_json_emits_exactly_one_document() {
     assert_eq!(code, 0, "verify failed: {stdout}{stderr}");
     // serde_json::from_str rejects any trailing content, so a second JSON
     // document (e.g. a separate OTS object) would fail this parse.
-    let result: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout is not exactly one JSON document ({e}): {stdout}"));
-    assert_eq!(result["status"], "valid");
+    let document = parse_envelope(stdout.trim());
+    assert_eq!(document["command"], "verify");
+    assert_eq!(document["result"]["status"], "valid");
 }
 
 #[test]
@@ -2151,7 +2184,7 @@ fn test_ots_offline_error_paths() {
         "--method",
         "litecoin",
     ]);
-    assert_eq!(code, 2, "unknown ots method must exit 2");
+    assert_eq!(code, 1, "unknown ots method is a usage error (exit 1)");
     assert!(stderr.contains("unknown OTS method"), "{stderr}");
 
     // Missing proof file is a runtime error (exit 1).
@@ -2165,7 +2198,7 @@ fn test_ots_offline_error_paths() {
         "--proof",
         tmp.path().join("missing.ots").to_str().unwrap(),
     ]);
-    assert_eq!(code, 1, "missing proof file must exit 1");
+    assert_eq!(code, 6, "unexpected I/O is an internal error (exit 6)");
     assert!(stderr.contains("Cannot read proof file"), "{stderr}");
 
     // Omitted --proof defaults to <input>.ots (which does not exist here).
@@ -2178,7 +2211,7 @@ fn test_ots_offline_error_paths() {
         "--input",
         input.to_str().unwrap(),
     ]);
-    assert_eq!(code, 1, "default proof path missing must exit 1");
+    assert_eq!(code, 6, "unexpected I/O is an internal error (exit 6)");
     assert!(
         stderr.contains(&default_proof),
         "error must name the defaulted <input>.ots path: {stderr}"
@@ -2201,7 +2234,7 @@ fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
         "--stego-type",
         "foobar",
     ]);
-    assert_eq!(code, 2, "unknown --stego-type must exit 2");
+    assert_eq!(code, 1, "unknown --stego-type is a usage error (exit 1)");
     assert!(stderr.contains("unknown stego type"), "{stderr}");
 
     let (code, _, stderr) = run_cli(&[
@@ -2215,12 +2248,15 @@ fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
         "--hash-algorithm",
         "md5",
     ]);
-    assert_eq!(code, 2, "unknown --hash-algorithm must exit 2");
+    assert_eq!(
+        code, 1,
+        "unknown --hash-algorithm is a usage error (exit 1)"
+    );
     assert!(stderr.contains("unsupported hash algorithm"), "{stderr}");
 
     // --log-level is global: validation fires before any subcommand runs.
     let (code, _, stderr) = run_cli(&["--log-level", "bogus", "keygen", "--output", "/dev/null"]);
-    assert_eq!(code, 2, "unknown --log-level must exit 2");
+    assert_eq!(code, 1, "unknown --log-level is a usage error (exit 1)");
     assert!(stderr.contains("unknown --log-level"), "{stderr}");
 
     let (code, _, stderr) = run_cli(&[
@@ -2234,7 +2270,7 @@ fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
         "--bits",
         "7",
     ]);
-    assert_eq!(code, 2, "out-of-range extract --bits must exit 2");
+    assert_eq!(code, 1, "out-of-range --bits is a usage error (exit 1)");
     assert!(stderr.contains("--bits"), "{stderr}");
 }
 
@@ -2242,7 +2278,7 @@ fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
 fn test_scan_missing_input_exits_2() {
     // Nonexistent --input is a usage error (exit 2).
     let (code, _, stderr) = run_cli(&["scan", "--input", "/nonexistent/path/xyz"]);
-    assert_eq!(code, 2, "missing scan input must exit 2");
+    assert_eq!(code, 1, "missing scan input is a usage error (exit 1)");
     assert!(stderr.contains("cannot access"), "{stderr}");
 }
 
@@ -2286,4 +2322,224 @@ fn test_derive_password_stdin_strips_trailing_crlf() {
         std::fs::read_to_string(out_crlf.join("signing.key")).unwrap(),
         "--password-stdin must strip trailing CRLF"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUR-003: steganographer.cli/v1 envelope + finalized exit codes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_json_envelope_shape_and_tool_identity() {
+    let (_ctx, carrier, pub_key) = encode_signed_lsb_video();
+    let (code, stdout, _) = run_cli(&[
+        "--config",
+        &config_path(),
+        "verify",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--public-key",
+        &pub_key,
+        "--stego-type",
+        "lsb_video",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "verify failed: {stdout}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "verify");
+    assert_eq!(document["status"], "success");
+    assert_eq!(document["tool"]["name"], "steganographer");
+    assert!(
+        !document["tool"]["version"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "tool.version must be present: {document}"
+    );
+    assert!(document["timing"].is_object());
+    assert_eq!(document["warnings"], serde_json::json!([]));
+    assert_eq!(document["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn test_error_envelope_on_packet_not_found_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("plain.rgb");
+    create_test_rgb(input.to_str().unwrap());
+    let output = tmp.path().join("payload.bin");
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "decode",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 2, "packet-free carrier must exit 2: {stdout}{stderr}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "decode");
+    assert_eq!(document["status"], "error");
+    assert_eq!(document["errors"][0]["code"], "packet_not_found");
+    // The contract message still names the failure on stderr.
+    assert!(stderr.contains("no valid generic packet found"), "{stderr}");
+}
+
+#[test]
+fn test_usage_error_exits_1_and_internal_error_exits_6() {
+    // Usage/configuration error: exit 1.
+    let (code, _, stderr) = run_cli(&["--log-level", "bogus", "keygen", "--output", "/dev/null"]);
+    assert_eq!(code, 1, "usage error must exit 1: {stderr}");
+
+    // Unexpected I/O: exit 6 with an internal_error envelope.
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "encode",
+        "--input",
+        tmp.path().join("missing.rgb").to_str().unwrap(),
+        "--output",
+        tmp.path().join("out.rgb").to_str().unwrap(),
+        "--input-format",
+        "raw_rgb",
+        "--width",
+        "4",
+        "--height",
+        "4",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 6, "unexpected I/O must exit 6: {stdout}{stderr}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["status"], "error");
+    assert_eq!(document["errors"][0]["code"], "internal_error");
+}
+
+#[test]
+fn test_schema_version_rejects_unknown_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, _, stderr) = run_cli(&[
+        "--schema-version",
+        "v2",
+        "keygen",
+        "--output",
+        tmp.path().join("k").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "unknown --schema-version must exit 1: {stderr}");
+    assert!(stderr.contains("schema-version"), "{stderr}");
+}
+
+#[test]
+fn test_scan_truncated_without_findings_exits_5() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("big.bin");
+    std::fs::write(&input, vec![b'a'; 4096]).unwrap();
+    let (code, stdout, _) = run_cli(&[
+        "scan",
+        "--input",
+        input.to_str().unwrap(),
+        "--max-bytes",
+        "64",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 5,
+        "truncated clean scan must be inconclusive: {stdout}"
+    );
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["status"], "partial");
+    let warnings = document["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("truncated")),
+        "truncation must be reported as a warning: {document}"
+    );
+}
+
+#[test]
+fn test_keygen_config_revoke_json_envelopes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_prefix = tmp.path().join("k");
+    let (code, stdout, stderr) = run_cli(&[
+        "keygen",
+        "--output",
+        key_prefix.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "keygen failed: {stdout}{stderr}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "keygen");
+    assert_eq!(
+        document["result"]["public_key_path"],
+        format!("{}.pub", key_prefix.display())
+    );
+
+    let (code, stdout, _) = run_cli(&[
+        "--config",
+        &config_path(),
+        "config",
+        "check",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "config check failed: {stdout}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "config check");
+    assert_eq!(document["result"]["valid"], true);
+
+    let revoked_path = tmp.path().join("revoked.json");
+    let pub_key = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    let (code, stdout, _) = run_cli(&[
+        "revoke",
+        "--public-key",
+        pub_key,
+        "--output",
+        revoked_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "revoke failed: {stdout}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "revoke");
+    assert_eq!(document["result"]["already_revoked"], false);
+}
+
+#[test]
+fn test_derive_json_envelope_never_serializes_key_material() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("keys");
+    let salt = "000102030405060708090a0b0c0d0e0f";
+    let (code, stdout, _) = run_cli(&[
+        "derive",
+        "--password",
+        "correct horse battery staple",
+        "--salt",
+        salt,
+        "--argon2-memory",
+        "8",
+        "--argon2-iterations",
+        "1",
+        "--output",
+        out.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "derive failed: {stdout}");
+    let document = parse_envelope(&stdout);
+    assert_eq!(document["command"], "derive");
+    assert_eq!(document["result"]["key_files"].as_array().unwrap().len(), 4);
+    // No derived key material may appear in the envelope (plain mode only).
+    for name in ["signing.key", "encryption.key", "embedding.key"] {
+        let key_hex = std::fs::read_to_string(out.join(name)).unwrap();
+        assert!(
+            !stdout.contains(key_hex.trim()),
+            "{name} leaked into the JSON envelope"
+        );
+    }
 }

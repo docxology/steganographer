@@ -28,7 +28,11 @@
 //!   [`crate::unicode_text`] (zero-width, bidi, variation selectors, …) plus
 //!   ASCII whitespace runs inside XML text nodes. These are detections and do
 //!   set `detected`.
-
+//! - [`DOC_003_FAMILY`] — Extended-part concealment coverage (DOC-003):
+//!   the Unicode/text stego channels over pptx slides/notes, xlsx
+//!   sharedStrings/worksheets, and docx headers/footers; presentation.xml
+//!   header/footer placeholders; and embedded-media entry anomalies. These
+//!   are detections and do set `detected`.
 use std::collections::HashMap;
 use std::io::Read;
 
@@ -39,6 +43,8 @@ use crate::unicode_text;
 pub const DOC_001_FAMILY: &str = "DOC-001";
 /// Stable detector family ID: WordprocessingML concealment channels (DOC-002).
 pub const DOC_002_FAMILY: &str = "DOC-002";
+/// Stable detector family ID: extended OOXML part coverage (DOC-003).
+pub const DOC_003_FAMILY: &str = "DOC-003";
 /// Stable detector family ID: generic ZIP inventory/topology observations.
 pub const ZIP_TOPOLOGY_FAMILY: &str = "ZIP_TOPOLOGY";
 
@@ -70,6 +76,16 @@ const PPT_PRESENTATION: &str = "ppt/presentation.xml";
 const XL_WORKBOOK: &str = "xl/workbook.xml";
 /// Path fragment marking embedded-media directories (docx/pptx/xlsx).
 const MEDIA_DIR_FRAGMENT: &str = "media/";
+/// Media-directory extensions that mark executable/script content (DOC-003).
+const MEDIA_SUSPICIOUS_EXTS: &[&str] = &[
+    "exe", "dll", "js", "vbs", "ps1", "bat", "cmd", "hta", "scr", "com", "sh", "msi", "jar", "swf",
+];
+/// Recognized image/audio/video extensions inside media directories (DOC-003).
+const MEDIA_KNOWN_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "emf", "wmf", "webp", "ico", "mp3", "wav",
+    "wma", "m4a", "aac", "ogg", "oga", "flac", "mp4", "m4v", "avi", "wmv", "mov", "mkv", "mpeg",
+    "mpg", "webm",
+];
 /// Extensions that make a media-directory entry claim to be text, not media.
 const TEXT_LIKE_EXTS: &[&str] = &["txt", "xml", "json", "html", "htm", "csv", "rtf"];
 
@@ -418,11 +434,13 @@ fn inflate_raw(
     Ok(out)
 }
 
-/// Run the DOC-001/DOC-002 container analysis over a ZIP-family buffer.
+/// Run the DOC-001/DOC-002/DOC-003 container analysis over a ZIP-family
+/// buffer.
 ///
 /// Never panics on hostile input: parse and read failures become DOC-001
 /// evidence. Returns findings in detector order (inventory, topology
-/// anomalies, then WordprocessingML concealment).
+/// anomalies, then WordprocessingML concealment, then extended-part
+/// coverage).
 pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
     let mut findings: Vec<ContainerFinding> = Vec::new();
     let archive = match ZipArchive::parse(data) {
@@ -436,7 +454,6 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
             return findings;
         }
     };
-
     let entries = archive.entries();
     let names: Vec<&str> = entries.iter().map(|e| e.name()).collect();
     let office_family = office_family(&names);
@@ -518,20 +535,16 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
         }
     }
 
-    // DOC-002 WordprocessingML concealment (detections).
+    // DOC-002 WordprocessingML concealment (detections) plus DOC-003
+    // extended-part coverage.
+    let mut inflate_total = 0usize;
     match office_family {
-        "docx" => analyze_document_xml(&archive, &mut findings),
+        "docx" => {
+            analyze_document_xml(&archive, &mut findings);
+            analyze_office_parts(&archive, "docx", &mut inflate_total, &mut findings);
+        }
         "pptx" | "xlsx" => {
-            push_finding(
-                &mut findings,
-                ContainerFinding {
-                    path: "<package>".to_string(),
-                    family: ZIP_TOPOLOGY_FAMILY.to_string(),
-                    detail: bound_detail(format!(
-                        "{office_family} package: topology-only analysis (WordprocessingML channels not scanned)"
-                    )),
-                },
-            );
+            analyze_office_parts(&archive, office_family, &mut inflate_total, &mut findings)
         }
         _ => {}
     }
@@ -577,31 +590,12 @@ fn analyze_document_xml(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerFi
     };
 
     for finding in unicode_text::analyze_text(xml) {
-        let offsets = if finding.offsets.len() > 4 {
-            let head: Vec<String> = finding
-                .offsets
-                .iter()
-                .take(4)
-                .map(|o| o.to_string())
-                .collect();
-            format!("{}… ({} flagged)", head.join(","), finding.offsets.len())
-        } else {
-            finding
-                .offsets
-                .iter()
-                .map(|o| o.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
         push_finding(
             findings,
             ContainerFinding {
                 path: WORD_DOCUMENT.to_string(),
                 family: DOC_002_FAMILY.to_string(),
-                detail: bound_detail(format!(
-                    "{}: {} (char offsets {offsets})",
-                    finding.detector_id, finding.detail
-                )),
+                detail: bound_detail(format_text_finding(&finding)),
             },
         );
     }
@@ -617,6 +611,251 @@ fn analyze_document_xml(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerFi
                 )),
             },
         );
+    }
+}
+
+/// Format one [`unicode_text::TextFinding`] as a bounded evidence detail:
+/// "DETECTOR: detail (char offsets o1,o2,…)", offsets capped at 4 with an
+/// aggregate count. Shared by the DOC-002 and DOC-003 part analyses.
+pub(crate) fn format_text_finding(finding: &unicode_text::TextFinding) -> String {
+    let offsets = if finding.offsets.len() > 4 {
+        let head: Vec<String> = finding
+            .offsets
+            .iter()
+            .take(4)
+            .map(|o| o.to_string())
+            .collect();
+        format!("{}… ({} flagged)", head.join(","), finding.offsets.len())
+    } else {
+        finding
+            .offsets
+            .iter()
+            .map(|o| o.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "{}: {} (char offsets {offsets})",
+        finding.detector_id, finding.detail
+    )
+}
+
+/// DOC-003 extended-part analysis for office packages: text channels over
+/// pptx slides/notes, xlsx sharedStrings/worksheets, docx headers/footers;
+/// presentation.xml header/footer placeholders; and media-entry anomalies.
+///
+/// `inflate_total` is shared across all parts so the package-wide inflate
+/// budget ([`CONTAINER_MAX_INFLATE_TOTAL`]) holds for extended analysis too.
+fn analyze_office_parts(
+    archive: &ZipArchive<'_>,
+    family_kind: &str,
+    inflate_total: &mut usize,
+    findings: &mut Vec<ContainerFinding>,
+) {
+    for entry in archive.entries() {
+        let name = entry.name();
+        let is_text_part = match family_kind {
+            "docx" => {
+                (name.starts_with("word/header") || name.starts_with("word/footer"))
+                    && name.ends_with(".xml")
+            }
+            "pptx" => {
+                (name.starts_with("ppt/slides/slide")
+                    || name.starts_with("ppt/notesSlides/notesSlide"))
+                    && name.ends_with(".xml")
+            }
+            "xlsx" => {
+                (name == "xl/sharedStrings.xml" || name.starts_with("xl/worksheets/"))
+                    && name.ends_with(".xml")
+            }
+            _ => false,
+        };
+        if is_text_part {
+            analyze_part_text(archive, entry, inflate_total, findings);
+        }
+    }
+    if family_kind == "pptx" {
+        analyze_presentation_placeholders(archive, inflate_total, findings);
+    }
+    analyze_media_entries(archive, findings);
+}
+
+/// Deep-analyze one extended XML part: Unicode/text stego channels plus XML
+/// text-node whitespace runs, emitting findings under DOC-003. Read
+/// failures stay DOC-001 topology evidence.
+fn analyze_part_text(
+    archive: &ZipArchive<'_>,
+    entry: &ZipEntry,
+    inflate_total: &mut usize,
+    findings: &mut Vec<ContainerFinding>,
+) {
+    let path = entry.name().to_string();
+    if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
+        // Already reported by the DOC-001 topology check; do not
+        // double-report.
+        return;
+    }
+    let bytes = match archive.read_entry(entry, inflate_total) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path: path.clone(),
+                    family: DOC_001_FAMILY.to_string(),
+                    detail: bound_detail(format!("part rejected: {error}")),
+                },
+            );
+            return;
+        }
+    };
+    let Ok(xml) = std::str::from_utf8(&bytes) else {
+        push_finding(
+            findings,
+            ContainerFinding {
+                path,
+                family: DOC_001_FAMILY.to_string(),
+                detail: "part is not valid UTF-8; text channels not analyzed".to_string(),
+            },
+        );
+        return;
+    };
+
+    for finding in unicode_text::analyze_text(xml) {
+        push_finding(
+            findings,
+            ContainerFinding {
+                path: path.clone(),
+                family: DOC_003_FAMILY.to_string(),
+                detail: bound_detail(format_text_finding(&finding)),
+            },
+        );
+    }
+    if let Some((runs, longest, first)) = detect_xml_whitespace_runs(xml) {
+        push_finding(
+            findings,
+            ContainerFinding {
+                path,
+                family: DOC_003_FAMILY.to_string(),
+                detail: bound_detail(format!(
+                    "XML text-node whitespace runs: {runs} runs, longest {longest} chars, first at char offset {first}"
+                )),
+            },
+        );
+    }
+}
+
+/// Detect header/footer placeholder markup in `ppt/presentation.xml`
+/// (DOC-003): footer/header/date/slide-number placeholders are a classic
+/// low-visibility text channel in presentation packages.
+fn analyze_presentation_placeholders(
+    archive: &ZipArchive<'_>,
+    inflate_total: &mut usize,
+    findings: &mut Vec<ContainerFinding>,
+) {
+    let Some(entry) = archive.find(PPT_PRESENTATION) else {
+        return;
+    };
+    if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
+        return;
+    }
+    let bytes = match archive.read_entry(entry, inflate_total) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path: PPT_PRESENTATION.to_string(),
+                    family: DOC_001_FAMILY.to_string(),
+                    detail: bound_detail(format!("part rejected: {error}")),
+                },
+            );
+            return;
+        }
+    };
+    let Ok(xml) = std::str::from_utf8(&bytes) else {
+        return;
+    };
+    const PLACEHOLDERS: &[&str] = &[
+        "<p:ph type=\"ftr\"",
+        "<p:ph type=\"hdr\"",
+        "<p:ph type=\"dt\"",
+        "<p:ph type=\"sldNum\"",
+        "<p:hf ",
+    ];
+    let found: Vec<&str> = PLACEHOLDERS
+        .iter()
+        .copied()
+        .filter(|marker| xml.contains(marker))
+        .collect();
+    if !found.is_empty() {
+        push_finding(
+            findings,
+            ContainerFinding {
+                path: PPT_PRESENTATION.to_string(),
+                family: DOC_003_FAMILY.to_string(),
+                detail: bound_detail(format!(
+                    "header/footer placeholder markup present ({}): potential hidden-text channel",
+                    found.join(", ")
+                )),
+            },
+        );
+    }
+}
+
+/// DOC-003 media-entry anomalies across office packages: executable/script
+/// extensions and unrecognized non-media extensions inside media
+/// directories. Text-like extensions are already DOC-001 evidence and are
+/// skipped here to avoid double-reporting.
+fn analyze_media_entries(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerFinding>) {
+    for entry in archive.entries().iter().filter(|e| is_media_name(e.name())) {
+        let Some(ext) = path_extension(entry.name()) else {
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path: entry.name().to_string(),
+                    family: DOC_003_FAMILY.to_string(),
+                    detail: "embedded-media entry has no file extension".to_string(),
+                },
+            );
+            continue;
+        };
+        let ext_lower = ext.to_ascii_lowercase();
+        if TEXT_LIKE_EXTS
+            .iter()
+            .any(|candidate| ext_lower == *candidate)
+        {
+            continue;
+        }
+        if MEDIA_SUSPICIOUS_EXTS
+            .iter()
+            .any(|candidate| ext_lower == *candidate)
+        {
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path: entry.name().to_string(),
+                    family: DOC_003_FAMILY.to_string(),
+                    detail: bound_detail(format!(
+                        "embedded-media entry carries executable/script extension ({ext})"
+                    )),
+                },
+            );
+        } else if !MEDIA_KNOWN_EXTS
+            .iter()
+            .any(|candidate| ext_lower == *candidate)
+        {
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path: entry.name().to_string(),
+                    family: DOC_003_FAMILY.to_string(),
+                    detail: bound_detail(format!(
+                        "embedded-media entry has unrecognized media extension ({ext})"
+                    )),
+                },
+            );
+        }
     }
 }
 
@@ -904,8 +1143,7 @@ mod tests {
         crc ^ 0xFFFF_FFFF
     }
 
-    const CONTENT_TYPES_XML: &str =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>";
+    const CONTENT_TYPES_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>";
 
     fn document_xml(body_text: &str) -> String {
         format!(
@@ -1083,25 +1321,165 @@ mod tests {
         assert!(doc002.iter().any(|f| f.detail.contains("whitespace runs")));
     }
 
-    #[test]
-    fn pptx_and_xlsx_get_topology_only_findings() {
-        let pptx = ZipBuilder::new()
+    /// Minimal pptx fixture: content types, presentation, one slide and one
+    /// notes slide with the given text bodies.
+    fn pptx(slide_text: &str, notes_text: Option<&str>, presentation: Option<&str>) -> Vec<u8> {
+        let mut builder = ZipBuilder::new()
             .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
-            .add_stored(PPT_PRESENTATION, b"<p:presentation/>")
-            .build();
-        let findings = analyze_package(&pptx);
-        assert!(findings.iter().any(|f| f.family == ZIP_TOPOLOGY_FAMILY
-            && f.detail.contains("pptx")
-            && f.detail.contains("topology-only")));
+            .add_stored(
+                PPT_PRESENTATION,
+                presentation.unwrap_or("<p:presentation/>").as_bytes(),
+            )
+            .add_stored(
+                "ppt/slides/slide1.xml",
+                format!("<p:sld><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:t>{slide_text}</a:t></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>").as_bytes(),
+            );
+        if let Some(notes) = notes_text {
+            builder = builder.add_stored(
+                "ppt/notesSlides/notesSlide1.xml",
+                format!("<p:notes><a:p><a:t>{notes}</a:t></a:p></p:notes>").as_bytes(),
+            );
+        }
+        builder.build()
+    }
 
-        let xlsx = ZipBuilder::new()
+    /// Minimal xlsx fixture: content types, workbook, sharedStrings, one
+    /// worksheet with the given text body.
+    fn xlsx(shared_text: &str, sheet_text: &str) -> Vec<u8> {
+        ZipBuilder::new()
             .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
             .add_stored(XL_WORKBOOK, b"<workbook/>")
+            .add_stored(
+                "xl/sharedStrings.xml",
+                format!("<sst><si><t>{shared_text}</t></si></sst>").as_bytes(),
+            )
+            .add_stored(
+                "xl/worksheets/sheet1.xml",
+                format!("<worksheet><is><t>{sheet_text}</t></is></worksheet>").as_bytes(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn clean_pptx_and_xlsx_produce_no_extended_findings() {
+        let findings = analyze_package(&pptx("Hello", None, None));
+        assert!(findings_with_family(&findings, DOC_003_FAMILY).is_empty());
+        assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
+
+        let findings = analyze_package(&xlsx("Shared text", "Sheet text"));
+        assert!(findings_with_family(&findings, DOC_003_FAMILY).is_empty());
+        assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
+    }
+
+    #[test]
+    fn laced_pptx_slide_triggers_doc_003() {
+        let laced = "Hello\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} world";
+        let findings = analyze_package(&pptx(laced, None, None));
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert!(doc003[0].detail.contains("ZERO_WIDTH"));
+        assert_eq!(doc003[0].path, "ppt/slides/slide1.xml");
+    }
+
+    #[test]
+    fn laced_pptx_notes_trigger_doc_003() {
+        let laced = "Note\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
+        let findings = analyze_package(&pptx("Clean", Some(laced), None));
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert_eq!(doc003[0].path, "ppt/notesSlides/notesSlide1.xml");
+    }
+
+    #[test]
+    fn presentation_placeholder_markup_is_reported() {
+        let presentation = "<p:presentation><p:hf ftr=\"1\" sldNum=\"1\"/></p:presentation>";
+        let findings = analyze_package(&pptx("Clean", None, Some(presentation)));
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert_eq!(doc003[0].path, PPT_PRESENTATION);
+        assert!(doc003[0].detail.contains("placeholder"));
+    }
+
+    #[test]
+    fn laced_xlsx_shared_strings_trigger_doc_003() {
+        let laced = "Shared\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
+        let findings = analyze_package(&xlsx(laced, "Clean"));
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert!(doc003[0].detail.contains("ZERO_WIDTH"));
+        assert_eq!(doc003[0].path, "xl/sharedStrings.xml");
+    }
+
+    #[test]
+    fn laced_xlsx_sheet_triggers_doc_003() {
+        let laced = "Cell\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
+        let findings = analyze_package(&xlsx("Clean", laced));
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert_eq!(doc003[0].path, "xl/worksheets/sheet1.xml");
+    }
+
+    #[test]
+    fn laced_docx_header_triggers_doc_003() {
+        let laced = "Header\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
+        let bytes = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(WORD_DOCUMENT, document_xml("Clean body").as_bytes())
+            .add_stored(
+                "word/header1.xml",
+                format!("<w:hdr><w:p><w:r><w:t>{laced}</w:t></w:r></w:p></w:hdr>").as_bytes(),
+            )
             .build();
-        let findings = analyze_package(&xlsx);
-        assert!(findings.iter().any(|f| f.family == ZIP_TOPOLOGY_FAMILY
-            && f.detail.contains("xlsx")
-            && f.detail.contains("topology-only")));
+        let findings = analyze_package(&bytes);
+        let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
+        assert_eq!(doc003.len(), 1);
+        assert!(doc003[0].detail.contains("ZERO_WIDTH"));
+        assert_eq!(doc003[0].path, "word/header1.xml");
+        // The clean main part stays quiet on DOC-002.
+        assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
+    }
+
+    #[test]
+    fn media_entry_with_executable_extension_is_flagged() {
+        let bytes = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(WORD_DOCUMENT, document_xml("ok").as_bytes())
+            .add_stored("word/media/dropper.exe", b"MZ binary")
+            .build();
+        let findings = analyze_package(&bytes);
+        assert!(findings.iter().any(|f| f.family == DOC_003_FAMILY
+            && f.path == "word/media/dropper.exe"
+            && f.detail.contains("executable/script extension")));
+    }
+
+    #[test]
+    fn media_entry_with_unknown_extension_is_flagged() {
+        let bytes = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(PPT_PRESENTATION, b"<p:presentation/>")
+            .add_stored("ppt/media/blob.dat", b"opaque bytes")
+            .build();
+        let findings = analyze_package(&bytes);
+        assert!(findings.iter().any(|f| f.family == DOC_003_FAMILY
+            && f.path == "ppt/media/blob.dat"
+            && f.detail.contains("unrecognized media extension")));
+    }
+
+    #[test]
+    fn oversized_slide_claim_is_skipped_without_panic() {
+        // A slide claiming a huge uncompressed size is DOC-001 evidence and
+        // must not be inflated by the extended-part pass.
+        let bytes = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(PPT_PRESENTATION, b"<p:presentation/>")
+            .add_deflated("ppt/slides/slide1.xml", b"tiny")
+            .lie_sizes("ppt/slides/slide1.xml", None, Some(0x7FFF_FFFF))
+            .build();
+        let findings = analyze_package(&bytes);
+        assert!(findings.iter().any(|f| f.family == DOC_001_FAMILY
+            && f.path == "ppt/slides/slide1.xml"
+            && f.detail.contains("inflate budget")));
+        assert!(findings_with_family(&findings, DOC_003_FAMILY).is_empty());
     }
 
     #[test]

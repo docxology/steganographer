@@ -4197,6 +4197,7 @@ dependencies = [
  "log",
  "ml-dsa",
  "ndarray",
+ "openh264",
  "qrcode",
  "rand 0.8.6",
  "reqwest",

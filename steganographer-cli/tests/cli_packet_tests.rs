@@ -44,11 +44,17 @@ fn run_cli(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// Parse the whole stdout as exactly one JSON document.
+/// Parse the whole stdout as exactly one `steganographer.cli/v1` envelope
+/// document, returning the command payload inside `result`.
 fn parse_single_json(stdout: &str) -> serde_json::Value {
-    serde_json::from_str(stdout).unwrap_or_else(|error| {
+    let document: serde_json::Value = serde_json::from_str(stdout).unwrap_or_else(|error| {
         panic!("stdout is not a single pure JSON document ({error}): {stdout}")
-    })
+    });
+    assert_eq!(
+        document["schema"], "steganographer.cli/v1",
+        "missing cli/v1 envelope schema: {stdout}"
+    );
+    document["result"].clone()
 }
 
 /// Create a raw RGB test frame (640x480, 3 bytes/pixel).
@@ -460,8 +466,8 @@ fn test_scan_surfaces_unicode_text_findings() {
         "json",
     ]);
     assert_eq!(
-        code, 1,
-        "text stego must be a finding: stdout={stdout}, stderr={stderr}"
+        code, 4,
+        "text stego must meet the findings threshold (exit 4): stdout={stdout}, stderr={stderr}"
     );
 
     let result = parse_single_json(&stdout);
@@ -497,7 +503,7 @@ fn test_scan_surfaces_unicode_text_findings() {
         "--input",
         text_file.to_str().unwrap(),
     ]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 4, "findings must meet the threshold (exit 4)");
     assert!(
         plain_stdout.contains("ZERO_WIDTH"),
         "plain scan must name text detectors: {plain_stdout}"

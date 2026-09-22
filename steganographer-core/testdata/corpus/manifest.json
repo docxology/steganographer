@@ -14,7 +14,11 @@
     "STAT_RS pins a known limitation: its F1 and F-1 masks are identical in the current",
     "implementation (both map 2i <-> 2i+1), so the regular/singular difference metric is",
     "identically 0 and no sample can trigger it. This row must be updated when FOR-002",
-    "revisits the masks."
+    "revisits the masks.",
+    "DOC-004 counts only DOC-004-family findings; pure PDF structural inventory",
+    "uses the separate 'PDF' observation family (mirroring ZIP_TOPOLOGY) and",
+    "never sets the verdict. DOC-003 likewise counts only DOC-003-family",
+    "findings; extended-part read failures stay DOC-001 topology evidence."
   ],
   "detectors": [
     {
@@ -107,6 +111,20 @@
       "triggered": { "kind": "docx_laced", "run_pairs": 6 },
       "expected": { "benign_findings": 0, "triggered_findings": 1 },
       "note": "The triggered docx carries a zero-width-laced word/document.xml; the concealment finding sets the scan verdict."
+    },
+    {
+      "id": "DOC-003",
+      "benign": { "kind": "pptx_clean" },
+      "triggered": { "kind": "pptx_laced", "run_pairs": 6 },
+      "expected": { "benign_findings": 0, "triggered_findings": 1 },
+      "note": "The triggered pptx carries a zero-width-laced ppt/slides/slide1.xml; the concealment finding sets the scan verdict. Clean pptx/xlsx/docx extended parts yield no DOC-003 findings."
+    },
+    {
+      "id": "DOC-004",
+      "benign": { "kind": "pdf_clean" },
+      "triggered": { "kind": "pdf_embedded_file" },
+      "expected": { "benign_findings": 0, "triggered_findings": 1 },
+      "note": "The triggered pdf declares an /EmbeddedFile object; the structural inventory stays under the 'PDF' observation family and the concealment finding sets the scan verdict."
     }
   ]
 }

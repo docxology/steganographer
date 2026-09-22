@@ -41,8 +41,8 @@ fn rgb_frame(width: u32, height: u32, data: &mut [u8]) -> VideoFrame<'_> {
 fn apply_gaussian(frame: &mut VideoFrame, sigma: f64, seed: u64) {
     use rand::{Rng, SeedableRng};
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    for px in frame.data.chunks_exact_mut(3) {
-        for c in px.iter_mut() {
+    for px in frame.data.as_chunks_mut::<3>().0 {
+        for c in px {
             // Box-Muller with two uniforms, deterministic per pixel.
             let u1: f64 = rng.r#gen::<f64>().max(1e-9);
             let u2: f64 = rng.r#gen();
