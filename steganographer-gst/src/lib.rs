@@ -17,9 +17,34 @@
 //! install a GStreamer plugin.
 
 pub mod audio_filter;
+pub mod audio_element;
 pub mod elements;
 pub mod plugin;
 pub mod video_filter;
+
+/// GStreamer plugin entry point.
+///
+/// Invoked by the GStreamer loader when the crate is built as a `cdylib` and
+/// discovered via `GST_PLUGIN_PATH`, and available for direct application-side
+/// registration via [`plugin_desc::plugin_register_static`]. Registers the
+/// native `stegovideo` and `stegoaudio` elements.
+fn plugin_init(plugin: &gstreamer::Plugin) -> Result<(), gstreamer::glib::BoolError> {
+    crate::elements::register(Some(plugin))
+}
+
+// The plugin name MUST match the cdylib file stem ("steganographer_gst" for
+// libsteganographer_gst.dylib): GStreamer's loader derives the entry-point
+// symbol `gst_plugin_<file-stem>_get_desc` from the file name.
+gstreamer::plugin_define!(
+    steganographer_gst,
+    env!("CARGO_PKG_DESCRIPTION"),
+    plugin_init,
+    env!("CARGO_PKG_VERSION"),
+    "MIT/x-error",
+    env!("CARGO_PKG_NAME"),
+    env!("CARGO_PKG_NAME"),
+    env!("CARGO_PKG_REPOSITORY")
+);
 
 /// Initialize GStreamer. Must be called before any pipeline operations.
 ///
