@@ -257,7 +257,7 @@ Yes, increase the LSB bits from 1 to 2–4 in `[video.stego.lsb_signature]`. But
 ### How do I launch the dashboard?
 
 ```bash
-./run.sh    # Choose option 'd' (Dashboard) or 'a' (All including dashboard)
+./run.sh    # Choose option 1 (Dashboard)
 # Or directly:
 cargo run -p steganographer-cli -- dashboard --port 8080 --backend ed25519
 ```

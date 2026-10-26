@@ -67,13 +67,13 @@ cargo build --workspace --release
 ## Run Tests
 
 ```bash
-# All workspace tests (484 tests)
+# All workspace tests (705 tests)
 cargo test --workspace
 
-# Core only (407 tests)
+# Core only (537 tests)
 cargo test -p steganographer-core
 
-# Dashboard only (23 tests)
+# Dashboard only (60 tests)
 cargo test -p steganographer-dashboard
 
 # With verbose output
@@ -201,7 +201,7 @@ cargo run -p steganographer-cli -- video \
 │   │       ├── app.js             # Client JS (webcam, QR overlay, config)
 │   │       └── style.css          # Gray/black/red theme
 │   └── tests/
-│       └── dashboard_tests.rs     # 9 integration tests
+│       └── dashboard_tests.rs     # Dashboard API/state integration tests
 ├── steganographer-gst/            # GStreamer integration
 │   └── src/
 │       ├── lib.rs
@@ -270,7 +270,7 @@ The web dashboard provides a live visual round-trip steganography demo.
 
 ```bash
 # Via run.sh
-./run.sh   # Choose option 'd' (Dashboard) or 'a' (All including dashboard)
+./run.sh   # Choose option 1 (Dashboard)
 
 # Or directly via CLI
 cargo run -p steganographer-cli -- --config steganographer.toml dashboard --port 8080 --backend ed25519

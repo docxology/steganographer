@@ -1,4 +1,4 @@
-FROM rust:1.97-slim AS builder
+FROM rust:1.99-slim AS builder
 
 # Install GStreamer development libraries
 RUN apt-get update && apt-get install -y \
@@ -15,8 +15,13 @@ COPY steganographer-core/ ./steganographer-core/
 COPY steganographer-gst/ ./steganographer-gst/
 COPY steganographer-cli/ ./steganographer-cli/
 COPY steganographer-dashboard/ ./steganographer-dashboard/
+# Cargo resolves every workspace member before building, so the wasm crate's
+# manifest must be present even though the CLI build never targets wasm32.
+COPY steganographer-wasm/ ./steganographer-wasm/
 COPY config/ ./config/
 COPY docs/ ./docs/
+# Master config: copied into the runtime stage below.
+COPY steganographer.toml ./
 
 # Build release binary
 RUN cargo build --release -p steganographer-cli

@@ -1,7 +1,7 @@
 # steganographer-dashboard
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-23-brightgreen)
+![Tests](https://img.shields.io/badge/tests-60-brightgreen)
 Web-based live dashboard for real-time round-trip steganography verification with three tabs: **Video**, **Audio**, and **Documentation**.
 
 ## Features
@@ -64,7 +64,7 @@ steganographer-core (LsbVideo, LsbAudio, Signer, StegoMetrics)
 
 ## Tests
 
-23 tests in `tests/dashboard_tests.rs` covering LiveConfig serialization, DashboardState construction, router creation, HTTP API endpoints (session, config GET/POST, docs, metrics), and static asset serving.
+52 tests in `tests/dashboard_tests.rs` (plus 8 doc-tests, 60 total) covering LiveConfig serialization, DashboardState construction, router creation, HTTP API endpoints (session, config GET/POST, docs, metrics), and static asset serving.
 
 ## Dependencies
 

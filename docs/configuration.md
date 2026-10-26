@@ -400,7 +400,7 @@ steganographer keygen --output /tmp/tmpkey && cat /tmp/tmpkey.key
 
 ## Dashboard Live Configuration
 
-The web dashboard (`./run.sh` → `d`) provides real-time configuration controls that override TOML settings. Changes are immediate and synced to the server via `POST /api/config`.
+The web dashboard (`./run.sh` → `1`) provides real-time configuration controls that override TOML settings. Changes are immediate and synced to the server via `POST /api/config`.
 
 ### Live Controls
 

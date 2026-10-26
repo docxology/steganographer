@@ -1,10 +1,10 @@
 # steganographer-cli
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-37-brightgreen)
+![Tests](https://img.shields.io/badge/tests-75-brightgreen)
 User-facing command-line binary for all steganographic functions.
 
-Built with [Clap](https://docs.rs/clap) for argument parsing with 14 subcommands.
+Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands.
 
 ## Commands
 

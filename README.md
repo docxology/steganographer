@@ -145,10 +145,10 @@ Five Rust crates with strict dependency layering:
 
 | Crate | Purpose | Tests | Docs |
 | ------- | --------- | ------- | ------ |
-| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics (detector registry + OOXML container analysis) | 506 | [Architecture](docs/architecture.md) |
-| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI (WebSocket + WebRTC data-channel transport) | 58 | [API Reference](docs/api-reference.md) |
+| **[steganographer-core](steganographer-core/)** | Crypto, packets/carriers, LSB, DCT, spread-spectrum, encryption, error correction, multi-frame, overlay, config, transforms, forensics (detector registry + OOXML container analysis) | 537 | [Architecture](docs/architecture.md) |
+| **[steganographer-dashboard](steganographer-dashboard/)** | Live web GUI (WebSocket + WebRTC data-channel transport) | 60 | [API Reference](docs/api-reference.md) |
 | **[steganographer-gst](steganographer-gst/)** | GStreamer integration: `stegovideo`/`stegoaudio` native elements, cdylib plugin | 24 | [GStreamer Guide](docs/gstreamer.md) |
-| **[steganographer-cli](steganographer-cli/)** | CLI binary | 68 | [CLI Reference](docs/cli-reference.md) |
+| **[steganographer-cli](steganographer-cli/)** | CLI binary | 75 | [CLI Reference](docs/cli-reference.md) |
 | **[steganographer-wasm](steganographer-wasm/)** | Browser-local facade: packet embed/decode, RGB/PCM carriers, forensic scan (`wasm32`) | 9 | [Platform Expansion Plan](docs/plans/steganography-platform/README.md) |
 
 > 📖 Full breakdown: [**Architecture**](docs/architecture.md) — crate hierarchy, module map, data flow diagrams.
@@ -258,18 +258,17 @@ bits = 1
 
 | Category | Count | Location |
 | ---------- | ------- | ---------- |
-| Core unit tests | 381 | `steganographer-core/src/*.rs` |
-| Core integration tests | 125 | `tests/integration_tests.rs` (80) + `tests/ots_integration_tests.rs` (37) + `tests/golden_vectors.rs` (6) + `tests/calibration.rs` (2) |
-| CLI unit + integration tests | 68 | 22 unit in `steganographer-cli/src/` + 46 integration in `tests/cli_integration_tests.rs` (39) + `tests/cli_packet_tests.rs` (7) |
-| Dashboard tests | 57 | 49 tests in `steganographer-dashboard/tests/dashboard_tests.rs` + 8 doc-tests |
+| Core (unit + integration + doc-tests) | 537 | `steganographer-core/src/*.rs` + `tests/` (integration, OTS, golden vectors, detector calibration) |
+| CLI (unit + integration) | 75 | `steganographer-cli/src/` + `tests/cli_integration_tests.rs` + `tests/cli_packet_tests.rs` |
+| Dashboard (tests + doc-tests) | 60 | `steganographer-dashboard/tests/dashboard_tests.rs` + doc-tests |
 | GStreamer unit + integration + doc-tests | 24 | 14 unit + 9 integration + 1 doc-test |
 | WASM integration tests | 9 | `steganographer-wasm/tests/` |
-| **Total** | **664** | **0 failures** |
+| **Total** | **705** | **0 failures** |
 
 ```bash
 cargo test --workspace                # All 705 tests
-cargo test -p steganographer-core     # Core only (506 tests)
-cargo test -p steganographer-dashboard # Dashboard only (58 tests)
+cargo test -p steganographer-core     # Core only (537 tests)
+cargo test -p steganographer-dashboard # Dashboard only (60 tests)
 ```
 
 ---
