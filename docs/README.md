@@ -102,11 +102,9 @@ block-beta
 ## Test Summary
 
 ```text
-steganographer-core (unit):   381 tests (packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF incl. Argon2id, transforms incl. TRANSFORM_KDF_ARGON2ID, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. detector registry, OOXML container analysis, Unicode text detectors, nested decode, OTS)
-steganographer-core (integ):  125 tests (E2E, pipeline, template, info_bar, signer_backend incl. ML-DSA, encryption, ECC, OTS, golden vectors, detector calibration)
-steganographer-cli (unit):     22 tests (media descriptors/I/O, canonical carrier binding, verify validation/revocation)
-steganographer-cli (integ):    46 tests (legacy/generic round trips, exit-code contract, config incl. limits/profiles, key files, encryption, Argon2id password path, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode + container findings, extract command)
-steganographer-dashboard:     57 tests (LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation; 8 doc-tests)
+steganographer-core:          537 tests (unit + integration + doc-tests: packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF incl. Argon2id, transforms incl. TRANSFORM_KDF_ARGON2ID, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. detector registry, OOXML/PDF container analysis, Unicode text detectors, nested decode, OTS, golden vectors, detector calibration)
+steganographer-cli:            75 tests (unit + integration: media descriptors/I/O, canonical carrier binding, verify validation/revocation, legacy/generic round trips, exit-code contract, config incl. limits/profiles, key files, encryption, Argon2id password path, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode + container findings, extract command)
+steganographer-dashboard:      60 tests (52 tests + 8 doc-tests: LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation)
 steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
 steganographer-wasm:           9 tests (packet encode/decode, RGB/PCM carriers, forensic scan, decode-limit overrides)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

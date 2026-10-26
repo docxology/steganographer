@@ -417,7 +417,7 @@ steganographer dashboard
 # Ethereum backend on custom port
 steganographer dashboard --port 3000 --backend ethereum
 
-# Via run.sh (press 'd' for dashboard, 'a' for run-all)
+# Via run.sh (press 1 for the dashboard)
 ./run.sh
 ```
 

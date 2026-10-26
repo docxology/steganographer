@@ -117,42 +117,6 @@ detect_os() {
     export OS_TYPE
 }
 
-# OS-specific video source
-get_video_source_default() {
-    case "$OS_TYPE" in
-        macos)  echo "avfvideosrc" ;;
-        linux)  echo "v4l2src device=/dev/video0" ;;
-        *)      echo "videotestsrc" ;;
-    esac
-}
-
-# OS-specific video sink
-get_video_sink_default() {
-    case "$OS_TYPE" in
-        macos)  echo "osxvideosink" ;;
-        linux)  echo "autovideosink" ;;
-        *)      echo "autovideosink" ;;
-    esac
-}
-
-# OS-specific audio source
-get_audio_source_default() {
-    case "$OS_TYPE" in
-        macos)  echo "osxaudiosrc" ;;
-        linux)  echo "pulsesrc" ;;
-        *)      echo "audiotestsrc wave=sine freq=440" ;;
-    esac
-}
-
-# OS-specific audio sink
-get_audio_sink_default() {
-    case "$OS_TYPE" in
-        macos)  echo "osxaudiosink" ;;
-        linux)  echo "autoaudiosink" ;;
-        *)      echo "autoaudiosink" ;;
-    esac
-}
-
 os_label() {
     case "$OS_TYPE" in
         macos)  echo "macOS" ;;
@@ -509,47 +473,6 @@ action_dashboard() {
     press_enter
 }
 
-action_run_all() {
-    print_header
-    echo -e "  ${BOLD}${GREEN}🚀 Run All — Tests + Demo + Dashboard${RESET}"
-    separator
-    echo ""
-
-    setup_path
-    read_pipeline_config
-
-    echo -e "  ${BOLD}Step 1/3: Running Test Suite${RESET}"
-    echo -e "  ${DIM}─────────────────────────────${RESET}"
-    cargo test -p steganographer-core --manifest-path "${SCRIPT_DIR}/Cargo.toml" 2>&1
-    echo ""
-
-    echo -e "  ${BOLD}Step 2/3: Quick Demo (encode → verify round-trip)${RESET}"
-    echo -e "  ${DIM}─────────────────────────────${RESET}"
-    mkdir -p "$OUTPUT_DIR"
-    local test_file="${OUTPUT_DIR}/demo_frame.rgb"
-    local signed_file="${OUTPUT_DIR}/demo_frame_signed.rgb"
-
-    dd if=/dev/urandom of="$test_file" bs=30000 count=1 2>/dev/null
-    run_cli encode --input "$test_file" --output "$signed_file" --stego-type lsb_video --bits 1 2>&1
-    run_cli verify --input "$signed_file" --stego-type lsb_video 2>&1
-    echo -e "  ${GREEN}✓ Round-trip demo complete${RESET}"
-    echo ""
-
-    echo -e "  ${BOLD}Step 3/3: Launching Dashboard${RESET}"
-    echo -e "  ${DIM}─────────────────────────────${RESET}"
-    local port=8080
-    echo -e "  ${YELLOW}Dashboard at http://localhost:${port}${RESET}"
-    echo -e "  ${DIM}Press Ctrl+C to stop the dashboard and return to menu.${RESET}"
-    echo ""
-
-    cargo run --manifest-path "${SCRIPT_DIR}/Cargo.toml" \
-        -p steganographer-cli -- \
-        --config "${SCRIPT_DIR}/steganographer.toml" \
-        dashboard --port "${port}" --backend "ed25519" 2>&1
-
-    press_enter
-}
-
 action_show_info() {
     print_header
     read_pipeline_config
@@ -619,7 +542,7 @@ action_show_info() {
     echo -e "  ${BOLD}Crates:${RESET}"
     echo "    steganographer-core  — Pure algorithms (BLAKE3, Ed25519, LSB, Overlay, InfoBar)"
     echo "    steganographer-gst   — GStreamer integration (AppSink/AppSrc)"
-    echo "    steganographer-cli   — CLI binary (Clap, 13 subcommands)"
+    echo "    steganographer-cli   — CLI binary (Clap, 15 subcommands)"
     echo "    steganographer-dashboard — Web GUI (Axum + WebSocket, 3 tabs)"
     echo ""
 
