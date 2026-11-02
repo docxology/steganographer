@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.88.0  # held: this ref names the MSRV under test (1.88.0) and must not move until the MSRV policy does; the pin form is @v1 with `with: toolchain: 1.88.0`; revisit 2027-02-01
 
       - name: Install GStreamer
         run: |
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
         with:
           components: clippy
 
@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
 
       - name: Install GStreamer (Linux)
         run: |
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
 
       - name: Install cargo-audit
         run: cargo install cargo-audit
@@ -182,7 +182,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@nightly  # held: the ref carries the toolchain, so nightly is tracked deliberately; the pin form is @v1 with `with: toolchain: nightly`; revisit 2027-02-01
 
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz
@@ -207,7 +207,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
 
       - name: Cache cargo registry & build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache@v6.1.0
@@ -234,7 +234,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
         with:
           components: clippy
 
@@ -266,7 +266,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
 
       - name: Check crates.io metadata on every workspace member
         run: |
