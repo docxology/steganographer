@@ -7,4 +7,3 @@
   corpus, 06 delivery/migration.
 - Cross-check spec claims against crate code
   (`../../../steganographer-core/`) before citing as implemented.
-- Local-only — never commit.
