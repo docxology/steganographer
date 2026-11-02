@@ -1,4 +1,4 @@
-FROM rust:1.99-slim AS builder
+FROM rust:1.99-slim@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS builder
 
 # Install GStreamer development libraries
 RUN apt-get update && apt-get install -y \
@@ -31,7 +31,7 @@ RUN cargo build --release -p steganographer-cli
 #   FROM debian:bookworm-slim@sha256:<actual-digest>
 # The tag is used here for maintainability — verify the digest with:
 #   docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 # Install GStreamer runtime
 RUN apt-get update && apt-get install -y \
