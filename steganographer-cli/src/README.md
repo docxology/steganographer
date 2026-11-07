@@ -18,7 +18,10 @@ Source modules for the CLI binary.
 | `cmd_scan.rs` | Bounded forensic scans of files and directory trees |
 | `cmd_ots.rs` | OpenTimestamps stamp/verify |
 | `media_io.rs` | Descriptor-preserving image/WAV/raw I/O and atomic output policy |
-| `carrier_binding.rs` | Kernel-canonical carrier bytes for signing |
+
+Canonical carrier binding is the shared
+[`steganographer_core::carrier_binding`](../../steganographer-core/src/carrier_binding.rs)
+API, not a CLI source module.
 
 ## Subcommands
 

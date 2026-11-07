@@ -9,6 +9,7 @@ Source modules for the core steganographer algorithms.
 | `lib.rs` | 100 | Crate root — module declarations and public re-exports |
 | `packet.rs` | 2069 | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec`, `FIELD_PARENT_ID` nesting, bounded `GenericPacket::decode_nested` — generic packet v1 alpha |
 | `carrier.rs` | 1625 | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, `KeyedSpatialLsb`/`KeyedAudioSpatialLsb` keyed kernels — carrier embed/extract |
+| `carrier_binding.rs` | — | Shared canonical carrier hashing for offline and native embed/verify workflows |
 | `placement.rs` | 441 | `KeyedPermutation` — Feistel-network keyed slot placement; `InterleavedSchedule` (`PLACEMENT_INTERLEAVED`, PLC-001) |
 | `video.rs` | 64 | `VideoFrame` struct, `VideoFormat` enum (Rgb8/Bgra8/Yuv420), `VideoStegoModule` trait |
 | `audio.rs` | 45 | `AudioBuffer` struct (i16 samples), `AudioStegoModule` trait |

@@ -4,7 +4,7 @@
 
 ### lib.rs
 
-Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
+Entry point. Declares and re-exports: `packet`, `carrier`, `carrier_binding`, `placement`, `video`,
 `audio`, `crypto`, `revocation`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
@@ -86,6 +86,13 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
 - `VideoFormat` — `Rgb8` (3 bpp), `Bgra8` (4 bpp), `Yuv420` (1.5 bpp)
 - `VideoFrame` — mutable view: `width`, `height`, `stride`, `format`, `data: &mut [u8]`, `frame_index`
 - `VideoStegoModule` — trait with `embed(&mut frame, sig)` and `extract(&frame)` methods
+
+### carrier_binding.rs
+
+- `canonicalize()` — shared offline/native kernel-canonical representation for
+  signing and verification; embedding-owned locations are removed before hashing.
+- Inputs are packed logical carrier bytes, never row padding. CLI scalar
+  spread-spectrum and trait-video formats remain distinct.
 
 ### crypto.rs
 
