@@ -1,4 +1,4 @@
-# Steganographer 0.8.0
+# Steganographer 0.8.1
 
 Cryptographic media watermarking, bounded packet transport and forensic inspection in a five-crate Rust workspace.
 

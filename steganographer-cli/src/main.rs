@@ -111,7 +111,7 @@ fn main() {
                 signing_key,
             } => cmd_audio::run(&cli.config, source, sink, max_buffers, signing_key),
 
-            Commands::Encode {
+            Commands::Encode(cli::EncodeArgs {
                 input,
                 output,
                 stego_type,
@@ -139,7 +139,7 @@ fn main() {
                 no_verify_write,
                 password,
                 password_file,
-            } => {
+            }) => {
                 let generic = payload_file.is_some() || payload_text.is_some();
                 if !(1..=8).contains(&spread) {
                     usage_error("--spread must be 1 (disabled) or 2 through 8".to_string());
@@ -235,7 +235,7 @@ fn main() {
                 }
             }
 
-            Commands::Decode {
+            Commands::Decode(cli::DecodeArgs {
                 input,
                 output,
                 stego_type,
@@ -252,7 +252,7 @@ fn main() {
                 password_file,
                 trusted_signer,
                 revoked_list,
-            } => {
+            }) => {
                 // Errors are classified centrally: a carrier with no embedded
                 // generic packet is packet-not-found (exit 2). JSON mode
                 // surfaces it as an error envelope.
@@ -279,7 +279,7 @@ fn main() {
                 )
             }
 
-            Commands::Extract {
+            Commands::Extract(cli::ExtractArgs {
                 input,
                 output,
                 bits,
@@ -295,7 +295,7 @@ fn main() {
                 encryption_key_file,
                 trusted_signer,
                 revoked_list,
-            } => {
+            }) => {
                 let bits = match bits.to_ascii_lowercase().as_str() {
                     "auto" => None,
                     value => match value.parse::<u8>() {
@@ -337,7 +337,7 @@ fn main() {
                 )
             }
 
-            Commands::Verify {
+            Commands::Verify(cli::VerifyArgs {
                 input,
                 public_key,
                 stego_type,
@@ -357,7 +357,7 @@ fn main() {
                 hash_algorithm,
                 revoked_list,
                 frame_index,
-            } => {
+            }) => {
                 // Usage validation first: unknown values are a usage error
                 // (exit 1), not a silent no_signature / BLAKE3 fallback.
                 if let Err(e) = cmd_verify::validate_stego_type(&stego_type) {
@@ -488,7 +488,7 @@ fn main() {
                 std::process::exit(code)
             }
 
-            Commands::Derive {
+            Commands::Derive(cli::DeriveArgs {
                 master_secret,
                 master_secret_file,
                 master_secret_stdin,
@@ -501,7 +501,7 @@ fn main() {
                 argon2_parallelism,
                 output,
                 format,
-            } => {
+            }) => {
                 let master_mode =
                     master_secret.is_some() || master_secret_file.is_some() || master_secret_stdin;
                 let password_mode = password.is_some() || password_file.is_some() || password_stdin;
@@ -930,15 +930,15 @@ fn activate_requested_machine_mode(arguments: &[std::ffi::OsString]) {
 
 fn activate_output_mode(command: &Commands) {
     let (name, format, jsonl) = match command {
-        Commands::Encode { format, .. } => ("encode", format, false),
-        Commands::Decode { format, .. } => ("decode", format, false),
-        Commands::Extract { format, .. } => ("extract", format, false),
-        Commands::Verify { format, .. } => ("verify", format, false),
+        Commands::Encode(cli::EncodeArgs { format, .. }) => ("encode", format, false),
+        Commands::Decode(cli::DecodeArgs { format, .. }) => ("decode", format, false),
+        Commands::Extract(cli::ExtractArgs { format, .. }) => ("extract", format, false),
+        Commands::Verify(cli::VerifyArgs { format, .. }) => ("verify", format, false),
         Commands::Scan { format, .. } => ("scan", format, true),
         Commands::Keygen { format, .. } => ("keygen", format, false),
         Commands::Info { format, .. } => ("info", format, false),
         Commands::Analyze { format, .. } => ("analyze", format, false),
-        Commands::Derive { format, .. } => ("derive", format, false),
+        Commands::Derive(cli::DeriveArgs { format, .. }) => ("derive", format, false),
         Commands::Revoke { format, .. } => ("revoke", format, false),
         Commands::Config { format, .. } => ("config check", format, false),
         Commands::Ots {

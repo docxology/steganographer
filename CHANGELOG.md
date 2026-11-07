@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.8.1 — 2026-11-07
+
+### Fixed
+
+- Split large CLI argument builders into shared clap `Args` types so debug
+  command construction fits the default 1 MiB Windows stack. The executable,
+  completions and manuals still use the same schema, without stack-size or
+  optimization overrides. A real small-stack parser regression fails before
+  the refactor and passes afterward.
+- Install the Linux Matroska runtime plugin required by the finite native
+  file-rebinding integration scenario instead of silently skipping that test.
+- Pass the secret-scanner configuration through its supported `GITLEAKS_CONFIG`
+  environment variable, removing an unsupported action input.
+- Count both struct and tuple command variants in executable project status.
+  Command names, arguments, JSON envelopes and frozen STG3 packet bytes are
+  unchanged.
+
 ## 0.8.0 — 2026-11-07
 
 ### Security and correctness

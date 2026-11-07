@@ -28,7 +28,7 @@ printf 'workspace version: %s  (source: Cargo.toml)\n' "$ver"
 
 # CLI subcommand count (source of truth: enum Commands in the CLI binary)
 subs=$(awk '/^pub[(]crate[)] enum Commands/,/^}/' steganographer-cli/src/cli.rs \
-        | grep -cE '^    [A-Z][a-zA-Z]+[[:space:]]*\{' || true)
+        | grep -cE '^    [A-Z][a-zA-Z]+[[:space:]]*[({]' || true)
 printf 'cli subcommands: %s  (source: steganographer-cli/src/cli.rs enum Commands)\n' "$subs"
 
 # Docs count
