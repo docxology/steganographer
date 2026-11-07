@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
       - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91.0  # held: explicit workspace MSRV; advance only with the documented compiler policy
+        uses: dtolnay/rust-toolchain@1.120.0  # held: explicit workspace MSRV; advance only with the documented compiler policy
 
       - name: Install GStreamer
         run: |
