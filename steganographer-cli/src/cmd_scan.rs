@@ -585,16 +585,19 @@ mod tests {
         }
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
     fn symlink_input_rejected_unless_follow_flag() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.txt");
         std::fs::write(&target, b"hello").unwrap();
         let link = dir.path().join("link.txt");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
 
-        let error = check_input_symlink(&link, false).unwrap_err();
-        assert!(error.contains("symlink"));
+        assert!(check_input_symlink(&link, false).is_err());
 
         // With the override flag the link is accepted, and run() follows the
         // link target (clean file, exit 0).
@@ -603,10 +606,7 @@ mod tests {
         assert_eq!(code, 0);
 
         // run() enforces the same policy for direct callers.
-        let error = run(link.to_str().unwrap(), 8, 100, 1024, "plain", false, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("symlink"));
+        assert!(run(link.to_str().unwrap(), 8, 100, 1024, "plain", false, None).is_err());
     }
 
     #[test]

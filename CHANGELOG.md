@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the refactor and passes afterward.
 - Install the Linux Matroska runtime plugin required by the finite native
   file-rebinding integration scenario instead of silently skipping that test.
+- Exercise scan symlink rejection/following with each platform's native file
+  symlink API, including Windows, instead of compiling a Unix-only fixture
+  into the portable test target.
 - Pass the secret-scanner configuration through its supported `GITLEAKS_CONFIG`
   environment variable, removing an unsupported action input.
 - Count both struct and tuple command variants in executable project status.

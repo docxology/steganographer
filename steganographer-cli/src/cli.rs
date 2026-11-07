@@ -257,7 +257,7 @@ pub(crate) struct EncodeArgs {
     /// mutually exclusive with --encryption-key/--encryption-key-file
     #[arg(long, conflicts_with_all = ["encryption_key", "encryption_key_file"])]
     pub(crate) password_file: Option<String>,
-    /// Embedding key (hex-encoded 32 bytes) for keyed audio/spread-spectrum placement
+    /// Embedding key (hex-encoded, 32 bytes) for keyed audio/spread-spectrum placement
     #[arg(long)]
     pub(crate) embedding_key: Option<String>,
     /// Path to a hex-encoded 32-byte embedding key file
