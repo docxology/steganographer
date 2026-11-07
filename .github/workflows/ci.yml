@@ -29,6 +29,10 @@ jobs:
       - name: Check locked workspace
         run: cargo check --workspace --all-features --all-targets --locked
 
+      - name: Check locked fuzz workspace
+        # Resolve dependencies so stale path-package versions fail with --locked.
+        run: cargo metadata --manifest-path steganographer-core/fuzz/Cargo.toml --locked --format-version 1
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -118,7 +122,9 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        run: |
+          cargo audit
+          cargo audit --file steganographer-core/fuzz/Cargo.lock
 
   lint:
     name: Lint (cargo-deny)
