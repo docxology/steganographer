@@ -1,6 +1,7 @@
-//! Source-bound, host-only release orchestration; see scripts/README.md.
+//! Source-bound, host-only release orchestration; see the repository README.
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Parser, ValueEnum};
+use flate2::{write::GzEncoder, Compression};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -343,17 +344,27 @@ fn archive(stage: &Path, name: &str, output: &Path) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(output.join(format!("{name}.tar.gz")))?;
-    ensure!(
-        Command::new("tar")
-            .args(["-czf", "-", "-C"])
-            .arg(stage)
-            .arg(name)
-            .env("COPYFILE_DISABLE", "1")
-            .stdout(file)
-            .status()?
-            .success(),
-        "tar failed"
-    );
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    // BSD tar pads compressed stdout to its block size. Compress the raw tar
+    // stream here so the output ends exactly at one gzip member's trailer.
+    let mut child = Command::new("tar")
+        .args(["-cf", "-", "-C"])
+        .arg(stage)
+        .arg(name)
+        .env("COPYFILE_DISABLE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("starting tar")?;
+    let mut source = child.stdout.take().expect("piped tar stdout");
+    let copied = std::io::copy(&mut source, &mut encoder);
+    if copied.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().context("reaping tar")?;
+    copied.context("compressing tar stream")?;
+    ensure!(status.success(), "tar failed");
+    encoder.finish().context("finishing gzip member")?;
     Ok(())
 }
 
@@ -638,6 +649,30 @@ fn main() -> Result<()> {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_is_one_complete_gzip_member() -> Result<()> {
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+        let stage = directory.path().join("stage");
+        let output = directory.path().join("output");
+        fs::create_dir(&stage)?;
+        fs::create_dir(&output)?;
+        fs::create_dir(stage.join("payload"))?;
+        write_new(&stage.join("payload/data"), b"strict gzip archive")?;
+        archive(&stage, "payload", &output)?;
+
+        let mut decoder = flate2::bufread::GzDecoder::new(BufReader::new(File::open(
+            output.join("payload.tar.gz"),
+        )?));
+        std::io::copy(&mut decoder, &mut std::io::sink())?;
+        let mut trailing = [0_u8; 1];
+        assert_eq!(
+            decoder.into_inner().read(&mut trailing)?,
+            0,
+            "archive must end at the gzip trailer, without padding or another member"
+        );
+        Ok(())
+    }
 
     #[test]
     fn refuses_existing_output_without_touching_it() -> Result<()> {

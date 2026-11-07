@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Steganographer 0.8.1** provides bounded generic packets/forensics, domain-separated signed media, native GStreamer integration and a sampled signed-artifact web dashboard. Surface capabilities are explicit: live Ed25519/LSB is not the full set of optional core signing/kernel APIs.
+**Steganographer 0.8.2** provides bounded generic packets/forensics, domain-separated signed media, native GStreamer integration and a sampled signed-artifact web dashboard. Surface capabilities are explicit: live Ed25519/LSB is not the full set of optional core signing/kernel APIs.
 
 ## Directory Structure
 
@@ -21,7 +21,7 @@
 ## File Counts
 
 - **Sources**: five workspace crates, eight fuzz targets, native integration tests and generated-binding regression scenarios. Use Cargo metadata/file listings instead of pinning a source-file count.
-- **Tests**: `cargo test --workspace --locked` = **768 passing tests** (default features); all-feature run: 822 passed across 28 suites. Both intentionally ignore only the immutable-fixture materializer. Canonical count home is this line; observed on macOS arm64, 2026-11-07. Update here first, then defer from other docs.
+- **Tests**: `cargo test --workspace --locked` = **769 passing tests** (default features); all-feature run: 823 passed across 28 suites. Both intentionally ignore only the immutable-fixture materializer. Canonical count home is this line; observed on macOS arm64, 2026-11-07. Update here first, then defer from other docs.
 - **Documentation**: `scripts/status.sh` derives top-level and platform-plan inventories; recursive documentation also includes image/manuscript metadata.
 - **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
 

@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
 import tempfile
+import zlib
 
 
 def digest(data):
@@ -17,6 +18,18 @@ def digest(data):
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def check_gzip(path):
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    with path.open("rb") as source:
+        while chunk := source.read(65536):
+            pending = chunk
+            while pending:
+                decoder.decompress(pending, 65536)
+                require(not decoder.unused_data, f"trailing data after gzip member: {path.name}")
+                pending = decoder.unconsumed_tail
+    require(decoder.eof, f"incomplete gzip member: {path.name}")
 
 
 def check(directory):
@@ -34,7 +47,8 @@ def check(directory):
     root = Path(__file__).resolve().parents[1]
     seen = set()
     for archive in sorted(directory.glob("*.tar.gz")):
-        with tarfile.open(archive) as tar, tempfile.TemporaryDirectory() as temporary:
+        check_gzip(archive)
+        with tarfile.open(archive, mode="r:gz") as tar, tempfile.TemporaryDirectory() as temporary:
             members = tar.getmembers()
             for member in members:
                 path = PurePosixPath(member.name)
