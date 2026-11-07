@@ -59,7 +59,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
 
       - name: Install GStreamer (macOS)
         if: runner.os == 'macOS'
@@ -146,8 +146,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: true
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
-        with:
-          config-path: .gitleaks.toml
+          GITLEAKS_CONFIG: .gitleaks.toml
 
   fuzz:
     name: Fuzz (nightly, 60s per target)
