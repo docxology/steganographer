@@ -48,6 +48,9 @@ ed25519-dalek = { workspace = true }
 gstreamer = { version = "0.23", features = ["v1_22"], optional = true }
 tempfile = "3"
 
+[dev-dependencies]
+flate2 = "1"
+
 [build-dependencies]
 clap = { workspace = true }
 steganographer-core = { path = "../steganographer-core", default-features = false }

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.8.2 — 2026-11-07
+
+### Fixed
+
+- Stream raw tar output through one Rust gzip encoder instead of allowing BSD
+  tar to pad compressed stdout. Archives now end at the gzip trailer: strict
+  `gzip -t` succeeds without warnings. Payloads and checksums in prior releases
+  remain intact; no published tag or asset is replaced.
+- Validate gzip headers, CRC/trailer completion and exact member boundaries
+  before reading release tar entries. Truncated trailers, concatenated members
+  and trailing padding fail closed.
+- Keep a failing-before/passing-after gzip-member regression in the standard
+  workspace suites and document the complete host-only release procedure.
+
 ## 0.8.1 — 2026-11-07
 
 ### Fixed

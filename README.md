@@ -1,4 +1,4 @@
-# Steganographer 0.8.1
+# Steganographer 0.8.2
 
 Cryptographic media watermarking, bounded packet transport and forensic inspection in a five-crate Rust workspace.
 
@@ -127,6 +127,27 @@ cargo +1.91.0 check --workspace --all-features --all-targets --locked
 CI additionally configures dependency/security checks, immutable wire-vector gates, generated WASM binding checks and eight seeded sanitizer fuzz targets. Configuration of CI is not evidence that an unobserved hosted run passed. The [canonical test inventory](AGENTS.md#file-counts) is updated from executed results, not a static badge.
 
 Release validation uses synthetic media and public test keys. Physical cameras/microphones, third-party virtual-camera consumers, Windows runtime deployment and independent Bitcoin full-node validation are separate boundaries—not implied by native builds or fake-device browser capture. Fresh pending calendar receipts are not newly Bitcoin-confirmed timestamps.
+
+## Release artifacts
+
+Run from a clean source checkout on macOS or Linux with Rust, `tar`, `gitleaks`,
+Node.js, Python 3.12+, the `wasm32-unknown-unknown` target and a `wasm-bindgen`
+generator matching `Cargo.lock`. Native builds also need GStreamer 1.22+.
+
+```bash
+bash scripts/release.sh --output dist/release-0.8.2 --variant all
+python3 scripts/check-release.py dist/release-0.8.2
+gzip -t dist/release-0.8.2/*.tar.gz
+```
+
+The output path must not exist. `portable`, `native` and `wasm` select individual
+variants; `all` includes them plus the exact source snapshot, inventory,
+provenance and checksums. `--allow-dirty` explicitly records a development
+snapshot, not a clean committed release. No command publishes or modifies tags.
+Host binaries are not statically bundled or cross-compiled. Compression emits
+one complete gzip member without trailing padding; the checker verifies that
+boundary as well as exact source bytes and actual artifact consumers.
+
 
 ## Migration from 0.7
 
