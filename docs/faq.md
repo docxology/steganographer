@@ -8,7 +8,7 @@ Steganography is the practice of hiding information within other data. Unlike en
 
 ### How is this different from a digital watermark?
 
-Digital watermarking is a subset of steganography focused on marking ownership or authenticity. Steganographer embeds cryptographic signatures (not arbitrary data) to prove a frame was produced by a specific key holder and hasn't been tampered with.
+Watermarking can carry an ownership/authentication claim, but a valid signature proves only a relationship to a key. Steganographer's legacy workflow signs canonical media excluding kernel-owned regions, not every container bit or displayed metadata field. Identity needs an independently pinned public key; signatures do not establish that content depicts a true event.
 
 ### Can I hide arbitrary messages in video/audio?
 
@@ -21,12 +21,7 @@ packets support keyed placement (`--embedding-key`), payload signing
 
 ### Is the hidden data visible/audible?
 
-**LSB (1-2 bits)**: No. The changes are below human perception:
-
-- Video: ±1–3 out of 256 luminance levels (imperceptible)
-- Audio: ±1–3 out of 32,768 sample levels (~90 dB SNR — completely inaudible)
-
-**Text Overlay**: Yes by design — it's a visible watermark.
+Low-bit embedding makes small integer changes, but visibility/audibility depends on content, playback and bit depth. Imperceptibility is not statistical undetectability. Visible rendering APIs are separate and are not supported as signed dashboard overlays.
 
 ---
 
@@ -34,7 +29,7 @@ packets support keyed placement (`--embedding-key`), payload signing
 
 ### Do I need GStreamer to build?
 
-**Only for the `steganographer-gst` and `steganographer-cli` crates.** The core crate builds and tests without it:
+Only native GStreamer functionality needs it. Core and WASM do not. The CLI can be built without its native `gst` feature using `--no-default-features`; a default CLI build includes GStreamer:
 
 ```bash
 cargo build -p steganographer-core    # No GStreamer needed
@@ -76,7 +71,7 @@ Or use the full path: `~/.cargo/bin/cargo build`
 steganographer verify --input file.rgb --public-key <hex> --stego-type lsb_video
 ```
 
-You need the public key that was printed when the file was encoded. Without it, you can only confirm a signature exists but not verify its authenticity.
+You need the public key of the expected signer, obtained through a trusted channel. A key printed by the encoder or supplied in the same archive is extraction metadata, not independent identity proof. Without `--public-key`, legacy `verify` is extraction-only and explicitly not verified. Generic decode/extract can require `--trusted-signer`.
 
 ### Can I get machine-readable JSON output from verify?
 
@@ -86,7 +81,7 @@ Yes. Use `--format json`:
 steganographer verify --input file.rgb --stego-type lsb_video --format json
 ```
 
-This outputs a JSON object with `found`, `stego_type`, `frame_index`, `hash`, `signature_preview`, `status`, and `message` fields — ideal for CI/CD pipelines or scripted batch verification.
+JSON distinguishes extraction from verification and reports outcomes for scripts. Missing payload is exit 2; failed verification, including a revoked signer, is exit 3. Use [CLI Reference](cli-reference.md) for the current schema and exit policy.
 
 ### Can I add timestamps or frame numbers to the overlay text?
 
@@ -104,46 +99,27 @@ Supported placeholders:
 - `{date}` — UTC date only
 - `{time}` — UTC time only
 
-Each placeholder is expanded at embed-time, so every frame gets a unique value.
+Each placeholder expands at rendering time. The text is not an independently verified timestamp or signer identity, and visible overlays cannot be mixed into the signed native invisible-kernel pipeline.
 
 ### What file formats are supported for encode/verify?
 
-Currently:
-
-- **Video**: Raw RGB pixel data (3 bytes/pixel, no headers)
-- **Audio**: Raw S16LE PCM (2 bytes/sample, mono, no headers)
-
-For container formats (MP4, WAV, MKV), use the live pipeline with GStreamer's `filesrc` and `decodebin`.
+Offline encode/verify supports decoded lossless images (including PNG), raw RGB and S16LE/WAV audio subject to the chosen kernel and output policy. JPEG and other lossy outputs cannot preserve exact LSB evidence. Native file pipelines produce exact RGB Matroska or PCM WAV; arbitrary source/sink pipelines require appropriate plugins and may invalidate embedded data if they transcode lossily.
 
 ### How many frames can I watermark per second?
 
-On a modern machine (Apple M1/M2 or x86_64):
-
-- BLAKE3 hash of 1080p frame: **<1 ms**
-- Ed25519 sign: **<0.1 ms**
-- LSB embed (1-bit): **<0.5 ms**
-- **Total**: ~1.5 ms/frame → **600+ fps** throughput (limited by GStreamer I/O in practice)
+Throughput depends on dimensions, kernel, codec, build and hardware. Signing microbenchmarks are not end-to-end capture/delivery rates. Dashboard signing is sampled and backpressured, not a promise to sign every camera frame.
 
 ### Does it survive re-encoding (H.264, JPEG)?
 
-**No.** LSB data is destroyed by any lossy codec because codecs quantize frequency coefficients, which changes pixel/sample values. The text overlay partially survives (it's visible text burned into pixels).
+There is no universal codec guarantee. LSB generally requires exact lossless preservation. DCT checks clean integer reconstruction and rejects unstable saturated covers, but sharing JPEG's transform family does not ensure JPEG survival. Current SS is keyed bounded residue/QIM with majority detection, not additive DSSS; ordinary texture can recover cleanly without destructive averaging, but noise/codec resilience remains channel dependent. Re-embed older SS artifacts from original media.
 
-For codec-robust watermarking, see the [Roadmap](roadmap.md) for planned DCT-domain and Video Seal integration.
+The optional learned model's synthetic quantization evaluation is not a real H.264 test; recorded real-codec experiments did not establish reliable recovery. Its short payload and decoder score do not prove identity. See [Algorithms](algorithms.md).
 
 ### Can I use this on livestreams (Zoom, OBS)?
 
-Yes, on Linux with v4l2loopback:
+Native output can feed a virtual device if the OS and installed plugins support it (for example, v4l2loopback on Linux). Zoom/OBS and similar applications may resize, screen-capture or lossy-encode the media, destroying the hidden data. A working preview is not evidence of a verifiable downstream livestream.
 
-1. Create a virtual camera: `sudo modprobe v4l2loopback video_nr=42`
-2. Run steganographer: `steganographer video --sink "v4l2sink device=/dev/video42"`
-3. Select "Steganographer" as your camera in Zoom/OBS
-
-On macOS:
-
-1. Run Steganographer to open a live preview window (`osxvideosink`)
-2. In OBS, create a "Window Capture" source targeting the Steganographer window
-3. Start the OBS Virtual Camera
-4. Select "OBS Virtual Camera" in Zoom/Teams
+On macOS, the CLI owns Cocoa bootstrap for native video/audio dispatch; reusable headless library calls do not create a process-global Cocoa loop. Embedding applications own any required native main-loop integration.
 
 ---
 
@@ -151,33 +127,21 @@ On macOS:
 
 ### Why BLAKE3 instead of SHA-256?
 
-BLAKE3 is ~6× faster than SHA-256 on modern CPUs and supports tree hashing for parallelism. For real-time video processing, this speed difference matters. Both provide 128-bit collision resistance.
+BLAKE3 supports parallel hashing and is the default live hash. Actual speed depends on input size, CPU and implementation; it is not a fixed multiple of SHA-256. Offline supported hash selection does not imply the dashboard accepts that selection.
 
 ### Why Ed25519 instead of RSA?
 
-| Property         | Ed25519   | RSA-2048   |
-| ---------------- | --------- | ---------- |
-| Key size         | 32 bytes  | 256 bytes  |
-| Signature size   | 64 bytes  | 256 bytes  |
-| Sign speed       | ~50 µs    | ~1 ms      |
-| Verify speed     | ~100 µs   | ~30 µs     |
-| Payload overhead | 109 bytes | 520+ bytes |
-
-Ed25519's compact signatures (64 bytes vs 256+ for RSA) are critical for steganography — every byte of payload requires more carrier capacity.
+Ed25519 has compact 32-byte public keys and 64-byte signatures, useful where carrier capacity is limited. Strict verification and weak imported-key rejection are enforced. Core's optional alternative backends do not change the fixed Ed25519 legacy media payload or the dashboard's supported backend.
 
 ### Is this quantum-resistant?
 
-Not Ed25519. It would be broken by a sufficiently large quantum computer running Shor's algorithm. Real post-quantum signing is now implemented — ML-DSA-44/65/87 (FIPS 204) via `MlDsaBackend`/`MlDsaVerifier` and the hybrid Ed25519 + ML-DSA `HybridBackend`/`HybridVerifier` — though the large signature sizes (2.4–4.6 KB) still make it a legacy-workflow fit. See [Cryptography](cryptography.md).
+Ed25519 is not quantum-resistant. Optional library ML-DSA-44/65/87 and hybrid Ed25519 + ML-DSA backends exist, with larger signatures. They are not working dashboard alternatives or drop-in replacements for fixed Ed25519 legacy media signatures. See [Cryptography](cryptography.md).
 
 ### What happens if my private key is compromised?
 
-An adversary with your private key can:
+A compromised key can sign arbitrary attacker-chosen content under that identity. Neither a watermark nor prior possession of the public key prevents forgery after compromise. Rotate the key, revoke the old public key through a trusted policy, secure/delete old private material and tell verifiers which key is trusted. Revocation policy is external to the signature bytes.
 
-- Forge valid signatures on any data
-- Create watermarked media that appears authentic
-- They **cannot** read or modify existing watermarks without the actual frame data
-
-**Mitigation**: Rotate keys per-session and securely delete old private keys.
+See [Key Rotation](key-rotation.md) for the historical incident and current CLI policy.
 
 ---
 
@@ -194,10 +158,7 @@ Possible causes:
 
 ### `Capacity error: frame too small`
 
-The frame doesn't have enough bytes to embed the 109-byte payload. Minimum sizes:
-
-- 1-bit LSB: 864 pixel bytes (288 RGB pixels, ~17×17)
-- 2-bit LSB: 432 pixel bytes (144 RGB pixels, ~12×12)
+Capacity includes framing, not just the 109-byte signature. One-bit legacy LSB needs 904 carrier bytes/samples; two-bit LSB needs 452. Other kernels count eligible units differently: SS traits use green pixels/first-channel PCM frames; DCT uses complete 8×8 blocks. Use the capacity report for the actual settings.
 
 ### `Status: ❌ INVALID`
 
@@ -242,7 +203,7 @@ size = 109            # 4 magic + 1 version + 8 frame + 32 hash + 64 signature
 
 ### Can I increase the embedding capacity?
 
-Yes, increase the LSB bits from 1 to 2–4 in `[video.stego.lsb_signature]`. But higher bits make the embedding more detectable. See [Steganography Theory](steganography-theory.md) for the capacity–security tradeoff.
+Higher LSB bit depth increases raw capacity and maximum change. Generic transforms/framing and the selected kernel still determine usable payload size. Higher capacity is not a promise of acceptable distortion or stealth; see [Steganography Theory](steganography-theory.md).
 
 ### Where can I learn about the theory behind this?
 
@@ -264,28 +225,19 @@ cargo run -p steganographer-cli -- dashboard --port 8080 --backend ed25519
 
 Then open [http://localhost:8080](http://localhost:8080).
 
-### What is the QR data matrix overlay?
+### Are QR overlays and MetaMask supported?
 
-The dashboard renders a small red/black binary grid in the bottom-right corner of the video feed. Each frame encodes 20 bytes of metadata: frame counter, BLAKE3 hash prefix, timestamp, backend ID, and verification status. The Overlay Opacity slider controls its visibility.
-
-### Can I use MetaMask for signing?
-
-Yes. Click "Connect MetaMask" in the dashboard header. The dashboard will request `personal_sign` (EIP-191) via MetaMask. Select "Ethereum" in the Sign Backend dropdown.
+No. Signed visual overlays/QR, MetaMask and Ethereum signing are unavailable in the dashboard. These are disabled controls, not working alternate modes. The live signer is Ed25519/BLAKE3 with LSB. Preview opacity affects display only, not signed pixels or exported bytes.
 
 ### What do the live config controls do?
 
-| Control | Effect |
-| --------- | -------- |
-| **Overlay Opacity** | Controls QR overlay transparency (0.0–1.0) |
-| **LSB Bits** | Number of least-significant bits used for embedding (1–4) |
-| **Sign Backend** | Switch between Ed25519 and Ethereum signing |
-| **Overlay Text** | Custom text displayed above the QR grid |
-| **Sign Rate** | How often frames are signed (0.2/s – 5/s) |
-| **QR Scale** | Size of QR overlay (5% = small corner, 100% = full frame) |
-| **Resolution** | Video capture resolution (320×240 to 1920×1080) |
-| **Record** | Toggle video/audio recording with steganographic data embedded |
+Supported controls change LSB bit depth, capture resolution and sampling cadence. The client hydrates config before serialized full-object writes to the snake_case API. Encoding records per-artifact parameters so later verification does not incorrectly use the newest slider settings. Unsupported hash/kernel/encryption/ECC/backend requests reject rather than silently acting as defaults.
 
-Changes take effect immediately and are synced to the server via `POST /api/config`.
+### Which transport is selected?
+
+Video uses URL `transport` query, then saved preference, then server default. `auto` can fall back from WebRTC to WebSocket without saving the fallback as your preference. Pinned WebRTC fails visibly when unavailable. Audio uses WebSocket. `/api/webrtc/config` requires bearer auth when configured, as do guarded mutation routes; public read routes are not blanket-authenticated.
+
+Default bind is loopback. Tokenless browser mutations reject foreign Origin, and WebSocket upgrades enforce Origin/token gates. Origin/CORS are not a replacement for authentication or TLS on an exposed deployment.
 
 ### Are there keyboard shortcuts?
 
@@ -309,27 +261,39 @@ Yes. Add `?autostart=1` to the dashboard URL:
 http://localhost:8080?autostart=1
 ```
 
-The camera will start automatically without requiring a click.
+The browser attempts camera startup; permissions, secure-context rules and device availability still apply.
 
 ### Can I export session data?
 
-Yes. Click the `📥 Export` button in the footer (or press `E`). This downloads a JSON report containing session duration, config snapshot, video metrics, and the last verification result.
+The footer Export action (or `E`) downloads session/config/metric information. Metrics and verification labels are server-reported. This report is not independent verification of downloaded signed artifacts.
 
 ### Does the dashboard support audio steganography?
 
-Yes! Click the **Audio** tab at the top of the dashboard. The audio tab provides:
-
-- **Left panel**: Live microphone waveform and spectrum visualization
-- **Right panel**: Audio steganography config (LSB Bits, Sign Backend, Buffer Size, Sample Rate) and verification results
-- **Record**: Export signed audio as WAV files with LSB-embedded integrity data
+The Audio tab captures microphone input and displays waveform/spectrum and server-reported verification. Signed output is the **returned PCM**, not the original microphone buffer. Its extraction metadata includes frame index, LSB depth and a public embedding/extraction key.
 
 ### Can I record and save the signed video/audio?
 
-Yes. Both the Video and Audio tabs have a **Record** button (red dot in the stats bar):
+Yes. Record exports bounded stored-ZIP archives:
 
-- **Video**: Records the canvas output (with QR overlay) as a WebM file
-- **Audio**: Records PCM audio chunks as a WAV file
-- Files auto-download with timestamped filenames when you click **Stop**
+- **Video:** sampled lossless signed PNG snapshots.
+- **Audio:** returned signed PCM wrapped as separate WAV chunks.
+- **Manifest:** per-entry public key, indices, bit depth and audio extraction metadata.
+
+These are not continuous VP9/WebM video or uninterrupted microphone capture. Sampling, request backpressure and device gaps matter. Reaching a size/entry cap stops recording visibly rather than silently discarding entries.
+
+Verify downloaded PNG/WAV entries independently with the CLI and their manifest parameters (`--frame-index` is needed for keyed legacy audio). Pin the expected public key through a trusted channel; the archive's own key is not independent identity evidence. The GUI does not perform this archive verification in-browser.
+
+### What do green verification counters establish?
+
+The server extracts and checks the actual post-embed PNG/PCM using the public half of its real runtime signer. The UI matches results by index and server-wide cache revision to avoid attributing stale results to a new frame. Counters are still server-reported, not a proof of uninterrupted capture or a separately verified archive.
+
+### How is the Docs tab rendered safely?
+
+Markdown HTML is inserted only after sanitization. If the renderer or sanitizer is unavailable/fails, the tab displays text instead of inserting unsanitized HTML.
+
+### Does a clean scan prove there is no hidden data?
+
+No. RS/chi-squared outputs are diagnostics, not calibrated natural-image detection probabilities. Unavailable statistics are not clean. ZIP/OOXML, lexical PDF and Unicode scans are bounded and report findings, detection and completeness separately. An incomplete negative retains uncertainty; a positive remains positive if evidence display is capped.
 
 ### What security scenarios does steganographer address?
 

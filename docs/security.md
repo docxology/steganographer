@@ -1,470 +1,149 @@
 # Security
 
-## Security Model
+## Security model
 
-Steganographer provides **tamper-evident** watermarking, not **tamper-proof** protection. The system is designed to detect unauthorized modifications to media streams, not to prevent them.
+Steganographer 0.8 provides bounded extraction, cryptographic payload verification and canonical-media tamper evidence. It is **not tamper-proof**, a deepfake detector, a person-identity service, or a complete forensic examination. Its guarantees depend on the chosen API, trusted verification context and preservation of the supported carrier representation.
 
-```mermaid
-flowchart TD
-    subgraph "Defense-in-Depth Layers"
-        L1["🔑 Cryptographic Signing\nEd25519 / secp256k1"] --> L2["#️⃣ Content Hashing\nBLAKE3 (256-bit)"]
-        L2 --> L3["📦 Steganographic Embedding\nLSB (1-4 bits)"]
-        L3 --> L4["📊 Visual Overlay\nQR Code + Text Watermark"]
-    end
-    L4 --> RESULT["Tamper-Evident Media"]
-    style L1 fill:#5c1a1a,stroke:#a33c3c,color:#fff
-    style L2 fill:#333,stroke:#e53935,color:#e0e0e0
-    style L3 fill:#1a3a5c,stroke:#2d6da3,color:#fff
-    style L4 fill:#2d5016,stroke:#4a8c2a,color:#fff
-```
+Keep these questions separate:
 
-> For the theoretical foundations of steganographic security, see [Steganography Theory](steganography-theory.md). For cryptographic details, see [Cryptography](cryptography.md).
+1. Was a payload found and decoded within the configured limits?
+2. Does its signature verify over the authenticated bytes?
+3. Does the verified full public key match an independently trusted signer?
+4. Does verification bind the delivered media, the logical payload, or exact file bytes?
+5. Was the examination complete within the detector's declared scope?
 
-### Cachin's Security Framework
+Success at one step does not imply success at the others. See [Cryptography](cryptography.md) for byte-level contracts and [Threat Model](threat-model.md) for adversaries and residual risks.
 
-Christian Cachin (2004) formalized steganographic security using the Kullback-Leibler (KL) divergence between the probability distributions of cover and stego objects:
+## Historical signing key exposure
 
-| Security Level | KL Divergence | Meaning |
-| --- | --- | --- |
-| Perfectly secure | D_KL = 0 | Stego object is statistically indistinguishable from cover |
-| ε-secure | D_KL ≤ ε | Bounded distinguishability |
-| Detectable | D_KL → ∞ | Trivially detectable |
+Commit `5dcb2e2669e135cd32f6d2615d279f1f0d8dbf35` contains a private Ed25519
+signing seed at `keys/daf.key`. Its public identity is
+`d2a05f7c69249dbfba5408dd8c35551317b04bfcc6f793c5e76221778c61d552`.
+Treat that identity as compromised: anyone with the historical blob can sign
+as it. The private bytes are not reproduced here or included in 0.8.0 artifacts.
 
-Steganographer's LSB embedding at 1-bit with only 904 out of 921,600 bytes modified achieves a very low embedding rate (~0.10%), placing it in the **low-ε regime** for practical purposes.
+The [incident record](key-rotation.md) declares this identity revoked effective
+2026-07-22. Core's shared compromise policy denies it in managed CLI signing,
+legacy verification, generic decode/extract, native signed pipelines and dashboard
+router/processing boundaries. An absent or empty local registry cannot restore it.
+Raw core cryptographic primitives remain mathematical operations, not authorization;
+library applications must apply revocation and independently trusted public-key pins.
 
-### What It Guarantees
+Retire this identity from external allowlists, provision replacement keys independently,
+and rotate secrets derived from the exposed seed. Current source/artifact scanning has
+no blanket directory exemption. `.gitleaksignore` acknowledges only the documented
+historical commit/path/rule/line fingerprint; it does not waive the key value, another
+commit, or new source exposure. An audit without that acknowledgment still detects
+the historical blob. No history rewrite or universal downstream-retirement claim is
+made: removing files/history cannot revoke copies or repair external trust.
 
-| Property | Mechanism | Strength |
-| --- | --- | --- |
-| **Integrity** | BLAKE3 hash over frame data (constant-time comparison) | Collision resistance: 128-bit security |
-| **Authenticity** | Ed25519 signature over hash | Forgery resistance: ~128-bit security |
-| **Non-repudiation** | Asymmetric key — signer can't deny producing a valid signature | Same as Ed25519 |
-| **Frame ordering** | Frame index included in hash domain | Reordering/replay detected |
+## Integrity, authorship and coverage
 
-### What It Does NOT Guarantee
-
-| Limitation | Description |
+| Property | Implemented boundary |
 | --- | --- |
-| **Confidentiality** | Embedded data is not encrypted by default; payload encryption (ChaCha20-Poly1305) is available as an opt-in feature |
-| **Robustness** | LSB data is destroyed by lossy transcoding (H.264, JPEG, MP3) |
-| **Covertness** | Statistical steganalysis may detect the presence of LSB embedding |
-| **Availability** | An attacker can strip LSB data by re-encoding the media |
-
-### Generic Packet Alpha Semantics
-
-The generic packet alpha validates framing, canonical metadata, envelope CRC32C,
-declared resource limits, original length, and an unkeyed content digest. That
-detects accidental or malicious payload corruption. It does **not** by itself
-identify an author or prove carrier provenance — for signer authenticity use
-legacy `encode` plus `verify --public-key`, or the payload-signature transform.
-
-Properties enforced by the current protocol work:
-
-- **AEAD nonce derivation**: the ChaCha20-Poly1305 nonce is derived as
-  `BLAKE3(random_salt ∥ packet_id)[..12]`, never from public transport data
-  (such as the locator nonce); distinct packets derive distinct nonces under a
-  shared key, and a fresh random salt per invocation keeps re-encryptions of
-  the same packet_id non-identical.
-- **Flags ⇔ transform consistency**: a locator flag set without a matching
-  envelope transform (or a transform recorded without its flag) is a hard
-  decode error — no silent downgrade from an encrypted/ECC packet to a
-  plaintext one.
-- **Unknown non-critical envelope fields are preserved**, not dropped: only
-  unknown *critical* fields (bit 15 set) reject the packet.
-- **Nesting scaffold**: the `FIELD_PARENT_ID` envelope field (id 19) records a
-  parent packet identifier; `DecodeLimits` bounds `max_nesting_depth` (3) and
-  `max_aggregate_nested_bytes` (64 MiB) for future recursive decoders.
-- **Keyed locator/placement** (`--embedding-key`): a keyed recognition tag at
-  the canonical bootstrap slots means key-less scanners see no `STG3` magic;
-  the keyed locator variant is flagged in the packet itself.
-- **Interleaved placement** (`PLACEMENT_INTERLEAVED`, PLC-001): an
-  `InterleavedSchedule` coprime-stride slot mapping spreads packet slots across
-  the carrier instead of the leading sequential slots.
-- **Detector registry (FOR-001)**: every `scan` detector — statistical
-  (chi-squared, sample-pairs, RS), text (Unicode stego), and container
-  (ZIP/OOXML) — has a stable ID, a documented byte/time budget, stated
-  false-positive limits, and calibration corpus samples
-  (`steganographer-core/src/forensics.rs`, `detector_registry()` +
-  `testdata/corpus/`).
-- **Statistical detector results are observations, never verdicts**: high
-  entropy or structured input can trip chi-squared/sample-pairs/RS on clean
-  data, so only content-derived evidence (inline `STEG`/`STG3` magic,
-  Unicode/text findings, DOC-002 WordprocessingML concealment) sets the
-  `detected` verdict; entropy, file family, ZIP topology, and DOC-001
-  topology anomalies stay observational.
-- **Container/OOXML scanning (DOC-001/DOC-002 slice)**: a dependency-free
-  in-memory ZIP reader with hostile-input budgets (`CONTAINER_*` constants:
-  4096 entries, 64 findings, 4 MiB/entry + 8 MiB/package inflate caps) feeds
-  the `scan` command's container findings for docx/pptx/xlsx and generic
-  ZIP-family input; budget violations never panic — they surface as typed
-  DOC-001 evidence.
-
-### Spread-Spectrum: Host-Canceling Differential Pairs
+| Legacy frame integrity | `SignaturePayload` v4 hashes a domain, frame index, explicit video/audio lengths and audio presence; strict Ed25519 verifies the digest |
+| Generic payload integrity | Optional Ed25519 transform signs recovered logical payload bytes, not arbitrary envelope metadata |
+| Expected signer | A separately trusted full public-key pin; a self-supplied packet key alone proves no authorship |
+| Exact-artifact commitment | CLI OTS uses SHA256 of the entire input file; different file bytes require a different commitment |
+| Confidentiality | Optional authenticated encryption of the payload, not the visible/audible carrier or every metadata field |
+| Ordering | Signed indices can support an external sequence policy; isolated frame verification does not prove stream completeness or freshness |
 
-Spread-spectrum video/audio embedding now uses **host-canceling differential
-modulation**: for each payload bit, the byte/sample at `2i` receives `+PN`
-and the byte/sample at `2i+1` receives `−PN` for bit 1 (inverted for bit 0).
-The detector sums `(carrier[i] − carrier[i+1]) · pn[i]`, so the un-modulated
-host contribution cancels to adjacent-pixel differences instead of dominating
-the correlation with a term of std ≈ σ_host·√spread (≈35% per-bit error at
-1280×720 under noise with the old scheme). Carriers embedded by the old
-absolute-correlation embeds are **no longer extractable** — re-embed.
+Media verification uses canonical bytes that exclude regions modified by the selected embedding kernel. LSB clears selected low bits; other supported kernels exclude their owned regions. Thus not every changed pixel/sample bit is authenticated. File headers, container metadata, display timestamps and other rendered interpretation are not automatically signed. An attacker may alter excluded data without invalidating the canonical hash. Preserve exact artifacts and their independent digest when whole-file evidence matters.
 
----
+Weak imported Ed25519 keys are rejected and verification uses strict checks. These controls prevent permissive-key/signature acceptance; they do not repair an untrusted identity distribution channel or compromised signer. Old legacy v2/v3 media must be re-encoded, and historical raw zero-ID legacy ciphertext is not accepted by the new wrapper.
 
-## Threat Analysis
+## Supported compositions, not decorative settings
 
-### Adversary Model
+- **Live signed native pipelines:** Ed25519 with exactly one supported invisible signing kernel. Encryption, ECC or spreading settings that would be ignored are rejected. Invisible signing combined with a visible overlay/info bar is rejected rather than reporting false output verification. Standalone rendering/kernel APIs are separate.
+- **Native spread-spectrum signing:** the trait kernel's channel mapping differs from offline scalar binding; this signing composition is rejected. Do not treat the presence of a plain kernel API as end-to-end signature support.
+- **Offline generic spreading:** RGB LSB only, with shard count 2–8 (1 means unspread), actual first-shard binding and body-length-aware recovery. Audio, spread-spectrum and DCT sharding compositions are unsupported and reject before output.
+- **Dashboard:** Ed25519 and supported LSB settings, not Ethereum/MetaMask signing. Unsupported backend, crypto and kernel selections fail explicitly. Preview opacity is a UI effect, not a burned-in authenticated overlay; unavailable overlay controls are disabled.
+- **Lossless artifacts:** native file paths preserve RGB in Matroska and PCM in WAV. Dashboard recording archives contain exact signed PNG snapshots or signed PCM WAV chunks plus an extraction manifest in stored ZIP. These are not continuous signed WebM recordings.
 
-We assume an adversary who can:
+DCT/spread-spectrum are not universal compression-resistant substitutes for LSB. Carrier capacity, recoverability, codec behavior and the exact binding must all work; unsupported/unsuitable inputs may reject instead of producing an unverifiable success. Arbitrary downstream lossy encoders may destroy the watermark. No cross-codec robustness claim is made.
 
-- Intercept the media stream after steganographic embedding
-- Modify individual frames or audio buffers
-- Attempt to forge or replace signatures
-- Attempt to extract the embedded data
+## CLI fail-closed behavior
 
-### Attack Vectors
+The machine-readable envelope is `steganographer.cli/v1`. Its top-level `status` is `success`, `error` or `partial`; inspect both the envelope and the command-specific result. Secret/password values are not serialized as recoverable output secrets.
 
-| Attack | Protected? | Notes |
-| --- | --- | --- |
-| Bit-flip on frame data | ✅ | Hash mismatch detected |
-| Replace frame content | ✅ | Hash mismatch detected |
-| Reorder frames | ✅ | Frame index in hash domain |
-| Strip LSB watermark | ❌ | Re-encoding destroys LSBs (use overlay or spread-spectrum/DCT as backup) |
-| Quantum computing | ⚠️ | Ed25519 is not post-quantum; real ML-DSA (`MlDsaBackend`, public-key-only `MlDsaVerifier`) and hybrid (`HybridBackend`/`HybridVerifier`) signing backends are available |
-| Statistical detection of LSB | ⚠️ | Audio uses keyed PRNG; video uses sequential (more detectable); spread-spectrum and DCT are more resistant |
-| Side-channel (timing) | ⚠️ | Depends on `ed25519-dalek` implementation |
-| Quantum computing | ❌ | Ed25519 is not post-quantum |
+| Exit | Meaning |
+| ---: | --- |
+| 0 | Command completed successfully; may include extraction-only `not_verified`, not trusted authentication |
+| 1 | Invalid arguments, format, explicit configuration or unsupported composition |
+| 2 | Packet/signature not found or decoding unavailable |
+| 3 | Authentication/signature verification failure, including a revoked otherwise-valid signer |
+| 4 | Scan findings meet the selected failure threshold |
+| 5 | Resource/coverage cutoff leaves a scan inconclusive without qualifying findings |
+| 6 | Internal/runtime error, including unexpected I/O failures |
 
----
+`verify` **without a public key** is extraction-only and reports `not_verified`. Exit 0 must not be used as a shortcut for trusted verification. A missing signature is `packet_not_found`/exit 2, and authentication failure is `verification_failed`/exit 3. Generic `decode`/`extract --trusted-signer` requires a matching signed payload; inspect `signer_public_key` and `signer_trusted` separately.
 
-## Key Management
+Configuration loading is fallible and validated. An absent implicit default may use defaults; an explicitly selected missing/invalid config is an error, not silently ignored configuration. Effective `DecodeLimits` apply to packet extraction/decoding. Malformed revocation data is an error, not an empty revocation list. Legacy paths reject generic-only/password flags they cannot honor. JSON encryption/placement workflows require recoverable caller-supplied credentials or the supported explicit secure key-output route; they do not report success while silently losing a generated secret.
 
-### Key Generation
+`verify`, `decode` and `extract` share the additional `--revoked-list` JSON policy.
+Only an omitted, genuinely absent `keys/revoked.json` is optional. Explicit missing
+paths (including that literal default name), malformed files and dangling symlinks
+fail closed. Generic packets signed by a revoked identity fail before payload
+publication, even without `--trusted-signer`; a pin never overrides revocation.
 
-Keys are generated using `OsRng` (operating system cryptographic random number generator), which is cryptographically secure on all supported platforms.
+### Filesystem boundary
 
-### Key Storage
+Offline media, payload and key output helpers stage in a private same-directory temporary file and publish atomically. Existing paths, including dangling symlinks, are refused by default. Where `--force` is supported, replacement changes the directory entry rather than truncating a symlink target or another hard link to the carrier. Secret files are created with mode 0600 on Unix before bytes are written. Key destinations are preflighted before generation/publication.
 
-| Format | Content | Security |
-| --- | --- | --- |
-| `.key` file | 64 hex characters (32 bytes) | **Not encrypted** — protect with file permissions |
-| `.pub` file | 64 hex characters (32 bytes) | Public — safe to distribute |
+These guarantees are not a transactional commit across several output files, nor a sandbox against an attacker controlling parent directories, the process account or the filesystem. Use trusted output directories and secure permissions; retain backups before deliberate replacement. Native media pipelines have their own output/codec constraints and are not covered by a blanket claim that every writer shares the offline helper.
 
-### Recommendations
+## OpenTimestamps: pending is not verified
 
-1. **Restrict file permissions**:
+OTS uses bounded **standard detached `.ots` proofs**, actual calendar `POST /digest` and upgrade operations. Only Bitcoin attestations are supported; Ethereum/unknown attestations are not relabeled as Bitcoin. HTTP success, arbitrary JSON or elapsed process uptime cannot establish a timestamp.
 
-   ```bash
-   chmod 600 mykey.key
-   chmod 644 mykey.pub
-   ```
+Verification requires the caller's expected 32-byte digest, evaluates the proof operations and Merkle commitment, checks the raw Bitcoin header/hash and proof of work, and consults a configured **trusted Esplora canonical-height provider** (default `https://blockstream.info/api`). It is **not independent full-node validation**, accumulated-chain-work validation or an identity attestation. The configured calendar (default `https://alice.btc.calendar.opentimestamps.org`) is used for submission/upgrades; proof-embedded URLs do not authorize arbitrary upgrade destinations.
 
-2. **Use per-session keys**: Generate a fresh key pair for each recording session to limit the impact of key compromise.
+A calendar receipt with `pending: true` and `verified: false` is not Bitcoin-confirmed. Preserve it for later upgrade rather than treating it as completed evidence. A completed commitment establishes an upper time bound under the stated Bitcoin/provider assumptions, not a precise capture time. No new live Bitcoin confirmation is asserted by this documentation.
 
-3. **Distribute public keys securely**: Use a trusted channel (e.g., HTTPS, signed email) to share public keys for verification.
+Proof parsing, HTTP bytes, operations/depth, requests and deadlines are bounded. Proofs are capped at 1 MiB. Proof I/O pins a trusted parent directory and uses no-follow regular/single-link file checks, complete-file reads and atomic hard-link no-clobber publication. It requires a hard-link-capable filesystem and preserves earlier receipts when publishing distinct upgrades/forced proofs. Parent-directory configuration remains trusted; this is not unrestricted-path sandboxing. CLI omitted `--proof` verification uses the digest-derived configured proof path, matching stamping.
 
-4. **Consider key rotation**: Even within a session, rotating keys periodically (e.g., every hour) limits the window of compromised authenticity.
+## Bounded forensics and honest statistics
 
-5. **For production use**: Consider integrating with a key management system (KMS) or hardware security module (HSM).
+A forensic report contains **findings**, a content-derived **`detected`** indicator and independent **`incomplete` / `incomplete_reasons`** fields. Evidence can be positive even if the rest of the examination is incomplete. Display caps do not clear an already latched positive. Conversely, an empty retained findings list or unavailable statistical result is not proof of a clean input.
 
----
+Current coverage includes inline `STEG`/`STG3` magic, bounded Unicode/text patterns, ZIP/OOXML structure and selected text parts, and lexical PDF inspection. Important limits include:
 
-## LSB Key Security
+- Magic scan: first 16 MiB, up to 256 retained locations.
+- Statistical/entropy observations: first 64 MiB. Text analysis: bounded 1 MiB windows.
+- ZIP/OOXML: up to 4,096 entries, 4 MiB inflated per entry and 8 MiB per package, bounded findings. Local/central structure, CRC/deflate and XML decoding are checked within supported formats. Unsupported archive features, malformed structures and budget exhaustion are reported as incomplete rather than a clean negative.
+- PDF: bounded lexical objects, strings and selected streams, not full rendering, glyph/CMap interpretation or universal object-stream/filter support. Unsupported interpretation and cutoffs are incomplete.
 
-### Video (Sequential)
+`detector_registry()` documents per-detector scope, budgets and false-positive caveats. ZIP inventory, entropy, file-family observations, DOC-001 topology anomalies and PDF structural observations do not alone set the concealment verdict. Inline magic may also occur in ordinary text; a finding is not necessarily a recovered valid packet, malware or malicious intent. Keyed placement may hide the unkeyed magic signature; a negative scan cannot rule it out.
 
-Video LSB embedding uses sequential byte indices. This is:
+Statistical fields need particular care:
 
-- **Simple and efficient** for embedding/extraction
-- **More susceptible** to statistical steganalysis (chi-squared test)
-- **Acceptable** when the primary goal is tamper detection, not covert communication
-
-### Audio (Keyed PRNG)
-
-Audio LSB embedding uses a 32-byte key to derive a pseudo-random permutation of sample indices:
-
-```text
-seed = key ⊕ frame_index
-PRNG = ChaCha8(seed)
-indices = Fisher-Yates shuffle with PRNG
-```
-
-This provides:
-
-- **Index unpredictability**: Without the key, the embedding locations are unknown
-- **Per-frame variation**: Each frame uses a different permutation
-- **Resistance to statistical attacks**: Scattered indices defeat sequential analysis
-
-**Important**: The PRNG key should be treated as sensitive. If compromised, an adversary can determine the embedding pattern and extract/modify the payload.
-
----
-
-## Payload Encryption
-
-### ChaCha20-Poly1305 AEAD
-
-When confidentiality is required (not just integrity/authenticity), Steganographer can encrypt the steganographic payload using ChaCha20-Poly1305 authenticated encryption (RFC 8439) before embedding:
-
-- **Algorithm**: ChaCha20-Poly1305 AEAD — provides both confidentiality and integrity of the ciphertext
-- **Key**: 32 bytes (256-bit), separate from the signing key
-- **Nonce**: 12 bytes, derived deterministically from the frame index (unique per frame per key)
-- **Output**: `ciphertext || tag` (16-byte Poly1305 tag appended)
-
-### Security Properties
-
-| Property | Without Encryption | With Encryption |
-| --- | --- | --- |
-| Payload confidentiality | ❌ Extracted payload is readable | ✅ Encrypted payload is unreadable without key |
-| Tamper detection | ✅ Hash + signature | ✅ AEAD tag detects modification |
-| Key separation | Signing key only | Separate signing + encryption keys |
-
-### Configuration
-
-```toml
-[video.pipeline.payload]
-encrypt = true
-encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-# or load from file:
-# encryption_key_file = "/path/to/enc.key"
-```
-
-### Caveats
-
-- The encryption key must be shared with all verifiers who need to extract payloads
-- Encrypted payloads are larger by 16 bytes (the Poly1305 tag), increasing embedding capacity requirements
-- If `encrypt = true` but no key is provided, a random key is generated (not recoverable)
-
----
-
-## Dependencies Security
-
-| Dependency | Purpose | Supply Chain Risk |
-| --- | --- | --- |
-| `blake3` | Hashing | Low — well-audited, single-purpose |
-| `ed25519-dalek` | Signatures | Low — widely used, formally verified |
-| `sha2` / `sha3` | Alternative hashes | Low — NIST standard implementations |
-| `chacha20poly1305` | Payload encryption | Low — AEAD, RFC 8439, audited |
-| `subtle` | Constant-time comparison | Low — anti-timing-attack library |
-| `rand` | Key generation | Low — standard library, uses OS entropy |
-| `rand_chacha` | PRNG for audio indexing | Low — well-analyzed ChaCha stream cipher |
-| `gstreamer-rs` | Media I/O | Medium — large surface area, C bindings |
-| `clap` | CLI parsing | Low — widely used, no crypto |
-| `serde` / `toml` | Config parsing | Low — widely used, well-maintained |
-
-### Auditing Dependencies
-
-```bash
-# Check for known vulnerabilities
-cargo install cargo-audit
-cargo audit
-
-# Check for unsafe code
-cargo install cargo-geiger
-cargo geiger
-```
-
----
-
-## Responsible Disclosure
-
-If you discover a security vulnerability in steganographer, please report it responsibly:
-
-1. **Do not** open a public GitHub issue
-2. Contact the maintainers directly via the repository's security policy
-3. Include reproduction steps and impact assessment
-4. Allow reasonable time for a fix before public disclosure
-
----
-
-## Capacity–Security Tradeoff
-
-Steganographer's design sits at a specific point on the capacity–security curve:
-
-| Parameter | Steganographer's Choice | Impact |
-| --- | --- | --- |
-| Embedding rate | ~0.10% of cover bytes | Very low → low detectability |
-| Payload size | 109 bytes (fixed) | Minimal footprint |
-| LSB bits | 1 (default, configurable 1–4) | Higher bits → more detectable |
-| Index selection | Sequential (video), Keyed PRNG (audio), Spread-Spectrum (keyed), DCT (block-based) | Spread-spectrum and audio more secure against steganalysis |
-| Overlay | Visible info bar (optional) | Deliberate visibility — deterrence model |
-
-The system prioritizes **authenticity and integrity** over **covertness**. The visible Info Bar overlay explicitly signals that watermarking is present — this is a **deterrence-based** security model, not a **secrecy-based** one.
-
----
-
-## Real-World Threat Models
-
-### Threat Model 1: Deepfake Defense
-
-**Scenario**: A public figure records video statements. An adversary creates deepfake versions to spread misinformation.
-
-| Phase | Without Steganographer | With Steganographer |
-| --- | --- | --- |
-| **Recording** | Raw video, no provenance | Each frame cryptographically signed with Ed25519/Ethereum identity |
-| **Distribution** | No way to verify origin | Recipient extracts LSB payload, verifies signature chain |
-| **Deepfake attack** | Indistinguishable from original | Deepfake frames lack valid signatures → verification fails |
-| **Court evidence** | "It could be fake" | Chain of cryptographic proof: hash + signature + frame index |
-
-**Dashboard configuration**: LSB Bits = 1, Sign Rate = 5/s, Overlay = organization name, QR Scale = 15%
-
-### Threat Model 2: Evidence Chain of Custody
-
-**Scenario**: Body-worn cameras in law enforcement. Video evidence must be tamper-evident from capture to courtroom.
-
-| Requirement | Implementation |
+| Method | Honest interpretation |
 | --- | --- |
-| **Continuous integrity** | Every signed frame includes BLAKE3 hash of pixel data |
-| **Temporal ordering** | Frame index embedded prevents reordering or selective deletion |
-| **Identity binding** | Ed25519 key tied to officer badge number or device ID |
-| **Tamper detection** | Any modification (cropping, editing, re-encoding) invalidates signatures |
-| **Audit trail** | Dashboard verification log records all verification results with timestamps |
+| Chi-squared | Pair-frequency equalization compatibility; upper-tail p-value is not the probability of steganography |
+| Sample-pairs | Adjacent-pair/histogram heuristic, not a validated embedding-rate estimator |
+| RS | Conditional random-LSB replacement-rate estimate on suitable correlated samples; degenerate/nonphysical fits are unavailable/inconclusive |
+| Combined confidence | Method-specific score aggregation, not a posterior probability or security verdict |
 
-**Dashboard configuration**: LSB Bits = 1, Sign Rate = 1/s, Overlay Opacity = 0.3, Resolution = 1280×720
+Synthetic replacement controls exercise RS estimator behavior; historical ramp fixtures exercise defined observations. Neither establishes accuracy on natural images, a detector ROC curve, or calibrated detection probabilities. Low embedding rate, keyed/interleaved placement or choosing one LSB does not prove statistical invisibility. Cachin's distributional/KL-divergence framework is useful theory, not a measured security bound for this implementation.
 
-### Threat Model 3: Broadcast Authentication
+## Key and deployment responsibilities
 
-**Scenario**: Live news broadcast. Viewers need to verify the broadcast hasn't been intercepted and modified in transit (man-in-the-middle).
+- Protect plaintext signing and encryption keys with restrictive permissions and trusted storage. Keep signing, encryption and placement roles separate. Do not use published fixture keys for real media.
+- Owned secret buffers are zeroized where implemented; borrowed passwords, exported bytes, caller copies, command-line history, crash dumps and backups remain the caller's responsibility. Prefer protected file/input routes over shell arguments when available.
+- Pin trusted verification keys before accepting media. Rotate/revoke through an authenticated process; per-session keys alone do not establish continuity. Master-derived session keys do not provide forward secrecy.
+- Preserve lossless signed artifacts, manifests, extraction keys/context and exact-file digests. Verify independently with the expected key, not only against a server's own success display. A recording manifest supplies extraction context but is not itself automatically a signed identity certificate.
+- The dashboard advertises its actual runtime signer public key, stable for that server runtime, not an independent organization/person identity. Protect the signer host and capture inputs; the server can sign synthetic input too.
+- Keep tokenless dashboard mode local. Configured bearer-token checks protect mutation/transport surfaces, and browser Origin gates mitigate foreign-origin mutation/WebSocket requests. They are not general network authentication, TLS or protection against local non-browser clients. Use network access controls and HTTPS for remote deployment; avoid leaking tokens through URLs/logs.
+- Input budgets reduce parser/resource risk, not all denial of service. Native GStreamer/codecs, browser capture, the host OS, dependencies and trusted timestamp providers remain part of the attack surface.
 
-| Attack Vector | Protection |
-| --- | --- |
-| **Stream interception** | LSB-embedded signatures survive pass-through (lossless transport) |
-| **Frame injection** | Injected frames lack valid Ed25519 signatures |
-| **Audio substitution** | Audio LSB signatures detect replacement of audio tracks |
-| **Delayed replay** | Frame index + timestamp in hash domain detect replay attacks |
+Dependency advisory checks and test/smoke results cover specific observed states, not exhaustive security, side-channel resistance or regulatory/legal certification. This guide deliberately makes no final test-count or performance claim; see the release evidence for exercised checks.
 
-### Threat Model 4: Confidential Document Recording
+## Responsible disclosure
 
-**Scenario**: Recording screen shares or presentations containing sensitive information. The recording must prove who created it and when.
+Report suspected vulnerabilities privately using the repository's security policy/maintainer contact rather than posting sensitive exploit details publicly. Include affected versions, minimal reproduction and impact; avoid exposing private keys or unrelated personal data.
 
-| Component | Role |
-| --- | --- |
-| **Video steganography** | Embeds identity + timestamp into each frame |
-| **Audio steganography** | Signs audio track independently (meeting recordings) |
-| **Overlay text** | Visible classification label: "CONFIDENTIAL", "INTERNAL ONLY" |
-| **MetaMask integration** | Links recording to Ethereum wallet for blockchain-verifiable identity |
-| **Record button** | Exports signed video (WebM) or audio (WAV) with embedded integrity data |
+## Source map and further reading
 
-### Threat Model 5: Audio Forensics
+Operational contracts: [`envelope.rs`](../steganographer-cli/src/envelope.rs), [`media_io.rs`](../steganographer-cli/src/media_io.rs), [`cmd_packet.rs`](../steganographer-cli/src/cmd_packet.rs), [`ots_client.rs`](../steganographer-core/src/ots_client.rs), [`forensics.rs`](../steganographer-core/src/forensics.rs), [`steganalysis.rs`](../steganographer-core/src/steganalysis.rs), and dashboard [`lib.rs`](../steganographer-dashboard/src/lib.rs) / [`ws_handler.rs`](../steganographer-dashboard/src/ws_handler.rs).
 
-**Scenario**: Audio recordings used as legal evidence (phone calls, depositions, surveillance). Must prove audio hasn't been edited.
-
-| Audio Attack | Detection |
-| --- | --- |
-| **Silence insertion** | Hash mismatch on modified chunks |
-| **Word removal/reordering** | Chunk index discontinuity detected |
-| **Voice splicing** | BLAKE3 hash of PCM samples detects any bit-level change |
-| **Speed manipulation** | Sample rate mismatch in extracted payload |
-| **AI voice cloning** | Cloned audio lacks valid cryptographic signatures |
-
-**Dashboard configuration**: Buffer Size = 2048, Sample Rate = 44100, Sign Rate = 2/s, LSB Bits = 1
-
----
-
-## Use Case Examples
-
-### Journalism & Media Verification
-
-Journalists can watermark raw footage at capture time, providing cryptographic proof that video/audio hasn't been modified since recording. This is critical in the era of AI-generated media.
-
-```text
-Capture → LSB Embed → Sign → Distribute → Verify
-                ↑                               ↑
-          Steganographer                  Any verifier with
-          (private key)                   public key
-```
-
-### Intellectual Property Protection
-
-Creative professionals (filmmakers, musicians, podcasters) embed invisible authorship signatures into their raw media. Even if content is re-uploaded or redistributed, the LSB signatures can prove original authorship.
-
-### Regulatory Compliance (GDPR, HIPAA)
-
-Healthcare and financial institutions recording video consultations or audio calls can prove recordings haven't been tampered with for regulatory audits.
-
-### Supply Chain Integrity
-
-Manufacturing inspection videos and quality assurance recordings can be signed to prove inspection actually occurred and results weren't fabricated.
-
-### Whistleblower Protection
-
-Recordings of evidence can be cryptographically signed at capture time, preventing accusation that evidence was fabricated or manipulated after the fact.
-
-### Academic Research Integrity
-
-Lab recordings (microscopy video, experimental audio data) can be signed at capture to prevent data fabrication accusations.
-
----
-
-## Dashboard Security Controls
-
-The web dashboard provides **real-time** security configuration through intuitive controls. Each control has detailed mouseover tooltips explaining its function:
-
-### Video Tab Controls
-
-| Control | Range | Security Impact |
-| --- | --- | --- |
-| **Overlay Opacity** | 0–100% | 0% = invisible watermark only; 100% = visible deterrent |
-| **LSB Bits** | 1–4 | More bits = more capacity but more detectable by steganalysis |
-| **Sign Backend** | Ed25519 / Ethereum | Ed25519 = lightweight; Ethereum = blockchain-verifiable identity |
-| **Overlay Text** | Free text | Visible classification label burned into video |
-| **Sign Rate** | 0.2–5 per second | Higher = more frames verified but more CPU |
-| **QR Scale** | 5–100% | Size of the visible data matrix encoding hash/signature metadata |
-| **Resolution** | 320×240 to 1920×1080 | Higher = more embedding capacity per frame |
-| **Record** | Toggle | Exports signed video as WebM for archival |
-
-### Audio Tab Controls
-
-| Control | Range | Security Impact |
-| --- | --- | --- |
-| **LSB Bits** | 1–4 | 1 = inaudible; 4 = max capacity but may be audible |
-| **Sign Backend** | Ed25519 / Ethereum | Same as video — choose based on verification ecosystem |
-| **Sign Rate** | 0.2–5 per second | Audio chunk signing frequency |
-| **Buffer Size** | 1024–8192 samples | Larger = more embedding capacity per chunk |
-| **Sample Rate** | 22050–48000 Hz | Higher = more samples for embedding |
-| **Record** | Toggle | Exports signed audio as WAV for archival/evidence |
-
-### MetaMask Integration
-
-Connect an Ethereum wallet via the **Connect MetaMask** button to:
-
-- Sign frames/chunks with your Ethereum address (secp256k1)
-- Create blockchain-verifiable authorship proofs
-- Generate EIP-191 personal signatures compatible with on-chain verification
-
----
-
-## Deployment Security Recommendations
-
-### For Personal Use
-
-- Use default Ed25519 signing with auto-generated keys
-- Store `.key` file with `chmod 600` permissions
-- Use the dashboard's Record button for evidence capture
-
-### For Organizational Use
-
-- Issue per-user or per-device key pairs from a central authority
-- Use Ethereum signing with organizational wallets for audit trails
-- Set Overlay Text to organization name + classification level
-- Deploy dashboard behind HTTPS reverse proxy (nginx, Caddy)
-- Enable CORS restrictions in production (currently permissive for development)
-
-### For Legal/Forensic Use
-
-- Use maximum Sign Rate (5/s) for finest-grained tamper detection
-- Keep LSB Bits at 1 for minimum detectability
-- Record both video and audio channels simultaneously
-- Preserve `.key` and `.pub` files in tamper-evident storage
-- Document the key generation ceremony and chain of custody
-
----
-
-## Further Reading
-
-- [Steganography Theory](steganography-theory.md) — Deep dive into information hiding theory
-- [Cryptography](cryptography.md) — BLAKE3 + Ed25519 deep dive, provable security
-- [Algorithms](algorithms.md) — Embedding protocol details
-- [Threat Model](threat-model.md) — Adversary model, 8 threat categories, use-case scenarios
-- [Configuration](configuration.md) — TOML config reference
-- [FAQ](faq.md) — Frequently asked questions
+See [Cryptography](cryptography.md), [Threat Model](threat-model.md), [Configuration](configuration.md), [CLI Reference](cli-reference.md), [OpenTimestamps](ots-integration.md), and [Steganography Theory](steganography-theory.md).

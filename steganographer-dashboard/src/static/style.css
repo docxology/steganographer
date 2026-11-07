@@ -133,52 +133,6 @@ h1 .icon {
     border-color: var(--accent-red);
 }
 
-/* ─── MetaMask Button ─────────────────────────────────────────────────────── */
-
-.metamask-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 14px;
-    border-radius: 20px;
-    border: 1px solid rgba(232, 131, 58, 0.3);
-    background: rgba(232, 131, 58, 0.06);
-    color: var(--accent-orange);
-    font-family: var(--font-sans);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-    white-space: nowrap;
-}
-
-.metamask-btn:hover {
-    background: rgba(232, 131, 58, 0.12);
-    border-color: rgba(232, 131, 58, 0.5);
-}
-
-.metamask-btn.metamask-connected {
-    background: rgba(232, 131, 58, 0.15);
-    border-color: var(--accent-orange);
-    color: #fff;
-}
-
-.metamask-btn.metamask-unavailable {
-    opacity: 0.35;
-    cursor: help;
-    border-color: rgba(255, 255, 255, 0.08);
-    color: var(--text-muted);
-}
-
-.metamask-icon {
-    font-size: 16px;
-    line-height: 1;
-}
-
-.metamask-label {
-    font-family: var(--font-mono);
-    font-size: 11px;
-}
 
 /* ─── Identity + Status ───────────────────────────────────────────────────── */
 
@@ -1144,6 +1098,12 @@ footer {
 }
 
 .docs-file-item {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 0;
     display: flex;
     align-items: center;
     padding: 10px 16px;
@@ -1153,9 +1113,17 @@ footer {
     gap: 10px;
 }
 
-.docs-file-item:hover {
+.docs-file-item:hover,
+.docs-file-item:focus-visible {
     background: rgba(255, 255, 255, 0.03);
 }
+
+.docs-file-item:focus-visible {
+    outline: 2px solid var(--accent-red, #dc2626);
+    outline-offset: -2px;
+}
+
+.docs-file-entry[hidden] { display: none; }
 
 .docs-file-item.active {
     background: rgba(220, 38, 38, 0.08);
@@ -1183,11 +1151,13 @@ footer {
     display: none;
 }
 
-.docs-file-item:hover .docs-file-name {
+.docs-file-item:hover .docs-file-name,
+.docs-file-item:focus-visible .docs-file-name {
     display: inline;
 }
 
-.docs-file-item:hover .docs-file-label {
+.docs-file-item:hover .docs-file-label,
+.docs-file-item:focus-visible .docs-file-label {
     display: none;
 }
 
@@ -2620,33 +2590,17 @@ body[data-theme="light"] .toast.toast-info {
     background: var(--bg-card);
     color: var(--text-primary);
 }
-/* ═══ WebRTC H.264 Media Preview ═══ */
 
-.media-preview-container {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: 10px;
-}
-
-.media-preview-container.hidden {
-    display: none;
-}
-
-.media-preview-label {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-}
-
-.media-preview {
-    width: 100%;
-    max-width: 640px;
-    aspect-ratio: 4 / 3;
-    background: #000;
-    border-radius: 8px;
-    border: 1px solid var(--border-subtle);
-    object-fit: contain;
-}
+/* Signed-media controls and timestamp evidence are distinct from live capture. */
+.status-pending { color: var(--text-secondary); border-color: var(--border-subtle); }
+#stop-camera-btn, #stop-mic-btn { padding: 6px 12px; font-size: 13px; }
+#signed-audio-player { max-width: 100%; height: 36px; }
+.camera-selector-row { flex-wrap: wrap; }
+#perf-panel-body.hidden { display: none; }
+#ots-container { margin: 16px 24px; }
+.ots-panel { padding: 16px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-card); }
+.ots-header, .ots-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.ots-row code { overflow-wrap: anywhere; }
+.ots-panel p { color: var(--text-secondary); font-size: 12px; }
+.ots-panel button { padding: 8px 12px; cursor: pointer; }
+button:disabled, select:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }

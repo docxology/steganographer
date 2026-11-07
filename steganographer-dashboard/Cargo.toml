@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 steganographer-core = { path = "../steganographer-core" }
@@ -19,12 +20,13 @@ image = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
 subtle = { workspace = true }
-webrtc = { version = "0.20.5", optional = true }
+sha2 = { workspace = true }
+webrtc = { version = "0.21.1", optional = true }
 bytes = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = "0.22"
-openh264 = { version = "0.9.8", optional = true }
-rtc = { version = "0.20.5", optional = true }
+openh264 = { workspace = true, optional = true }
+rtc = { version = "0.21.1", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

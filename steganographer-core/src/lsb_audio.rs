@@ -1,14 +1,13 @@
 //! LSB (Least Significant Bit) audio steganography with pseudo-random index selection.
 //!
 //! Embeds and extracts [`SignaturePayload`] data into/from audio sample buffers
-//! using a keyed PRNG (ChaCha8 via `rand`) to generate a permutation of sample
-//! indices. A 32-bit length prefix is embedded first so extract knows how many
-//! bits to recover.
+//! using a bounded-memory keyed Feistel permutation of sample indices.
+//! A 32-bit length prefix is embedded first. Version-4 legacy payloads use
+//! this schedule; pre-0.8 Fisher-Yates carriers must be re-embedded.
 
 use crate::audio::{AudioBuffer, AudioStegoModule};
 use crate::crypto::SignaturePayload;
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use crate::placement::KeyedPermutation;
 
 /// LSB-based audio steganography module with pseudo-random index selection.
 pub struct LsbAudio {
@@ -45,64 +44,53 @@ impl LsbAudio {
         self.bits
     }
 
-    /// Generate a deterministic permutation of sample indices using the key and frame index.
-    fn gen_indices(&self, len: usize, frame_index: u64) -> Vec<usize> {
-        // Derive a per-frame seed from the key and frame index
-        let mut seed = [0u8; 32];
-        // Mix key with frame index
+    /// Version-4 per-frame schedule; no carrier-sized permutation allocation.
+    fn indices(&self, len: usize, frame_index: u64) -> KeyedPermutation {
+        let mut seed = self.key;
         let frame_bytes = frame_index.to_le_bytes();
-        for (i, byte) in self.key.iter().enumerate() {
-            seed[i] = byte ^ frame_bytes[i % 8];
+        for (i, byte) in seed.iter_mut().enumerate() {
+            *byte ^= frame_bytes[i % 8];
         }
-        let mut rng = rand::rngs::StdRng::from_seed(seed);
-        let mut idx: Vec<usize> = (0..len).collect();
-        idx.shuffle(&mut rng);
-        idx
+        KeyedPermutation::new(len, seed, b"legacy-audio-v4")
     }
 
-    /// Serialize payload to a bit vector, prefixed by a 32-bit length (in bits).
-    fn payload_to_bits(payload: &SignaturePayload) -> Vec<u8> {
-        let raw_bytes = payload.to_bytes();
-        let raw_bits: Vec<u8> = raw_bytes
-            .iter()
-            .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
-            .collect();
-
-        let len = raw_bits.len() as u32;
-        let len_bits: Vec<u8> = (0..32).rev().map(|i| ((len >> i) & 1) as u8).collect();
-
-        let mut result = len_bits;
-        result.extend_from_slice(&raw_bits);
+    /// Fixed-size MSB-first stream: length prefix followed by the signature.
+    fn payload_to_bits(
+        payload: &SignaturePayload,
+    ) -> [u8; 32 + SignaturePayload::SERIALIZED_SIZE * 8] {
+        let bytes = payload.to_bytes();
+        let mut result = [0; 32 + SignaturePayload::SERIALIZED_SIZE * 8];
+        let length = (SignaturePayload::SERIALIZED_SIZE * 8) as u32;
+        for (i, bit) in result[..32].iter_mut().enumerate() {
+            *bit = ((length >> (31 - i)) & 1) as u8;
+        }
+        for (i, bit) in result[32..].iter_mut().enumerate() {
+            *bit = (bytes[i / 8] >> (7 - i % 8)) & 1;
+        }
         result
     }
 
     /// Write bits into samples at the given permuted indices.
     fn write_bits(
         samples: &mut [i16],
-        indices: &[usize],
+        indices: &KeyedPermutation,
         bits_data: &[u8],
         bits_per_sample: u8,
     ) -> anyhow::Result<()> {
         let total_bits = bits_data.len();
-        let capacity = indices.len() * bits_per_sample as usize;
-        if total_bits > capacity {
-            anyhow::bail!(
-                "Not enough LSB capacity: need {} bits, have {} ({} samples × {} bits)",
-                total_bits,
-                capacity,
-                indices.len(),
-                bits_per_sample
-            );
-        }
+        anyhow::ensure!(
+            indices.len() >= total_bits.div_ceil(bits_per_sample as usize),
+            "Not enough LSB capacity"
+        );
 
         let mask = !((1i16 << bits_per_sample) - 1);
         let mut bit_idx = 0usize;
 
-        for &sample_idx in indices {
+        for logical in 0..indices.len() {
             if bit_idx >= total_bits {
                 break;
             }
-            let sample = &mut samples[sample_idx];
+            let sample = &mut samples[indices.permute(logical)];
             let mut new_lsb: i16 = 0;
             for shift in (0..bits_per_sample).rev() {
                 if bit_idx < total_bits {
@@ -119,23 +107,26 @@ impl LsbAudio {
     /// Read bits from samples at the given permuted indices.
     fn read_bits(
         samples: &[i16],
-        indices: &[usize],
+        indices: &KeyedPermutation,
         total_bits: usize,
         bits_per_sample: u8,
-    ) -> Vec<u8> {
-        let mut result = Vec::with_capacity(total_bits);
+    ) -> [u8; 32 + SignaturePayload::SERIALIZED_SIZE * 8] {
+        let mut result = [0; 32 + SignaturePayload::SERIALIZED_SIZE * 8];
         let mut bit_count = 0;
 
-        for &sample_idx in indices {
+        for logical in 0..total_bits
+            .div_ceil(bits_per_sample as usize)
+            .min(indices.len())
+        {
             if bit_count >= total_bits {
                 break;
             }
-            let sample = samples[sample_idx];
+            let sample = samples[indices.permute(logical)];
             for shift in (0..bits_per_sample).rev() {
                 if bit_count >= total_bits {
                     break;
                 }
-                result.push(((sample >> shift) & 1) as u8);
+                result[bit_count] = ((sample >> shift) & 1) as u8;
                 bit_count += 1;
             }
         }
@@ -155,8 +146,13 @@ impl AudioStegoModule for LsbAudio {
             None => return Ok(()),
         };
 
+        buf.validate()?;
         let bits = Self::payload_to_bits(sig);
-        let indices = self.gen_indices(buf.samples.len(), buf.frame_index);
+        anyhow::ensure!(
+            buf.samples.len() >= bits.len().div_ceil(self.bits as usize),
+            "Not enough LSB capacity"
+        );
+        let indices = self.indices(buf.samples.len(), buf.frame_index);
 
         log::debug!(
             "LSB audio embed: {} bits into {} samples (frame {})",
@@ -172,18 +168,14 @@ impl AudioStegoModule for LsbAudio {
     }
 
     fn extract(&self, buf: &AudioBuffer) -> anyhow::Result<Option<SignaturePayload>> {
-        let indices = self.gen_indices(buf.samples.len(), buf.frame_index);
-
-        // First read 32 bits for the length prefix
+        buf.validate()?;
         let len_bits_needed = 32usize.div_ceil(self.bits as usize);
-        if indices.len() < len_bits_needed {
+        if buf.samples.len() < len_bits_needed {
             return Ok(None);
         }
+        let indices = self.indices(buf.samples.len(), buf.frame_index);
 
         let prefix_bits = Self::read_bits(buf.samples, &indices, 32, self.bits);
-        if prefix_bits.len() < 32 {
-            return Ok(None);
-        }
 
         let mut payload_bit_count: u32 = 0;
         for &bit in &prefix_bits[..32] {
@@ -203,7 +195,7 @@ impl AudioStegoModule for LsbAudio {
         let total_bits = 32 + payload_bit_count as usize;
         let all_bits = Self::read_bits(buf.samples, &indices, total_bits, self.bits);
 
-        if all_bits.len() < total_bits {
+        if indices.len() < total_bits.div_ceil(self.bits as usize) {
             return Ok(None);
         }
 
@@ -225,6 +217,27 @@ impl AudioStegoModule for LsbAudio {
 mod tests {
     use super::*;
     use crate::crypto::Signer;
+    #[test]
+    fn signed_samples_roundtrip_at_every_strength_and_frame_index() {
+        let payload = Signer::generate().sign_frame(91, b"audio", None);
+        for bits in 1..=4 {
+            let mut samples = vec![-12345; 1024];
+            let mut buffer = AudioBuffer {
+                channels: 2,
+                sample_rate: 48000,
+                samples: &mut samples,
+                frame_index: 91,
+            };
+            let mut kernel = LsbAudio::new(bits, [0x72; 32]);
+            kernel.embed(&mut buffer, Some(&payload)).unwrap();
+            assert_eq!(
+                kernel.extract(&buffer).unwrap().unwrap().to_bytes(),
+                payload.to_bytes()
+            );
+            buffer.frame_index = 92;
+            assert!(kernel.extract(&buffer).ok().flatten().is_none());
+        }
+    }
 
     fn test_key() -> [u8; 32] {
         let mut key = [0u8; 32];
@@ -343,8 +356,8 @@ mod tests {
     fn test_different_frame_index_different_permutation() {
         let key = test_key();
         let lsb = LsbAudio::new(1, key);
-        let idx0 = lsb.gen_indices(100, 0);
-        let idx1 = lsb.gen_indices(100, 1);
+        let idx0 = lsb.indices(100, 0).schedule();
+        let idx1 = lsb.indices(100, 1).schedule();
         // The permutations should differ
         assert_ne!(idx0, idx1);
     }
@@ -353,8 +366,8 @@ mod tests {
     fn test_same_frame_index_same_permutation() {
         let key = test_key();
         let lsb = LsbAudio::new(1, key);
-        let idx_a = lsb.gen_indices(100, 42);
-        let idx_b = lsb.gen_indices(100, 42);
+        let idx_a = lsb.indices(100, 42).schedule();
+        let idx_b = lsb.indices(100, 42).schedule();
         assert_eq!(idx_a, idx_b);
     }
 }

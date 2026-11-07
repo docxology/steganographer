@@ -25,8 +25,8 @@ use blake3::Hasher;
 const ROUNDS: u8 = 8;
 
 /// A keyed permutation over `0..len`, derived from a 32-byte placement key and
-/// a short domain label. The label keeps the same key from yielding identical
-/// schedules for different purposes (locator vs body vs distinct carriers).
+/// a nonempty label of at most 16 bytes, with no trailing NUL. These restrictions
+/// make the protocol-1 NUL-padded label representation injective.
 pub struct KeyedPermutation {
     key: [u8; 32],
     label: [u8; 16],
@@ -38,9 +38,20 @@ impl KeyedPermutation {
     /// Build a keyed permutation over `0..len`.
     ///
     /// # Panics
-    /// Panics if `len == 0`.
+    /// Panics for zero length or an invalid label. Use [`Self::try_new`] for
+    /// caller-supplied labels. Protocol-1 callers must use their original
+    /// 16-byte label representation, not a silently truncated longer label.
     pub fn new(len: usize, key: [u8; 32], label: &[u8]) -> Self {
-        assert!(len > 0, "keyed permutation length must be positive");
+        Self::try_new(len, key, label).expect("invalid keyed permutation parameters")
+    }
+
+    /// Fallible construction without truncating or ambiguously padding labels.
+    pub fn try_new(len: usize, key: [u8; 32], label: &[u8]) -> anyhow::Result<Self> {
+        anyhow::ensure!(len > 0, "keyed permutation length must be positive");
+        anyhow::ensure!(
+            !label.is_empty() && label.len() <= 16 && label.last() != Some(&0),
+            "keyed permutation label must be 1-16 bytes without a trailing NUL"
+        );
         let len = len as u64;
         // Next power of two >= len, rounded up to an even bit width so the
         // Feistel halves are balanced. The domain is therefore < 4*len, which
@@ -52,14 +63,13 @@ impl KeyedPermutation {
             bits + 1
         };
         let mut padded_label = [0u8; 16];
-        let take = label.len().min(16);
-        padded_label[..take].copy_from_slice(&label[..take]);
-        Self {
+        padded_label[..label.len()].copy_from_slice(label);
+        Ok(Self {
             key,
             label: padded_label,
             len,
             bits,
-        }
+        })
     }
 
     /// Number of elements in the permutation.
@@ -87,7 +97,7 @@ impl KeyedPermutation {
 
     /// Map physical index `y` back to its logical index `i` in `0..len`.
     ///
-    /// This is the exact inverse of [`permute`]: `inverse_permute(permute(i)) == i`.
+    /// This is the exact inverse of [`Self::permute`]: `inverse_permute(permute(i)) == i`.
     pub fn inverse_permute(&self, y: usize) -> usize {
         let mut x = y as u64;
         loop {
@@ -260,6 +270,19 @@ fn gcd(a: u64, b: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ambiguous_protocol_one_labels_are_rejected() {
+        for label in [
+            &b""[..],
+            &b"a\0"[..],
+            &b"steganographer-placement-body"[..],
+            &b"steganographer-placement-locator"[..],
+        ] {
+            assert!(KeyedPermutation::try_new(16, [0; 32], label).is_err());
+        }
+        assert!(KeyedPermutation::try_new(0, [0; 32], b"body").is_err());
+        assert!(KeyedPermutation::try_new(16, [0; 32], b"steganographer-p").is_ok());
+    }
 
     fn key(seed: u8) -> [u8; 32] {
         [seed; 32]

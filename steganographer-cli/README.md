@@ -1,7 +1,6 @@
 # steganographer-cli
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-75-brightgreen)
 User-facing command-line binary for all steganographic functions.
 
 Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands.
@@ -14,6 +13,7 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 | `audio` | Run live audio pipeline: capture → steganography → virtual device |
 | `encode` | Embed steganographic data into a file (offline) |
 | `decode` | Decode and validate an opt-in generic packet payload |
+| `extract` | Extract a generic byte payload after packet validation and signer policy checks |
 | `verify` | Extract and verify steganographic signatures (`--format plain\|json`) |
 | `keygen` | Generate a new Ed25519 signing key pair |
 | `info` | Report steganographic capacity of a media file |
@@ -29,7 +29,9 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 
 | Module | File | Description |
 | -------- | ------ | ------------- |
-| `main` | `src/main.rs` | Clap CLI definition, logging init, command dispatch |
+| `cli` | `src/cli.rs` | Shared Clap schema for runtime parsing and generated completions/manuals |
+| `main` | `src/main.rs` | Logging/envelope initialization and command dispatch |
+| `key_policy` | `src/key_policy.rs` | Shared zeroized signing-key loading and fail-closed revocation policy |
 | `cmd_video` | `src/cmd_video.rs` | Config-driven GStreamer video pipeline launch |
 | `cmd_audio` | `src/cmd_audio.rs` | Config-driven GStreamer audio pipeline launch |
 | `cmd_encode` | `src/cmd_encode.rs` | Offline LSB video/audio encoding + keygen, info, analyze, derive, revoke |

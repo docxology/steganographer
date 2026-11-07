@@ -11,6 +11,37 @@ use crate::carrier::{
 use crate::forensics::{self, ForensicScan};
 use crate::packet::{DecodeLimits, GenericPacket};
 
+/// Serializable projection of text evidence from the SAME bounded core scan.
+#[derive(Debug, Serialize)]
+pub struct WasmTextFinding {
+    pub detector_id: &'static str,
+    pub offsets: Vec<usize>,
+    pub detail: String,
+}
+
+/// Method scores retain their applicability and explanation, not just a bool.
+#[derive(Debug, Serialize)]
+pub struct WasmStatisticalMethod {
+    pub detector_id: &'static str,
+    pub available: bool,
+    pub detected: bool,
+    pub confidence: f64,
+    pub message: String,
+}
+
+fn statistical_method(
+    detector_id: &'static str,
+    result: crate::steganalysis::DetectionResult,
+) -> WasmStatisticalMethod {
+    WasmStatisticalMethod {
+        detector_id,
+        available: result.available,
+        detected: result.detected,
+        confidence: result.confidence,
+        message: result.message,
+    }
+}
+
 /// WASM-compatible structured inspection result.
 #[derive(Debug, Serialize)]
 pub struct WasmInspectionReport {
@@ -22,6 +53,12 @@ pub struct WasmInspectionReport {
     pub message: String,
     pub statistical_detected: bool,
     pub statistical_confidence: f64,
+    pub statistical_methods: [WasmStatisticalMethod; 3],
+    pub container_detected: bool,
+    pub container_findings: Vec<forensics::ContainerFinding>,
+    pub text_findings: Vec<WasmTextFinding>,
+    pub incomplete: bool,
+    pub incomplete_reasons: Vec<String>,
 }
 
 impl From<ForensicScan> for WasmInspectionReport {
@@ -36,6 +73,24 @@ impl From<ForensicScan> for WasmInspectionReport {
             message: scan.message,
             statistical_detected: scan.statistical.detected,
             statistical_confidence: scan.statistical.confidence,
+            statistical_methods: [
+                statistical_method("STAT_CHI2", scan.statistical.chi_squared),
+                statistical_method("STAT_SPA", scan.statistical.sample_pairs),
+                statistical_method("STAT_RS", scan.statistical.rs_analysis),
+            ],
+            container_detected: scan.container_detected,
+            container_findings: scan.container_findings,
+            text_findings: scan
+                .text_findings
+                .into_iter()
+                .map(|finding| WasmTextFinding {
+                    detector_id: finding.detector_id,
+                    offsets: finding.offsets,
+                    detail: finding.detail,
+                })
+                .collect(),
+            incomplete: scan.incomplete,
+            incomplete_reasons: scan.incomplete_reasons,
         }
     }
 }

@@ -1,317 +1,200 @@
 # Getting Started
 
-## Prerequisites
+## Requirements and build
 
-### Rust Toolchain
-
-Install Rust via [rustup](https://rustup.rs):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup toolchain install stable
-```
-
-Required: **Rust 1.88+**. Development and CI also exercise the current stable
-toolchain selected by `rust-toolchain.toml`.
-
-### GStreamer (Optional)
-
-GStreamer is required only for the live `video`/`audio` subcommands. The CLI's
-`gst` Cargo feature (on by default) controls that dependency; build with
-`--no-default-features` for a GStreamer-free binary that keeps the offline
-encode/verify and generic-packet/OTS surfaces.
-
-**macOS**:
+Rust **1.91+** is required. `rust-toolchain.toml` selects the development stable
+toolchain; CI additionally checks the declared 1.91 floor with all features.
+See [Compatibility](compatibility.md) for the dependency/API justification.
 
 ```bash
-brew install gstreamer
-```
-
-**Linux (Debian/Ubuntu)**:
-
-```bash
-sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-                 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
-```
-
-**Linux (Fedora)**:
-
-```bash
-sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
-```
-
----
-
-## Build
-
-```bash
-# Clone the repository
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
 
-# Build the entire workspace
-cargo build --workspace
-
-# Build only the core (no GStreamer needed)
-cargo build -p steganographer-core
-
-# Build the CLI without GStreamer (drops the live video/audio subcommands)
-cargo build -p steganographer-cli --no-default-features
-
-# Build in release mode
-cargo build --workspace --release
+# Offline CLI + dashboard, without native GStreamer video/audio commands
+cargo build -p steganographer-cli --no-default-features --locked
 ```
 
----
+Use `target/debug/steganographer` below (or install/place the binary on PATH).
+All examples assume a repository-root working directory and fresh output
+paths. Existing outputs are not silently clobbered.
 
-## Run Tests
+GStreamer is optional for this walkthrough. To build the full native workspace,
+install development libraries and then build with default features:
 
 ```bash
-# All workspace tests (705 tests)
-cargo test --workspace
+# macOS
+brew install gstreamer
 
-# Core only (537 tests)
-cargo test -p steganographer-core
+# Debian/Ubuntu
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-tools
 
-# Dashboard only (60 tests)
-cargo test -p steganographer-dashboard
-
-# With verbose output
-cargo test --workspace -- --nocapture
+cargo build --workspace --locked
 ```
 
----
+Platform/plugin availability is not proof of camera, microphone or virtual
+device operation. See [Platforms](platforms.md), especially Windows limitations.
 
-## Quick Tutorial
-
-### 1. Generate a Key Pair
+## 1. Create a persistent signing identity
 
 ```bash
-cargo run -p steganographer-cli -- keygen --output mykey
+target/debug/steganographer keygen --output mykey
 ```
 
-Output:
+Keep `mykey.key` private; share/pin `mykey.pub` through a trusted channel.
+Key generation refuses existing files (including links). Unix secret files are
+created mode 0600 before their contents are written. A public key identifies a
+key, not independently a person or organization.
 
-```text
-  Private key: mykey.key
-  Public key:  mykey.pub
-  Public key (hex): a1b2c3d4...
-```
-
-### 2. Encode a Signature into a File
-
-Create a test image (raw RGB):
+## 2. Sign and verify a raw RGB carrier
 
 ```bash
-# Generate 100×100 random RGB pixels
-dd if=/dev/urandom of=test_frame.rgb bs=30000 count=1
+# A 100x100 RGB frame; no image encoder required
+dd if=/dev/urandom of=frame.rgb bs=30000 count=1
+
+target/debug/steganographer encode -i frame.rgb -o signed.rgb \
+  --stego-type lsb_video --bits 1 --signing-key mykey.key
+
+target/debug/steganographer verify -i signed.rgb \
+  --public-key "$(cat mykey.pub)" --bits auto --format json
 ```
 
-Embed a signature:
+Expect a `steganographer.cli/v1` envelope with `status: "success"` and
+`result.status: "valid"`. `--bits auto` really probes supported depths.
+Omitting `--public-key` yields **extraction-only** `not_verified`; it does not
+verify authenticity. Absence is exit 2; invalid or revoked-key verification is
+exit 3, with an error envelope retaining the result.
+
+This is a legacy format-4 carrier attestation over canonical media bytes, not
+a signature over every container byte or arbitrary visual metadata. Do not
+convert the output to JPEG or assume transcoding preserves its LSBs.
+
+## 3. Embed and recover a signed generic payload
+
+Generic STG3 protocol-v1 packets hold logical payload bytes, distinct from
+legacy carrier attestations. Opt in explicitly:
 
 ```bash
-cargo run -p steganographer-cli -- encode \
-    --input test_frame.rgb \
-    --output test_frame_signed.rgb \
-    --stego-type lsb_video \
-    --bits 1
+target/debug/steganographer encode -i frame.rgb -o packed.rgb \
+  --payload-text 'A signed message' --signing-key mykey.key --bits 2
+
+target/debug/steganographer decode -i packed.rgb -o message.txt \
+  --bits auto --trusted-signer "$(cat mykey.pub)" --format json
 ```
 
-Save the public key hex from the output.
+Use `--payload-file report.pdf` for arbitrary bytes, with a large enough
+carrier. PNG/raw RGB and PCM16 WAV/raw S16LE LSB are supported. Generic mode
+supports optional keyed placement, signing, compression, encryption and ECC;
+not multi-frame spreading. A packet's embedded signer key alone is not trusted
+identity: `--trusted-signer` pins the expected key and rejects unsigned or
+mismatched packets. Signatures authenticate logical payload, not arbitrary
+envelope metadata or media provenance.
 
-### 3. Verify the Signature
+## 4. Password-protect a generic packet
+
+Create a private password file using your normal secret-management workflow;
+do not put a password directly in shell history or process arguments.
 
 ```bash
-cargo run -p steganographer-cli -- verify \
-    --input test_frame_signed.rgb \
-    --stego-type lsb_video \
-    --public-key <paste_hex_here>
+target/debug/steganographer encode -i frame.rgb -o encrypted.rgb \
+  --payload-text 'Private signed message' --password-file secret.txt \
+  --signing-key mykey.key --bits 2
+
+target/debug/steganographer extract -i encrypted.rgb -o private.txt \
+  --password-file secret.txt --trusted-signer "$(cat mykey.pub)"
 ```
 
-Output:
+Decode and extract share bounded validation, digest checks and transform
+reversal. Explicit raw keys use `--encryption-key-file` on **encode** and
+`--decryption-key-file` on **both decode and extract**. Old extract encryption-key
+spellings are not aliases. Passwords conflict with explicit encryption keys;
+legacy encode rejects password flags instead of ignoring them. JSON encoding
+requires recoverable supplied keys/passwords when a secret would otherwise be
+generated and lost; secrets are not serialized.
 
-```text
-  Frame index: 0
-  Hash:        a1b2c3d4...
-  Signature:   e5f6a7b8...
-  Status:      ✅ VALID
-```
+Decode/extract refuse existing payload files unless `--force` is explicit.
+Force atomically replaces the destination entry without truncating another
+file referenced by a symlink/hardlink. Explicit invalid config or revocation
+files fail; there is no silent fallback to trusted-looking defaults.
 
-### 4. Try the Opt-In Generic Packet Alpha
-
-Generic packets carry bounded arbitrary bytes independently from legacy frame
-signatures. The first alpha slice supports lossless PNG/raw RGB spatial LSB:
+## 5. Launch the sampled-artifact dashboard
 
 ```bash
-cargo run -p steganographer-cli -- encode \
-    --input cover.png \
-    --output packed.png \
-    --payload-file report.pdf \
-    --mime-type application/pdf \
-    --bits 2
-
-cargo run -p steganographer-cli -- decode \
-    --input packed.png \
-    --output recovered.pdf \
-    --bits auto
+target/debug/steganographer --config config/example.toml dashboard \
+  --backend ed25519 --transport websocket --port 8080
 ```
 
-Generic mode is explicit: without `--payload-file` or `--payload-text`,
-`encode` retains the legacy signed-carrier behavior. Generic packets support
-keyed placement (`--embedding-key`), payload signing (`--signing-key`),
-compression (`--compress`), AEAD encryption (`--encrypt`), and Reed-Solomon
-error correction (`--ecc`); multi-frame spreading remains unsupported.
+Open <http://localhost:8080> and grant browser camera/microphone permission if
+you choose those inputs. The dashboard signs sampled PNG frames and PCM audio
+chunks using its actual session Ed25519 identity, and verifies delivered media.
+Only Ed25519 + BLAKE3 + LSB is supported live; no Ethereum/MetaMask signing or
+live encryption/ECC. Unavailable overlay controls are disabled; opacity affects
+preview only, not signed evidence bytes.
 
-### 5. Run a Live Video Pipeline (requires GStreamer)
+Record downloads are stored-ZIP archives containing signed PNG snapshots or
+PCM WAV chunks plus extraction manifests. They are **not continuous signed
+video or uninterrupted microphone recordings**. Manifest public keys, bit
+depths, chunk indices and audio placement keys are needed for independent CLI
+verification; live metrics alone do not prove the downloads. Release validation
+independently checked downloaded PNG and WAV artifacts against the separately
+queried public API identity, including wrong-identity and high-bit-tamper
+rejection. That demonstrates the sampled export path, not physical-hardware or
+continuous-media coverage.
+
+Keep the default loopback bind. Network exposure requires authentication and
+an appropriate deployment boundary. Optional WebRTC needs the `webrtc` feature;
+auto transport may fall back, while pinned unavailable WebRTC fails visibly.
+Lossy H.264 preview is not signed archive evidence.
+
+## 6. Native test source (optional GStreamer build)
 
 ```bash
-# Using test source (no camera needed)
-cargo run -p steganographer-cli -- video \
-    --source "videotestsrc" \
-    --sink "autovideosink" \
-    --config config/example.toml
+target/debug/steganographer --config config/example.toml video \
+  --source 'videotestsrc ! videoconvert ! video/x-raw,format=RGB' \
+  --sink 'fakesink' --max-frames 20 --signing-key mykey.key
 ```
 
----
+Shipped defaults select one LSB signing kernel. Mixing signing with visible
+`overlay`/`info_bar` modules is rejected; visible rendering is separate.
+Native signed audio supports LSB only; native trait SS signing is not the
+offline CLI SS scalar path. Live crypto/ECC/spreading are unsupported; use
+offline encode instead. Offline legacy spreading supports RGB LSB, 2–8 shards
+only.
 
-## Project Structure
+The macOS CLI owns Cocoa main-loop dispatch for live commands. Library callers
+own their own application loop; headless native file APIs do not start Cocoa.
+Exact native file outputs use RGB Matroska `.mkv` or PCM `.wav`, not arbitrary
+lossy sinks. See [GStreamer](gstreamer.md) for exact-file contracts.
 
-```text
-├── Cargo.toml                     # Workspace manifest
-├── config/
-│   └── example.toml               # Annotated config file
-├── docs/                          # This documentation
-├── steganographer-core/           # Pure algorithms (no OS deps)
-│   └── src/
-│       ├── lib.rs
-│       ├── config.rs              # TOML config model
-│       ├── crypto.rs              # BLAKE3 + Ed25519
-│       ├── video.rs               # VideoFrame types
-│       ├── audio.rs               # AudioBuffer types
-│       ├── lsb_video.rs           # LSB video embed/extract
-│       ├── lsb_audio.rs           # LSB audio embed/extract
-│       ├── overlay.rs             # Text overlay
-│       └── info_bar.rs            # Exoteric QR/barcode array
-├── steganographer-dashboard/       # Web dashboard (Axum + WebSocket)
-│   ├── src/
-│   │   ├── lib.rs                 # LiveConfig, DashboardState, router
-│   │   ├── ws_handler.rs          # WebSocket encode/decode handlers
-│   │   └── static/
-│   │       ├── index.html         # Dashboard UI
-│   │       ├── app.js             # Client JS (webcam, QR overlay, config)
-│   │       └── style.css          # Gray/black/red theme
-│   └── tests/
-│       └── dashboard_tests.rs     # Dashboard API/state integration tests
-├── steganographer-gst/            # GStreamer integration
-│   └── src/
-│       ├── lib.rs
-│       ├── plugin.rs              # Plugin skeleton
-│       ├── video_filter.rs        # Video AppSink/AppSrc
-│       └── audio_filter.rs        # Audio AppSink/AppSrc
-└── steganographer-cli/            # CLI binary
-    └── src/
-        ├── main.rs                # Clap subcommands (incl. dashboard)
-        ├── cmd_video.rs           # Live video
-        ├── cmd_audio.rs           # Live audio
-        ├── cmd_encode.rs          # Offline encode + keygen
-        └── cmd_verify.rs          # Verification
-```
+## Configuration, OTS and migration
 
----
+- Validate with `target/debug/steganographer --config steganographer.toml config check`.
+  `[limits]` are effective generic extraction/parse/transform ceilings;
+  `scan --profile` is the only CLI profile selection surface.
+- Bitcoin is the only OTS method. `ots stamp -i file` commits SHA-256 of the
+  exact file; proofs default to configured `proof_dir/<digest-hex>.ots`, also
+  used by `ots verify -i file`. Pending is not verified. See
+  [OTS Integration](ots-integration.md) for protocol and provider trust.
+- Legacy formats 2/3 require re-encoding source media to format 4; legacy
+  encrypted data now uses the versioned `STGE` wrapper with fresh packet IDs.
+  There is no old raw zero-ID fallback. Generic STG3 v1 remains wire-compatible.
+- WASM packet reports use `steganographer.packet-report.v2`; all `u64` values
+  are exact decimal strings, not rounded JavaScript numbers.
 
-## Customizing Pipeline Parameters
-
-Edit `steganographer.toml` to configure resolution, framerate, and steganographic intensity:
-
-```toml
-[video.pipeline]
-width = 1280       # HD resolution
-height = 720
-framerate = 30
-opacity = 1.0      # Full overlay intensity
-
-[video.pipeline.payload]
-type = "signature"
-size = 109         # 4 magic + 1 version + 8 frame + 32 hash + 64 signature
-```
-
-When you run `./run.sh` and start a live pipeline, it reads these values automatically — no code changes needed.
-
-### Adjusting LSB Depth
-
-Lower bit depth is less detectable; higher provides more capacity:
-
-```toml
-[video.stego.lsb_signature]
-bits = 1           # Imperceptible (default)
-# bits = 2        # Barely visible, 2× capacity
-# bits = 4        # Noticeable, 4× capacity
-```
-
----
-
-## Next Steps
-
-- [CLI Reference](cli-reference.md) — All commands and options
-- [Configuration](configuration.md) — Full TOML config schema with `[video.pipeline]` and live dashboard controls
-- [Algorithms](algorithms.md) — How LSB, overlay, QR data matrix, and info bar work
-- [Steganography Theory](steganography-theory.md) — Deep dive into information hiding
-- [Cryptography](cryptography.md) — BLAKE3 + Ed25519 / Ethereum details
-- [Architecture](architecture.md) — System design and module interactions
-- [Platform Guide](platforms.md) — OS-specific setup
-
----
-
-## Dashboard Quickstart
-
-The web dashboard provides a live visual round-trip steganography demo.
-
-### Launch
+## Development checks
 
 ```bash
-# Via run.sh
-./run.sh   # Choose option 1 (Dashboard)
-
-# Or directly via CLI
-cargo run -p steganographer-cli -- --config steganographer.toml dashboard --port 8080 --backend ed25519
+cargo test --workspace --locked
+cargo test --workspace --all-features --locked
+cargo test -p steganographer-core --locked
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
+Test totals belong in root `AGENTS.md`, not duplicated walkthrough assertions.
+These commands are instructions, not a claim that a particular platform run
+has been exercised here.
 
-### What You See
+## Further reading
 
-The dashboard has three tabs:
-
-#### Video Tab
-
-| Panel | Description |
-| --- | --- |
-| **Left** | Live webcam feed with QR data matrix overlay |
-| **Right** | Verification data, config controls, stego info |
-| **Bottom** | Metrics: signed frames, FPS, latency, verified/failed |
-| **Header** | Backend selector, MetaMask connect, identity |
-
-#### Audio Tab
-
-| Panel | Description |
-| --- | --- |
-| **Left** | Live microphone waveform and spectrum visualization |
-| **Right** | Audio config controls, verification data, embedded data info |
-| **Bottom** | Metrics: signed chunks, sample rate, latency |
-
-### Controls
-
-All controls have detailed **mouseover tooltips** explaining their function, recommended values, and security trade-offs.
-
-- **Overlay Opacity**: Drag slider to control QR overlay visibility
-- **LSB Bits**: 1–4 bits per pixel/sample byte (1 = imperceptible)
-- **Sign Backend**: Ed25519 or Ethereum (MetaMask)
-- **Overlay Text**: Custom watermark text
-- **Sign Rate**: How often frames/chunks are signed (0.2/s – 5/s)
-- **QR Scale**: Size of QR overlay (5% corner to 100% full frame)
-- **Resolution**: Video capture resolution (320×240 to 1920×1080)
-- **Buffer Size** (Audio): PCM samples per chunk (1024–8192)
-- **Sample Rate** (Audio): Capture rate (22050–48000 Hz)
-- **Record**: Toggle to record signed video (WebM) or audio (WAV)
-
-![Dashboard with QR overlay](images/dashboard-qr-overlay.png)
+[CLI Reference](cli-reference.md) · [Configuration](configuration.md) ·
+[Compatibility](compatibility.md) · [Security](security.md) ·
+[API Reference](api-reference.md) · [WASM](../steganographer-wasm/README.md)

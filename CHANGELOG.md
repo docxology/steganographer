@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.8.0 — 2026-11-07
+
+### Security and correctness
+
+- Signature format v4 binds media kind, lengths, frame index and audio presence
+  without partition collisions. Ed25519 verification rejects weak keys; trusted
+  signer pins and revocation failures are enforced. Older media must be re-encoded.
+- Legacy encryption uses a fresh 128-bit packet identifier rather than repeating
+  nonces across equivalent plaintexts. Secret temporaries are zeroized and JSON
+  cannot silently discard generated recovery keys.
+- Generic packet readers reject inconsistent flags/descriptors, unknown critical
+  semantics, duplicate/suffixed layouts and excessive KDF/nesting work before
+  expensive reversal. Frozen STG3 v1 wire bytes remain unchanged.
+- Real bounded OpenTimestamps calendar/upgrade/Bitcoin verification replaces
+  fabricated success. Fresh submissions use standard nonce blinding while proofs
+  remain rooted at SHA256(file). Pending is not confirmed; Esplora is a trusted
+  provider, not independent full-node validation.
+- ZIP/OOXML/PDF/Unicode scanning handles adversarial offsets, comments, encodings,
+  references and resource limits without claiming an incomplete scan is clean.
+  RS analysis reports scoped synthetic evidence, not calibrated natural-image rates.
+- Secret scanning inherits provider rules without blanket documentation, workflow
+  or test-directory exemptions. The documented historical exposure has one exact
+  commit/path/rule/line acknowledgment, not a key-value waiver. Its identity is
+  permanently denied by managed signing/trust, even with empty local policy;
+  current history remains exposed. See [Security](docs/security.md).
+
+### Media and interfaces
+
+- Keyed integer-QIM spread-spectrum modulation replaces fragile host-correlation
+  modulation. Re-embed older SS carriers; no universal codec-survival claim.
+- Correct packed/padded/planar geometry, channel ownership, short-buffer handling,
+  adaptive capacity, learned-parameter rejection and full overlay preflight.
+- Native bridges preserve timing/caps/padding, drain EOS and propagate bus errors.
+  File signing delivers RGB Matroska and whole-selection PCM WAV. Managed CLI
+  files publish atomically without clobber; configured input, geometry, device
+  identifiers and audio key precedence are effective. Unsupported live crypto
+  fails before startup; explicit test mode never masquerades as a camera.
+- Native elements propagate malformed packets and mismatched strength/placement
+  configuration as pipeline errors instead of silently delivering unembedded
+  buffers with clean EOS. Insufficient-capacity buffers retain explicit skips.
+- Dashboard recordings contain actual signed PNG/WAV artifacts and manifests,
+  not lossy previews or unsigned microphone input. Identity, policy, revisions,
+  authentication/origin boundaries, worker admission and stop/restart are explicit.
+  Unavailable Ethereum/QR/overlay controls no longer imply implemented provenance.
+- CLI command parsing, five shell completion formats and all manual pages share
+  one schema. Safe atomic outputs, explicit config failures, trusted verification
+  and semantic exit codes replace silent overwrite/success paths.
+  Generated manuals use stable revision metadata and valid roff headers.
+- Generated WASM bindings reject invalid original JavaScript numbers before
+  narrowing, support all four strengths and raised limits, and expose exact
+  decimal-string `u64` fields in `steganographer.packet-report.v2`.
+- Rust MSRV increases to 1.91 for current RTC/codec dependencies. CI checks the
+  locked all-feature floor, actual JS bindings, immutable vectors and eight
+  seeded sanitizer targets with reachable packet/carrier inputs. Container build
+  and runtime share Bookworm; the builder includes native C++/assembly tooling.
+
+### Release engineering
+
+- Source-bound release tooling builds host-specific portable/native CLI/plugin
+  and Node/web WASM archives from a frozen source snapshot. Inventories, feature
+  metadata, provenance and checksums accompany no-clobber output directories.
+  Prior candidates remain immutable; unsupported hosts are not claimed as tested.
+- Packaged validation rejects checksum corruption even under optimized Python
+  and isolates GStreamer discovery so an installed plugin cannot mask a broken
+  packaged library.
+- Additional revocation files share one normalized codec and one per-command load.
+  Explicit missing defaults and malformed policy fail closed; raw key ingestion
+  uses fixed-size decoding and zeroized secret temporaries.
+- Dashboard router construction is fallible and shared processing/verification
+  entry points enforce known-compromise policy rather than relying only on the
+  convenience server wrapper.
+- The real docxplus consumer migrates analysis JSON to the current envelope's
+  `result` while preserving its public analysis API.
+
+Earlier dated notes below record this release's development history; current
+contracts and migration requirements are in README and docs/compatibility.md.
+
+
 ### Added (2026-09-22 final round)
 
 - **JSON v1 envelope (`SUR-003`).** Every command's `--format json`/`jsonl`
@@ -50,7 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the `steganographer-wasm` crate (WASM-001) were landed in the
   2026-09-21 continuation commits included in this release train.
 
-### Added (2026-09-21 continuation round)
 ### Added (2026-09-21 continuation round)
 
 - **Argon2id password-KDF transform (`PKT-007`).** Generic packet bodies can

@@ -1,725 +1,310 @@
 # CLI Reference
 
-## Synopsis
+This reference describes the 0.8 CLI. The authoritative argument schema is
+`steganographer-cli/src/cli.rs`, shared with completion/manual generation.
+Run `steganographer <command> --help` for argument spelling in your build.
+`video` and `audio` exist only with the default `gst` feature enabled.
+
+## Global options
 
 ```text
 steganographer [OPTIONS] <COMMAND>
 ```
 
-```mermaid
-flowchart LR
-    CLI["steganographer"] --> VIDEO["video\n🎥 Live video pipeline"]
-    CLI --> AUDIO["audio\n🎵 Live audio pipeline"]
-    CLI --> ENCODE["encode\n🔒 Offline encoding"]
-    CLI --> DECODE["decode\n📦 Generic packet decode"]
-    CLI --> EXTRACT["extract\n📤 Packet payload extraction"]
-    CLI --> SCAN["scan\n🧪 Bounded forensic scan"]
-    CLI --> VERIFY["verify\n🔓 Signature verification"]
-    CLI --> KEYGEN["keygen\n🔑 Key generation"]
-    CLI --> INFO["info\n📊 Capacity reporting"]
-    CLI --> ANALYZE["analyze\n🔬 Steganographic analysis"]
-    CLI --> DERIVE["derive\n🔑 Key derivation"]
-    CLI --> CONFIG["config\n⚙️ Config validation"]
-    CLI --> DASH["dashboard\n🌐 Web GUI"]
-    CLI --> REVOKE["revoke\n🚫 Key revocation"]
-    CLI --> OTS["ots\n⏱ OpenTimestamps"]
-    style CLI fill:#333,stroke:#e53935,color:#e0e0e0
-    style DASH fill:#2d5016,stroke:#4a8c2a,color:#fff
-```
-
-## Global Options
-
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--config <PATH>` | `-c` | `config/example.toml` | Path to TOML configuration file |
-| `--log-level <LEVEL>` | `-l` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
-| `--quiet` | `-q` | `false` | Suppress all output except final result (for scripting) |
-| `--help` | `-h` | — | Print help information |
-| `--version` | `-V` | — | Print version |
-
----
-
-## Commands
-
-### `video` — Live Video Pipeline
-
-Run a real-time video pipeline: capture frames from a source, apply steganography, and push to a sink.
-
-```bash
-steganographer video [OPTIONS]
-```
-
-| Option | Default | Description |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `--source <PIPELINE>` | From config | GStreamer source element string |
-| `--sink <PIPELINE>` | From config | GStreamer sink element string |
-| `--max-frames <N>` | Unlimited | Stop after processing N frames |
-| `--signing-key <PATH>` | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file; if omitted, an ephemeral keypair is generated per run |
+| `--config`, `-c` | `config/example.toml` | TOML configuration path |
+| `--log-level`, `-l` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| `--quiet`, `-q` | off | Suppress logging, not the final result |
+| `--schema-version` | `v1` | Machine envelope version; other values fail |
+| `--help`, `-h` | — | Help |
+| `--version`, `-V` | — | Binary version |
 
-**Examples**:
+Configuration is loaded and validated before command dispatch. Only a missing
+*implicit* `config/example.toml` can fall back to minimal defaults. An explicitly
+supplied missing file, malformed TOML, or invalid supported configuration fails
+with exit 1. See [Configuration](configuration.md) for effective limits and the
+separation between offline settings and live capabilities.
 
-```bash
-# Test source → display window (macOS)
-steganographer video --source "videotestsrc" --sink "osxvideosink"
+## `encode`: legacy attestation or generic packet
 
-# Webcam → virtual camera (Linux with v4l2loopback)
-steganographer video \
-    --source "v4l2src device=/dev/video0" \
-    --sink "v4l2sink device=/dev/video42"
+Both modes require `--input/-i` and `--output/-o`. Existing carrier outputs are
+not overwritten; there is no encode `--force` flag.
 
-# Using config file
-steganographer video --config config/example.toml
-
-# Process exactly 100 frames
-steganographer video --source "videotestsrc" --sink "autovideosink" --max-frames 100
-```
-
----
-
-### `audio` — Live Audio Pipeline
-
-Run a real-time audio pipeline with LSB steganography.
-
-```bash
-steganographer audio [OPTIONS]
-```
-
-| Option | Default | Description |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `--source <PIPELINE>` | From config | GStreamer audio source element |
-| `--sink <PIPELINE>` | From config | GStreamer audio sink element |
-| `--max-buffers <N>` | Unlimited | Stop after processing N audio buffers |
-| `--signing-key <PATH>` | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file; if omitted, an ephemeral keypair is generated per run |
+| `--stego-type` | `lsb_video` | Legacy: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video`; generic: LSB video/audio only |
+| `--bits` | `1` | LSB depth 1–4; non-LSB kernels require 1 |
+| `--input-format` | inferred | `raw_rgb`, `raw_s16le`, `png`/`image`, `wav` |
+| `--width`, `--height` | absent | Paired dimensions for raw RGB; needed for dimension-dependent kernels |
+| `--format` | `plain` | `plain` or `json` |
+| `--signing-key` | ephemeral for legacy; unsigned generic | Hex-encoded 32-byte Ed25519 private-key file |
+| `--embedding-key`, `--embedding-key-file` | mode/config dependent | 32-byte hex placement key; legacy audio/SS or generic keyed LSB |
+| `--encrypt` | off | ChaCha20-Poly1305 encryption |
+| `--encryption-key`, `--encryption-key-file` | absent | 32-byte hex encryption key; use the file form where possible |
+| `--ecc` | off | Reed-Solomon correction |
+| `--ecc-parity` | `4` | Parity symbols, 1–16 when enabled |
+| `--spread` | `1` | Legacy offline RGB LSB only: 2–8 shards; 1 disables |
+| `--hash-algorithm` | config or `blake3` | Legacy only: `blake3`, `sha256`, `sha3-256` |
+| `--dir` | off | Legacy batch input/output directories |
 
-**Examples**:
+Without `--payload-file` or `--payload-text`, encode signs a canonical carrier
+using the legacy format-4 payload. The result provides the public key needed
+for verification. LSB video supports raw RGB and decoded images with lossless
+PNG output; LSB audio supports raw S16LE and integer PCM16 WAV. SS uses keyed,
+bounded integer residue/quantization modulation; it is not a promise of
+survival through arbitrary noise or codecs. DCT uses RGB dimensions and direct
+signed payloads; encryption, ECC and spreading are unsupported there. An
+unrecoverable embedding fails instead of reporting corrupt output as success.
 
-```bash
-# Test tone → speakers
-steganographer audio \
-    --source "audiotestsrc wave=sine freq=440" \
-    --sink "autoaudiosink"
+Legacy spreading is not generic-packet spreading: it uses the core shard
+format across suffixed outputs `<output>_001`, `<output>_002`, etc. Pass the
+unsuffixed output base and the same `--spread` to verify. Audio, SS and DCT
+spreading are rejected before writes. Retain every required shard.
 
-# Microphone → PulseAudio output
-steganographer audio \
-    --source "pulsesrc" \
-    --sink "pulsesink"
-```
+### Generic-only options
 
----
+| Option | Meaning |
+| --- | --- |
+| `--payload-file` or `--payload-text` | Explicit generic STG3 protocol-v1 mode; mutually exclusive |
+| `--mime-type` | Public MIME metadata |
+| `--filename` | Safe display filename, not a path |
+| `--compress` | DEFLATE before embedding |
+| `--password-file` | Argon2id-derived encryption; preferred password input |
+| `--password` | Same, but exposed to shell history/process listings |
+| `--no-verify-write` | Skip generic carrier re-read/exact packet recovery check |
 
-### `encode` — Offline File Encoding
+Password sources conflict with explicit encryption keys. The packet stores
+public Argon2id salt/parameters, not the password. Passwords, compression,
+packet metadata and `--no-verify-write` fail on legacy mode; they are not
+silently ignored. Generic mode rejects `--dir`, `--hash-algorithm`, and
+`--spread > 1`.
 
-Embed legacy signed-carrier attestations, or explicitly embed an opt-in generic
-packet payload.
-
-```bash
-steganographer encode [OPTIONS]
-```
-
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--input <PATH>` | `-i` | Required | Input file path |
-| `--output <PATH>` | `-o` | Required | Output file path |
-| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
-| `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
-| `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
-| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
-| `--width <N>` / `--height <N>` | — | None | Required pair for dimension-dependent headerless RGB kernels such as DCT |
-| `--signing-key <PATH>` | — | Ephemeral | Hex-encoded 32-byte Ed25519 signing-key file (legacy signature or generic packet payload) |
-| `--embedding-key <HEX>` | — | Config/random | Keyed audio/spread placement key |
-| `--embedding-key-file <PATH>` | — | Config/random | File containing the embedding key |
-| `--encrypt` | — | `false` | Encrypt the payload (legacy signature or generic packet) with ChaCha20-Poly1305 |
-| `--encryption-key <HEX>` | — | Random | ChaCha20-Poly1305 key |
-| `--encryption-key-file <PATH>` | — | None | File containing the encryption key |
-| `--password <TEXT>` | — | None | Password for an Argon2id-derived encryption key (PKT-007); the KDF transform records its salt + parameters in the envelope. **Mutually exclusive with `--encryption-key`/`--encryption-key-file`; visible in shell history/`ps`** |
-| `--password-file <PATH>` | — | None | File containing the password for password-derived encryption (mutually exclusive with `--encryption-key`/`--encryption-key-file`) |
-| `--ecc` | — | `false` | Apply bounded Reed-Solomon error correction (legacy signature or generic packet) |
-| `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
-| `--payload-file <PATH>` | — | None | Opt into generic packet alpha with arbitrary file bytes |
-| `--payload-text <TEXT>` | — | None | Opt into generic packet alpha with UTF-8 text |
-| `--mime-type <TYPE>` | — | None | Public generic-packet MIME metadata |
-| `--filename <NAME>` | — | Payload basename | Safe display filename; path components are rejected |
-| `--no-verify-write` | — | `false` | Skip the post-write re-read verification of a generic packet carrier |
-| `--spread <N>` | — | `1` | Multi-frame spreading: spread one signature across N frames (legacy signature path only; generic packets reject `> 1`) |
-| `--hash-algorithm <ALGO>` | — | `blake3` | Hash algorithm: `blake3` (default), `sha256`, `sha3-256` |
-| `--dir` | — | `false` | Batch mode: process all files in the input directory (legacy signature path only; rejected with generic packets) |
-
-**Currently supported formats**:
-
-- `lsb_video`: Raw RGB or lossless decoded PNG/image data
-- `lsb_audio`: Raw S16LE PCM or 16-bit integer WAV, preserving WAV properties
-- `spread_spectrum_video`: PN-sequence modulation for noise resistance
-- `dct_video`: DCT-domain embedding for compression resistance
-
-**Examples**:
+Generic payload signatures authenticate logical payload bytes, not arbitrary
+semantic envelope metadata or carrier provenance. A self-contained signer key
+proves mathematical consistency, not authorship; pin the expected key during
+recovery with `--trusted-signer`.
 
 ```bash
-# Encode video with 1-bit LSB
-steganographer encode -i frame.rgb -o frame_signed.rgb --stego-type lsb_video --bits 1
+# Persistent legacy signing identity
+steganographer keygen --output mykey
+steganographer encode -i frame.rgb -o signed.rgb --signing-key mykey.key
+steganographer verify -i signed.rgb --public-key "$(cat mykey.pub)"
 
-# Encode audio with 2-bit LSB
-steganographer encode -i audio.wav -o audio_signed.wav --stego-type lsb_audio \
-  --bits 2 --embedding-key-file keys/audio.key
-
-# Opt-in generic packet alpha
-steganographer encode -i cover.png -o packed.png \
-  --payload-file report.pdf --mime-type application/pdf --bits 2
-
-# Password-protected packet (Argon2id KDF, PKT-007) — mutually exclusive
-# with --encryption-key/--encryption-key-file
-steganographer encode -i cover.png -o packed.png \
-  --payload-file report.pdf --password-file secret.txt --bits 2
+# Generic password-encrypted, signed packet (cover.png must have capacity)
+steganographer encode -i cover.png -o packed.png --payload-file report.pdf \
+  --password-file secret.txt --signing-key mykey.key --compress --bits 2
+steganographer decode -i packed.png -o recovered.pdf --password-file secret.txt \
+  --trusted-signer "$(cat mykey.pub)" --bits auto
 ```
 
-Without `--payload-file` or `--payload-text`, encode preserves the legacy signed
-carrier behavior and prints the public key needed by `verify`. The generic
-packet path supports `lsb_video` (RGB/PNG) and `lsb_audio` (PCM S16 WAV / raw
-S16LE) carriers, sequential or keyed placement (`--embedding-key`), and the
-Ed25519 signing (`--signing-key`), DEFLATE (`--compress`), AEAD encryption
-(`--encrypt` or the password path), and chunked Reed-Solomon (`--ecc`)
-transforms. The password path (PKT-007) derives the AEAD key with Argon2id
-and records a critical `TRANSFORM_KDF_ARGON2ID` descriptor (salt + parameters)
-so `decode --password*` can re-derive it; it is mutually exclusive with
-explicit encryption keys. After writing, the carrier is re-read and
-re-extracted to confirm byte-identical packet recovery
-(post-write verification); `--no-verify-write` skips that check. Multi-frame
-spreading remains unsupported for generic packets.
+Machine output never serializes secret keys. JSON encoding that would generate
+an unrecoverable encryption or legacy audio/SS embedding secret fails: supply
+recoverable explicit keys (or a password for generic encryption). Retain the
+key files yourself. An ephemeral signing public key can verify that run, but
+does not establish a stable person/organization identity.
 
----
+## `decode` and `extract`: generic packet recovery
 
-### `decode` — Generic Packet Decode
+Both commands recover the logical payload through the same bounded packet
+validation, transform reversal, digest and signature checks. `extract` is **not**
+a bypass around these checks and does not decode a legacy signature payload.
 
-Decode and digest-check an opt-in generic packet. This does not imply carrier
-provenance; use `verify` for legacy signed-carrier attestations.
+| Option | Default / behavior |
+| --- | --- |
+| `--input/-i`, `--output/-o` | Required carrier and payload destination |
+| `--stego-type` | Decode defaults to `lsb_video`; extract infers `lsb_audio` for WAV, otherwise `lsb_video` |
+| `--input-format` | Inferred; raw RGB, raw S16LE, decoded image, PCM16 WAV |
+| `--bits` | `auto`: actually probes depths 1–4; an exact value restricts recovery |
+| `--embedding-key`, `--embedding-key-file` | Keyed placement credentials |
+| `--decryption-key`, `--decryption-key-file` | Encryption credentials; **these spellings apply to both commands** |
+| `--password-file`, `--password` | Argon2id credentials; file preferred; conflict with explicit decryption keys |
+| `--trusted-signer` | Expected Ed25519 public key in hex; unsigned or mismatched packets fail |
+| `--revoked-list` | Additional hex-key JSON registry; omitted reads `keys/revoked.json` when present; known compromise policy always applies |
+| `--force` | Atomically replace an existing payload destination |
+| `--format` | `plain` or `json` |
 
-```bash
-steganographer decode --input packed.png --output recovered.pdf [OPTIONS]
-```
-
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--input <PATH>` | `-i` | Required | Encoded carrier |
-| `--output <PATH>` | `-o` | Required | Decoded payload destination |
-| `--stego-type <TYPE>` | — | `lsb_video` | Generic kernel: `lsb_video` or `lsb_audio` |
-| `--bits <VALUE>` | — | `auto` | Probe 1–4, or require an exact strength |
-| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
-| `--format <FORMAT>` | — | `plain` | `plain` or `json` report |
-| `--force` | — | `false` | Replace an existing payload output |
-| `--decrypt` | — | `false` | Decrypt an AEAD-encrypted generic packet payload |
-| `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
-| `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
-| `--password <TEXT>` | — | None | Password to re-derive the Argon2id AEAD key recorded in the packet's `TRANSFORM_KDF_ARGON2ID` descriptor (PKT-007). **Mutually exclusive with `--decryption-key`/`--decryption-key-file`; visible in shell history/`ps`** |
-| `--password-file <PATH>` | — | None | File containing the password for password-derived decryption (mutually exclusive with `--decryption-key`/`--decryption-key-file`) |
-| `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for keyed placement |
-| `--embedding-key-file <PATH>` | — | None | File containing the embedding key |
+Decode additionally accepts `--decrypt`; explicit credentials enable the
+corresponding recovery path. Extract has no `--decrypt` switch: supplying its
+key/password is sufficient. Old extract `--encryption-key` and
+`--encryption-key-file` spellings are not aliases and fail.
 
 ```bash
 steganographer decode -i packed.png -o recovered.pdf --bits auto --format json
-
-# Encrypted packet requires the key
-steganographer decode -i packed.png -o recovered.pdf --decrypt --decryption-key <hex>
-
-# Password-protected packet: re-derive the Argon2id AEAD key from the envelope
-steganographer decode -i packed.png -o recovered.pdf --password-file secret.txt
+steganographer extract -i encrypted.png -o recovered.bin \
+  --decryption-key-file keys/encryption.key --trusted-signer "$(cat mykey.pub)"
+steganographer decode -i packed.wav -o recovered.bin --stego-type lsb_audio \
+  --embedding-key-file keys/embedding.key --password-file secret.txt
 ```
 
-Decode validates locator limits, envelope CRC32C, canonical metadata, declared
-kernel parameters, payload length, and the content digest before writing. It
-also reverses any recorded AEAD/ECC transforms (requiring `--decrypt` for
-encrypted packets) and refuses to overwrite an existing output unless
-`--force` is explicit.
+Configured `[limits]` apply to extraction, parsing, transform reversal and
+logical output bounds. Auto-depth probing does not turn a recognized packet's
+authentication failure into success or generic absence. Reports expose
+`signer_public_key` and `signer_trusted`: only an explicit matching pin sets
+trust. Without one, a signed packet is not an authenticated external identity.
 
----
+Payload publication is atomic and no-clobber by default. With `--force`, a
+symlink/hardlink destination is replaced as a directory entry; its other target
+or carrier is not opened for truncation. Secret outputs are created with Unix
+mode 0600 before writing. This does not replace filesystem access controls or
+provide a Windows ACL guarantee.
 
-### `verify` — Signature Verification
+## `verify`: legacy media attestations
 
-Extract and verify steganographic signatures from media files.
+| Option | Default / meaning |
+| --- | --- |
+| `--input/-i` | Required carrier, or unsuffixed spread-output base |
+| `--public-key` | Expected Ed25519 public key in hex |
+| `--stego-type` | `lsb_video`; also `lsb_audio`, `spread_spectrum_video`, `dct_video` |
+| `--bits` | `auto` (real 1–4 probing) or exact LSB depth |
+| `--input-format` | Inferred; same media choices as legacy encode |
+| `--width`, `--height` | Paired raw RGB dimensions |
+| `--embedding-key`, `--embedding-key-file` | Audio/SS extraction key |
+| `--frame-index` | `0`; actual signed chunk index for keyed legacy audio |
+| `--decrypt` | Enable legacy decryption |
+| `--decryption-key`, `--decryption-key-file` | Legacy decryption key |
+| `--ecc`, `--ecc-parity` | Match encoding; default parity 4 |
+| `--spread` | Match encoding; offline RGB LSB only, 1 or 2–8 |
+| `--hash-algorithm` | Match encoding; config or BLAKE3 |
+| `--revoked-list` | `keys/revoked.json` |
+| `--format` | `plain` or `json` |
 
-```bash
-steganographer verify [OPTIONS]
-```
+Without `--public-key`, verify is **extraction-only**: `not_verified` is not a
+cryptographic or identity assertion. Valid signatures bind canonical media
+regions, not every container byte, rendered metadata or arbitrary transcode.
+For dashboard audio exports use the manifest's index, bits, public key and
+embedding key; the default index is not interchangeable with later chunks.
 
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--input <PATH>` | `-i` | Required | Input file path |
-| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
-| `--public-key <HEX>` | — | None | Public key for signature verification |
-| `--embedding-key <HEX>` | — | None | Embedding key (hex, 32 bytes) for audio/spread-spectrum extraction |
-| `--embedding-key-file <PATH>` | — | Config | File containing the embedding key |
-| `--bits <VALUE>` | — | `auto` | Auto-probe 1–4 LSBs or require an exact value |
-| `--input-format <FORMAT>` | — | Auto | `raw_rgb`, `raw_s16le`, `png`/`image`, or `wav` |
-| `--width <N>` / `--height <N>` | — | None | Explicit headerless raw RGB dimensions |
-| `--format <FORMAT>` | — | `plain` | Output format: `plain` (human-readable) or `json` (machine-readable) |
-| `--decrypt` | — | `false` | Decrypt an AEAD-encrypted payload (ChaCha20-Poly1305) |
-| `--decryption-key <HEX>` | — | None | ChaCha20-Poly1305 decryption key (hex, 32 bytes) |
-| `--decryption-key-file <PATH>` | — | None | File containing the decryption key |
-| `--ecc` | — | `false` | Apply Reed-Solomon error correction during extraction |
-| `--ecc-parity <N>` | — | `4` | Reed-Solomon parity symbols (maximum 16) |
-| `--spread <N>` | — | `1` | Multi-frame spreading: the signature was spread across N frames |
-| `--hash-algorithm <ALGO>` | — | `blake3` | Hash algorithm: `blake3` (default), `sha256`, `sha3-256` |
-| `--revoked-list <PATH>` | — | `keys/revoked.json` | Path to the revoked-keys JSON list checked after a valid signature |
-
-**Examples**:
-
-```bash
-# Extract signature (no verification)
-steganographer verify -i frame_signed.rgb --stego-type lsb_video
-
-# Extract and verify with public key
-steganographer verify -i frame_signed.rgb \
-    --stego-type lsb_video \
-    --public-key a1b2c3d4e5f6...
-
-# Verify audio
-steganographer verify -i audio_signed.raw \
-    --stego-type lsb_audio \
-    --public-key a1b2c3d4e5f6...
-
-# Machine-readable JSON output
-steganographer verify -i frame_signed.rgb \
-    --stego-type lsb_video \
-    --public-key a1b2c3d4e5f6... \
-    --format json
-```
-
-**Output** (plain, default):
-
-```text
-=== Signature Found ===
-  Frame index: 0
-  Hash:        a1b2c3d4e5f6a7b8...
-  Signature:   1234abcd5678ef90...
-  Status:      ✅ VALID
-```
-
-**Output** (`--format json`):
-
-```json
-{
-  "found": true,
-  "stego_type": "lsb_video",
-  "frame_index": 0,
-  "hash": "a1b2c3d4e5f6a7b8...",
-  "signature_preview": "1234abcd5678ef90...",
-  "status": "valid",
-  "message": "Signature is valid"
-}
-```
-
-Without `--public-key`:
-
-```text
-  Status:      ⚠️  No public key provided (signature not verified)
-```
-
-If no signature found:
-
-```text
-No steganographic signature found in the file.
-```
-
-**Status values** (JSON `status` field):
-
-| Status | Meaning | Exit code |
+| Result status | Exit | Envelope status / error code |
 | --- | --- | --- |
-| `valid` | Signature cryptographically valid, key not revoked | 0 |
-| `valid_revoked` | Signature valid but the key is in the revoked-keys list — treat as untrusted | 0 |
-| `invalid` | Signature verification failed | 3 |
-| `no_signature` | No embedded signature found | 0 |
-| `not_verified` | Signature extracted but no `--public-key` was given | 0 |
+| `valid` | 0 | `success` |
+| `not_verified` | 0 | `success` (extraction only) |
+| `no_signature` | 2 | `error` / `packet_not_found` |
+| `invalid` | 3 | `error` / `verification_failed` |
+| `valid_revoked` | 3 | `error` / `verification_failed` |
 
----
+The error envelope retains the verification `result`, including its status.
+A malformed/unreadable revocation file or explicitly selected missing file fails.
+Only a genuinely absent implicit default omits additional local revocations.
+The documented compromised identity remains revoked regardless. Decode/extract
+also enforce this policy before publishing a payload, even without a signer pin.
 
-### `extract` — Packet Payload Extraction
+## Live `video` / `audio`
 
-Extract a generic packet payload from a carrier (`lsb_video` / `lsb_audio`).
-This is the raw-payload counterpart of `decode`: it recovers the embedded
-bytes without the decode-path envelope checks (digest verification, transform
-reversal) and is the command the native `stegovideo`/`stegoaudio` elements'
-wire format targets.
-
-```bash
-steganographer extract [OPTIONS] --input <PATH> --output <PATH>
-```
-
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--input <PATH>` | `-i` | Required | Encoded carrier |
-| `--output <PATH>` | `-o` | Required | Payload destination |
-| `--bits <VALUE>` | — | `auto` | Probe 1–4 LSBs, or require an exact strength |
-| `--force` | — | `false` | Replace an existing payload output |
-| `--password <TEXT>` | — | None | Password for password-derived packet decoding (Argon2id, PKT-007); reverses a `TRANSFORM_KDF_ARGON2ID` transform chain. **Mutually exclusive with `--decryption-key`/`--decryption-key-file` in `decode`; visible in shell history/`ps`** |
-| `--password-file <PATH>` | — | None | File containing the password for password-derived packet decoding |
+Both accept `--source`, `--sink` (GStreamer fragments), and `--signing-key`
+(Ed25519 private-key file; ephemeral if omitted). Video accepts `--max-frames`;
+audio accepts `--max-buffers`. They require their corresponding config section.
 
 ```bash
-steganographer extract -i frame.rgb -o payload.bin --bits auto --force
-
-# Password-protected carrier (Argon2id KDF)
-steganographer extract -i packed.png -o payload.bin --password-file secret.txt
+steganographer --config config/example.toml video \
+  --source 'videotestsrc ! videoconvert ! video/x-raw,format=RGB' \
+  --sink 'fakesink' --max-frames 20 --signing-key mykey.key
+steganographer --config config/example.toml audio \
+  --source 'audiotestsrc ! audioconvert ! audio/x-raw,format=S16LE,channels=1,rate=44100' \
+  --sink 'fakesink' --max-buffers 20 --signing-key mykey.key
 ```
 
-Exit behavior follows the shared contract: a carrier with no embedded packet
-is a usage/packet-not-found error (exit 2), everything else failing is a
-runtime error (exit 1), and a successful extraction exits 0.
+Shipped signed defaults are LSB-only. Signed video requires exactly one
+invisible kernel, with no overlay/info-bar combination; signed audio supports
+LSB only. Native trait SS signing is rejected because its channel mapping is
+not the offline scalar binding. Visible rendering modules remain separate,
+unsigned operations. Live encryption, ECC and multi-frame spreading are not
+supported; use offline encode for those features, not decorative live settings.
 
----
+The CLI owns Cocoa main-loop dispatch for live macOS commands; reusable native
+library calls do not seize the process main thread. Native exact file outputs
+are RGB Matroska `.mkv` and PCM `.wav`; do not substitute a lossy sink and assume
+watermarks survive. Audio file signing gathers a bounded selection (64 MiB),
+signs once at index 0, and honors `max_buffers`. See
+[GStreamer integration](gstreamer.md) for library file APIs and sink policy.
 
----
+## `dashboard`
 
-### `keygen` — Key Generation
-
-Generate a new Ed25519 signing key pair.
+`--port/-p` defaults to 8080; `--host` to `127.0.0.1`; `--backend` supports
+`ed25519` only. `--auth-token` enables bearer authentication. `--transport`
+accepts `auto`, `websocket`, `webrtc`; repeatable `--ice-server` supplies STUN/TURN
+URLs when the build has `webrtc`. Pinned WebRTC fails visibly if unavailable;
+only auto may fall back. Avoid exposing a tokenless instance to a network.
 
 ```bash
-steganographer keygen [OPTIONS]
+steganographer dashboard --backend ed25519 --transport websocket
 ```
 
-| Option | Short | Default | Description |
-| ------ | ----- | ------- | ----------- |
-| `--output <PATH>` | `-o` | `steganographer` | Base path for key files |
+Startup/demo captures and Record exports are sampled signed artifacts, not
+continuous signed media. Record downloads contain signed PNG snapshots or
+PCM WAV chunks plus extraction manifests in stored ZIP archives. Lossy H.264
+preview is not the signed evidence surface. The displayed public identity is
+the actual runtime signer, not a verified human/organization identity.
 
-**Output files**:
+## Other commands
 
-- `<path>.key` — Private signing key (64 hex characters = 32 bytes)
-- `<path>.pub` — Public verifying key (64 hex characters = 32 bytes)
+- `keygen --output/-o <BASE> [--format plain|json]`: writes `<BASE>.key` and
+  `<BASE>.pub`, no-clobber. Default base: `steganographer`.
+- `derive --output/-o <DIR>`: choose one high-entropy hex source
+  (`--master-secret`, `--master-secret-file`, `--master-secret-stdin`) or password
+  source (`--password`, `--password-file`, `--password-stdin`). Password mode
+  accepts `--salt`, `--argon2-memory`, `--argon2-iterations`,
+  `--argon2-parallelism`. Save generated salt and parameters for re-derivation.
+  Writes `signing.key`, `signing.pub`, `encryption.key`, `embedding.key`;
+  default directory `keys`. Supports `--format plain|json`.
+- `info -i <FILE> [--stego-type <TYPE>] [--bits 1..4] [--width <W> --height <H>]
+  [--embedding-key <HEX>] [--format plain|json]`: decoded carrier capacity,
+  including generic LSB descriptor/placement overhead.
+- `config [check] [--format plain|json]`: validates the selected config,
+  including limits and every named profile; no pipeline is started.
+- `revoke --public-key <HEX> [--output/-o <PATH>] [--format plain|json]`:
+  updates a JSON array of hex public keys (default `keys/revoked.json`).
+  Malformed existing data fails rather than being discarded.
+- `analyze -i <FILE> [--analysis-type combined|chi_squared|sample_pairs|rs]
+  [--format plain|json]`: statistical evidence, not a calibrated probability of
+  hidden content in natural media; unavailable analysis is inconclusive.
+- `scan -i <PATH> [--max-depth 8] [--max-files 10000] [--max-bytes 67108864]
+  [--profile <NAME>] [--follow-input-symlink] [--format plain|json|jsonl]`:
+  bounded structural/statistical/text/container analysis. Recursion never
+  follows links; the flag permits only the top-level link target. Profiles
+  select supported detector IDs; container findings always contribute.
+  Reports retain findings and incompleteness separately. JSONL streams
+  findings with a summary on stderr; a cutoff is not a clean scan.
 
-**Example**:
+## `ots`: Bitcoin OpenTimestamps
 
 ```bash
-steganographer keygen --output keys/session-001
-# Creates: keys/session-001.key
-#          keys/session-001.pub
+steganographer ots stamp -i report.pdf --method bitcoin --output-dir ots_proofs --format json
+steganographer ots verify -i report.pdf --format json
 ```
 
----
-
-### `dashboard` — Live Verification Dashboard
-
-Launch a web-based dashboard for real-time round-trip steganography verification.
-
-```bash
-steganographer dashboard [OPTIONS]
-```
-
-| Option | Short | Default | Description |
-| ------ | ----- | ------- | ----------- |
-| `--port <PORT>` | `-p` | `8080` | Port to serve the dashboard on |
-| `--backend <BACKEND>` | — | `ed25519` | Signing backend: `ed25519` or `ethereum` |
-| `--host <ADDR>` | — | `127.0.0.1` | Bind address: `127.0.0.1` (local-only, default) or `0.0.0.0` (all interfaces) |
-| `--auth-token <TOKEN>` | — | None | Auth token for mutating API endpoints (`POST /api/config`, `POST /api/metrics/reset`); clients must send `Authorization: Bearer <token>`. Omitted = auth disabled |
-
-**Examples**:
-
-```bash
-# Default: Ed25519 on port 8080
-steganographer dashboard
-
-# Ethereum backend on custom port
-steganographer dashboard --port 3000 --backend ethereum
-
-# Via run.sh (press 1 for the dashboard)
-./run.sh
-```
-
-The dashboard opens a web UI at `http://localhost:<port>` displaying:
-
-- **Left panel**: Live encode feed with frame metrics
-- **Right panel**: Real-time decode and verification results
-- **Footer**: Backend, uptime, resolution, payload information
-
----
-
-### `info` — Capacity Reporting
-
-Report steganographic capacity of a media file.
-
-```bash
-steganographer info [OPTIONS]
-```
-
-| Option | Short | Default | Description |
-| --- | --- | --- | --- |
-| `--input <PATH>` | `-i` | Required | Input file path |
-| `--stego-type <TYPE>` | — | `lsb_video` | Algorithm: `lsb_video`, `lsb_audio`, `spread_spectrum_video`, `dct_video` |
-| `--bits <N>` | — | `1` | LSB bits per sample/pixel (1–4) |
-| `--embedding-key <HEX>` | — | None | Report keyed-placement capacity (subtracts the recognition-tag units) |
-| `--width <N>` / `--height <N>` | — | None | Explicit dimensions for headerless raw RGB input |
-| `--format <FORMAT>` | — | `plain` | Output format: `plain` or `json` |
-
-For LSB kernels the JSON report also includes `generic_max_packet_bytes` and
-`generic_usable_units`, computed with the same descriptor/slot math the
-`encode`/`decode` kernels use.
-
-**Example**:
-
-```bash
-steganographer info -i frame.rgb --stego-type lsb_video --bits 1
-```
-
----
-
-### `config` — Configuration Validation
-
-Validate a TOML configuration file without running any pipeline.
-
-```bash
-steganographer config [ACTION]
-```
-
-| Argument | Default | Description |
-| --- | --- | --- |
-| `<ACTION>` | `check` | Config action to perform (currently only `check`) |
-
-**Example**:
-
-```bash
-# Validate the default config file
-steganographer config check
-
-# Validate a specific config file
-steganographer --config my-config.toml config check
-```
-
-**Output** (valid config):
-
-```text
-✓ Configuration valid: config/example.toml
-  Sections: global, video, audio
-  Hash algorithm: blake3
-```
-
-`config check` also validates the optional `[limits]` table (all seven
-`DecodeLimits` overrides must be > 0, and `max_body_len` must not exceed
-`max_packet_len`) and the optional `[profiles.<name>]` tables (each
-profile's `limits` validate the same way, and its `scan.detectors` set must
-only contain known detector IDs). Profiles are listed in the output when
-present.
-
----
-
-### `analyze` — Steganographic Analysis
-
-Analyze a file for steganographic artifacts using statistical tests.
-
-```bash
-steganographer analyze [OPTIONS] --input <FILE>
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--input <FILE>` | Required | Input file to analyze |
-| `--analysis-type <TYPE>` | `combined` | Analysis type: `combined` (default), `chi_squared`, `sample_pairs` (also `spa`), or `rs` (also `rs_analysis`) |
-| `--format <FORMAT>` | `plain` | Output format: `plain` or `json` |
-
-**Examples**:
-
-```bash
-# Basic chi-squared analysis
-steganographer analyze --input signed.rgb
-
-# JSON output for CI integration
-steganographer analyze --input signed.rgb --format json
-```
-
----
-
-### `scan` — Bounded Forensic Scan
-
-Run structural (entropy, magic-byte family, embedded signature/packet magic),
-statistical (chi-squared, sample-pairs, RS), text (Unicode stego), and
-container (ZIP/OOXML `ZIP_TOPOLOGY`, DOC-001, DOC-002) detectors over a file
-or recursively over a directory. Top-level symlinked inputs are rejected by
-default (usage error); recursion never follows symlinks, and recursion and
-per-file reads are bounded.
-
-```bash
-steganographer scan [OPTIONS] --input <PATH>
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--input <PATH>` | Required | File or directory to scan |
-| `--profile <NAME>` | None | Apply the named `[profiles.<name>]` profile from the config file (limits + `scan.detectors` selection; unknown profiles and config errors are usage errors, exit 2) |
-| `--follow-input-symlink` | `false` | Scan the target of a top-level symlinked input instead of rejecting it |
-| `--max-depth <N>` | `8` | Maximum directory depth (`0` = top-level files only) |
-| `--max-files <N>` | `10000` | Maximum number of files to scan |
-| `--max-bytes <N>` | `67108864` | Maximum bytes read per file (larger files truncated) |
-| `--format <FORMAT>` | `plain` | `plain`, `json`, or `jsonl` |
-
-Without a profile every detector reports; a profile's `scan.detectors` set
-selects which findings are reported (container findings always contribute).
-Detector IDs, budgets, and false-positive limits are documented in the
-`detector_registry()` in `steganographer-core/src/forensics.rs`.
-
-`jsonl` writes one finding per line to stdout and the summary to stderr. The
-exit code is `0` when no findings are present, `1` when at least one file is
-flagged, and `2` on a usage error.
-
-```bash
-# Scan one file
-steganographer scan --input suspicious.png --format json
-
-# Recursively scan a directory, one finding per line
-steganographer scan --input ./exports --format jsonl
-
-# Scan with a named config profile (SUR-006: detector selection + limits)
-steganographer scan --input ./exports --profile strict
-```
-
----
-
-### `derive` — Key Derivation
-
-Derive signing, encryption, and embedding keys from **either** a high-entropy
-master secret (BLAKE3 `derive_key`) **or** a human-chosen password (Argon2id).
-The two modes are mutually exclusive — providing both fails.
-
-```bash
-steganographer derive [OPTIONS] --output <DIR>
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--master-secret <HEX>` | — | Master secret (hex-encoded). **WARNING**: visible in shell history and `ps` output. |
-| `--master-secret-file <PATH>` | — | Read master secret from a file (hex-encoded). Safer than `--master-secret`. |
-| `--master-secret-stdin` | `false` | Read master secret from stdin (hex-encoded). |
-| `--password <TEXT>` | — | Password for Argon2id stretching. **WARNING**: visible in shell history and `ps` output. |
-| `--password-file <PATH>` | — | Read the password from a file (raw bytes, trailing newline trimmed). |
-| `--password-stdin` | `false` | Read the password from stdin (raw bytes, trailing newline trimmed). |
-| `--salt <HEX>` | random | Hex-encoded Argon2id salt (≥ 16 bytes). Generated and printed when omitted. |
-| `--argon2-memory <KIB>` | `19456` | Argon2id memory cost in KiB (default 19 MiB). |
-| `--argon2-iterations <N>` | `2` | Argon2id time cost. |
-| `--argon2-parallelism <N>` | `1` | Argon2id lane count. |
-| `--output <DIR>` | `keys` | Output directory for derived keys |
-
-**Outputs**:
-- `signing.key` / `signing.pub` — Ed25519 signing keypair
-- `encryption.key` — ChaCha20-Poly1305 encryption key
-- `embedding.key` — LSB PRNG embedding key
-
-> **Security note:** BLAKE3 `derive_key` is a fast KDF, not a slow password
-> hashing function. The master secret must be high-entropy random data (at
-> least 32 bytes / 64 hex chars). A memorable passphrase will be
-> brute-forceable at hash speed. For passwords, use `--password*` to stretch
-> with Argon2id instead.
->
-> **Argon2id note:** the salt (and parameters) must be saved to re-derive the
-> same keys later. When `--salt` is omitted, a random salt is generated and
-> printed. Parameters below the OWASP floor (19 MiB / 2 iterations) trigger a
-> warning but are accepted.
-
-**Examples**:
-
-```bash
-# From a file (recommended)
-steganographer derive --master-secret-file secret.hex --output keys
-
-# From stdin
-echo "a1b2c3..." | steganographer derive --master-secret-stdin --output keys
-
-# Direct argument (not recommended — visible in ps/history)
-steganographer derive --master-secret a1b2c3... --output keys
-
-# Password derivation (Argon2id) — save the printed salt for re-derivation
-steganographer derive --password-file passphrase.txt --output keys
-
-# Password derivation with an explicit, reproducible salt
-steganographer derive --password-file passphrase.txt \
-  --salt 000102030405060708090a0b0c0d0e0f --output keys
-```
-
----
-
-## Exit Codes
-
-| Code | Meaning |
-| ---- | ------- |
-| 0    | Success (for `scan`: no findings present) |
-| 1    | Runtime error (I/O, config parse, pipeline failure); for `scan`: at least one finding |
-| 2    | Usage error (bad argument shape/unknown value) or packet-not-found: `decode`/`extract` on a carrier with no embedded generic packet |
-| 3    | Signature verification failed (`verify` returning status `invalid`) |
-
-**JSON output contract**: commands with `--format json` always print a single
-JSON document (one JSON value, newline-terminated by pretty printing), never
-trailing logs or multiple concatenated documents, and the JSON never contains
-secret key material (private/seed bytes are never serialized; only public
-identifiers such as public-key hex, digests, and signature bytes appear).
-
-## Environment Variables
-
-| Variable | Description |
-| -------- | ----------- |
-| `RUST_LOG` | Override log level (alternative to `--log-level`) |
-| `GST_PLUGIN_PATH` | Additional GStreamer plugin search paths |
-| `GST_DEBUG` | GStreamer debug level (e.g., `3` for warnings) |
-| `PKG_CONFIG_PATH` | Path to GStreamer `.pc` files (build-time) |
-
-### `revoke` - Revoke a Signing Key
-
-Append a public key to the revoked-keys list. The `verify` command checks
-this list and warns if a signature was made with a revoked key.
-
-```bash
-steganographer revoke --public-key <HEX> [--output <PATH>]
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--public-key <HEX>` | - | Public key to revoke (hex-encoded, 32 bytes / 64 hex chars) |
-| `--output <PATH>` | `keys/revoked.json` | Path to the revoked-keys file |
-
----
-
-### `ots` - OpenTimestamps Attestation
-
-Stamp a file's BLAKE3 Merkle root with the OpenTimestamps service, or verify
-a `.ots` proof. Subcommands: `stamp`, `verify`. See
-[OTS Integration](ots-integration.md) for the full workflow.
-
-```bash
-steganographer ots stamp --input report.pdf [--method bitcoin] [--format plain]
-steganographer ots verify --input report.pdf [--proof report.pdf.ots] [--format plain]
-```
-
-| Option (stamp) | Default | Description |
-| --- | --- | --- |
-| `--input <PATH>` | - | File to attest |
-| `--output-dir <DIR>` | from config or `./ots_proofs/` | Directory for `.ots` proof files |
-| `--method <M>` | `bitcoin` | Attestation method: `bitcoin` or `ethereum` |
-| `--force` | `false` | Re-stamp even if a proof already exists for this digest |
-| `--format <F>` | `plain` | Output format: `plain` or `json` |
-
-| Option (verify) | Default | Description |
-| --- | --- | --- |
-| `--input <PATH>` | - | File whose digest to check |
-| `--proof <PATH>` | `<input>.ots` | Proof file to verify against |
-| `--format <F>` | `plain` | Output format: `plain` or `json` |
-
----
-
-## Configuration-Driven Defaults
-
-The CLI and `run.sh` read pipeline parameters from `steganographer.toml`. All pipeline settings (resolution, framerate, opacity, LSB bits, overlay text, signing backend) are configurable:
-
-```bash
-# Uses resolution/framerate from [video.pipeline] in steganographer.toml
-steganographer video
-
-# Override source pipeline (config values still used for stego modules)
-steganographer video --source "videotestsrc ! videoconvert ! video/x-raw,format=RGB,width=1280,height=720"
-
-# Launch dashboard with config-driven signing backend
-steganographer dashboard
-```
-
-See [Configuration](configuration.md) for full TOML schema including `[video.pipeline]` with resolution, framerate, opacity, payload, and signing backend settings.
-
-## Further Reading
-
-- [Getting Started](getting-started.md) — First-time setup and tutorial
-- [Configuration](configuration.md) — Full TOML config schema
-- [Algorithms](algorithms.md) — How the stego modules work
-- [Cryptography](cryptography.md) — BLAKE3/SHA-256/SHA-3 + Ed25519 and Ethereum signing
-- [Steganography Theory](steganography-theory.md) — Information hiding fundamentals
-- [Security](security.md) — Threat models and deployment guidance
-- [API Reference](api-reference.md) — Rust API, traits, and HTTP routes
+CLI stamping commits **SHA-256 of the exact input file**. `stamp` accepts
+`--input/-i`, `--output-dir`, `--method` (Bitcoin only), `--force`, `--format`.
+`verify` accepts `--input/-i`, optional `--proof`, and `--format`.
+The default proof path is the configured proof directory plus
+`<sha256-hex>.ots`, for both commands, not `<input>.ots`. Pending is not
+verified. See [OTS Integration](ots-integration.md) for standard detached proof,
+calendar upgrade, safe proof I/O and trusted Esplora verification boundaries.
+Dashboard routes are `/ots/status`, `/ots/stamp`, `/ots/verify`.
+
+## Machine output and exit codes
+
+JSON results use `schema: "steganographer.cli/v1"` with `command`, `status`,
+optional `result`, `warnings`, `errors`, `timing`, and `tool`. Errors have stable
+snake_case `code` and `message`. JSON is a single stdout document, not the
+unwrapped command result; diagnostics go to stderr. Secret keys/passwords are
+not serialized.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success; verify may still be extraction-only |
+| 1 | User/configuration/format error |
+| 2 | Packet/signature absent or decode unavailable |
+| 3 | Authentication/signature/pinned-signer or revocation failure |
+| 4 | Scan findings |
+| 5 | Inconclusive resource-limited analysis with no positive finding |
+| 6 | Unexpected internal/runtime/I/O error |
+
+## 0.8 migration
+
+Legacy format 2/3 signatures are rejected; re-encode original media with format
+4. The keyed legacy audio placement changed with that version. Legacy encrypted
+payloads now require the version-1 `STGE` wrapper containing a fresh 128-bit
+packet ID (41-byte overhead); there is no raw zero-ID decryption fallback.
+Generic STG3 protocol-v1 wire bytes remain compatible. See
+[Compatibility](compatibility.md) for Rust/WASM and platform migration notes.

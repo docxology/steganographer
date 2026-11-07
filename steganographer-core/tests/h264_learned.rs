@@ -118,7 +118,7 @@ fn measure(strength: f32, wm: &LearnedWatermarker, w: u32, h: u32) -> Option<(f6
         strength,
         ..wm.config().clone()
     };
-    let wm2 = LearnedWatermarker::with_model(cfg, model_of(wm));
+    let wm2 = LearnedWatermarker::with_model(cfg, model_of(wm)).unwrap();
     let orig = cover_frame(w, h);
     let mut data = orig.clone();
     {

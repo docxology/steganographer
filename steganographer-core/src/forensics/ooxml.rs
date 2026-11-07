@@ -33,10 +33,9 @@
 //!   sharedStrings/worksheets, and docx headers/footers; presentation.xml
 //!   header/footer placeholders; and embedded-media entry anomalies. These
 //!   are detections and do set `detected`.
-use std::collections::HashMap;
-use std::io::Read;
+use std::collections::BTreeMap;
 
-use crate::forensics::ContainerFinding;
+use super::{ContainerAnalysis, ContainerFinding};
 use crate::unicode_text;
 
 /// Stable detector family ID: OOXML package inventory/topology (DOC-001).
@@ -163,6 +162,12 @@ pub enum OoxmlError {
     /// Inflation failed (corrupt deflate stream).
     #[error("ZIP entry \"{name}\" has a corrupt deflate stream")]
     InflateFailed { name: String },
+    /// The archive requires an unsupported ZIP feature.
+    #[error("unsupported ZIP feature: {feature}")]
+    UnsupportedFeature { feature: &'static str },
+    /// Entry checksum does not match the bytes read.
+    #[error("ZIP entry \"{name}\" CRC-32 mismatch")]
+    ChecksumMismatch { name: String },
 }
 
 /// One ZIP entry as recorded in the central directory.
@@ -175,6 +180,7 @@ pub struct ZipEntry {
     compressed_size: usize,
     uncompressed_size: usize,
     local_header_offset: usize,
+    name_range: std::ops::Range<usize>,
 }
 
 impl ZipEntry {
@@ -198,7 +204,7 @@ impl ZipEntry {
     pub fn uncompressed_size(&self) -> usize {
         self.uncompressed_size
     }
-    /// Claimed CRC-32 of the uncompressed content (not verified).
+    /// Claimed CRC-32 of the uncompressed content (verified on extraction).
     pub fn crc32(&self) -> u32 {
         self.crc32
     }
@@ -209,6 +215,7 @@ impl ZipEntry {
 pub struct ZipArchive<'a> {
     data: &'a [u8],
     entries: Vec<ZipEntry>,
+    central_offset: usize,
 }
 
 impl<'a> ZipArchive<'a> {
@@ -221,29 +228,42 @@ impl<'a> ZipArchive<'a> {
         let total_entries = read_u16(data, eocd + 10) as usize;
         let cd_size = read_u32(data, eocd + 12) as usize;
         let cd_offset = read_u32(data, eocd + 16) as usize;
-
+        if read_u16(data, eocd + 4) != 0
+            || read_u16(data, eocd + 6) != 0
+            || read_u16(data, eocd + 8) as usize != total_entries
+        {
+            return Err(OoxmlError::UnsupportedFeature {
+                feature: "multi_disk",
+            });
+        }
+        if total_entries == u16::MAX as usize
+            || cd_size == u32::MAX as usize
+            || cd_offset == u32::MAX as usize
+        {
+            return Err(OoxmlError::UnsupportedFeature { feature: "zip64" });
+        }
         if total_entries > CONTAINER_MAX_ENTRIES {
             return Err(OoxmlError::TooManyEntries {
                 claimed: total_entries,
                 limit: CONTAINER_MAX_ENTRIES,
             });
         }
-        if cd_offset
+        let end = cd_offset
             .checked_add(cd_size)
-            .is_none_or(|end| end > data.len())
-        {
-            return Err(OoxmlError::CentralDirectoryOutOfBounds {
+            .filter(|&end| end <= eocd)
+            .ok_or(OoxmlError::CentralDirectoryOutOfBounds {
                 offset: cd_offset,
                 size: cd_size,
                 input_len: data.len(),
-            });
-        }
-
+            })?;
         let mut entries = Vec::new();
         let mut pos = cd_offset;
-        let end = cd_offset + cd_size;
         for index in 0..total_entries {
-            if pos + 46 > end || read_u32(data, pos) != 0x0201_4b50 {
+            let fixed_end = pos
+                .checked_add(46)
+                .filter(|&n| n <= end)
+                .ok_or(OoxmlError::CentralDirectoryCorrupt { offset: pos })?;
+            if read_u32(data, pos) != 0x0201_4b50 {
                 return Err(OoxmlError::CentralDirectoryCorrupt { offset: pos });
             }
             let flags = read_u16(data, pos + 8);
@@ -255,10 +275,28 @@ impl<'a> ZipArchive<'a> {
             let extra_len = read_u16(data, pos + 30) as usize;
             let comment_len = read_u16(data, pos + 32) as usize;
             let local_offset = read_u32(data, pos + 42) as usize;
-            let record_end = pos + 46 + name_len + extra_len + comment_len;
-            if record_end > end {
-                return Err(OoxmlError::CentralDirectoryCorrupt { offset: pos });
+            if read_u16(data, pos + 34) != 0 {
+                return Err(OoxmlError::UnsupportedFeature {
+                    feature: "multi_disk",
+                });
             }
+            if compressed_size == u32::MAX as usize
+                || uncompressed_size == u32::MAX as usize
+                || local_offset == u32::MAX as usize
+            {
+                return Err(OoxmlError::UnsupportedFeature { feature: "zip64" });
+            }
+            if flags & 8 != 0 {
+                return Err(OoxmlError::UnsupportedFeature {
+                    feature: "data_descriptor",
+                });
+            }
+            let record_end = fixed_end
+                .checked_add(name_len)
+                .and_then(|n| n.checked_add(extra_len))
+                .and_then(|n| n.checked_add(comment_len))
+                .filter(|&n| n <= end)
+                .ok_or(OoxmlError::CentralDirectoryCorrupt { offset: pos })?;
             if name_len > CONTAINER_MAX_ENTRY_NAME_BYTES {
                 return Err(OoxmlError::EntryNameTooLong {
                     index,
@@ -266,9 +304,11 @@ impl<'a> ZipArchive<'a> {
                     limit: CONTAINER_MAX_ENTRY_NAME_BYTES,
                 });
             }
-            let name = String::from_utf8_lossy(&data[pos + 46..pos + 46 + name_len]).into_owned();
+            let name_range = fixed_end..fixed_end + name_len;
+            let name = String::from_utf8_lossy(&data[name_range.clone()]).into_owned();
             entries.push(ZipEntry {
                 name,
+                name_range,
                 flags,
                 method,
                 crc32,
@@ -278,8 +318,14 @@ impl<'a> ZipArchive<'a> {
             });
             pos = record_end;
         }
-
-        Ok(ZipArchive { data, entries })
+        if pos != end {
+            return Err(OoxmlError::CentralDirectoryCorrupt { offset: pos });
+        }
+        Ok(ZipArchive {
+            data,
+            entries,
+            central_offset: cd_offset,
+        })
     }
 
     /// All parsed entries, in central-directory order.
@@ -294,8 +340,9 @@ impl<'a> ZipArchive<'a> {
 
     /// Inflate/extract one entry, enforcing the per-entry and total budgets.
     ///
-    /// `inflate_total` accumulates claimed output across reads in one
-    /// analysis; pass `&mut 0` for one-shot reads.
+    /// `inflate_total` reserves claimed output across attempted reads, including
+    /// corrupt streams, so failures cannot bypass the package work budget.
+    /// Pass `&mut 0` for one-shot reads.
     pub fn read_entry(
         &self,
         entry: &ZipEntry,
@@ -306,9 +353,11 @@ impl<'a> ZipArchive<'a> {
                 name: entry.name.clone(),
             });
         }
+        let new_total = check_output_budget(&entry.name, entry.uncompressed_size, *inflate_total)?;
         let range = self.local_data_range(entry)?;
         let raw = &self.data[range];
-        match entry.method {
+        *inflate_total = new_total;
+        let out = match entry.method {
             0 => {
                 if entry.compressed_size != entry.uncompressed_size {
                     return Err(OoxmlError::InflateSizeMismatch {
@@ -317,44 +366,63 @@ impl<'a> ZipArchive<'a> {
                         claimed: entry.uncompressed_size,
                     });
                 }
-                *inflate_total = inflate_total.saturating_add(raw.len());
-                Ok(raw.to_vec())
+                raw.to_vec()
             }
-            8 => inflate_raw(raw, &entry.name, entry.uncompressed_size, inflate_total),
-            method => Err(OoxmlError::UnsupportedCompressionMethod {
+            8 => inflate_raw(raw, &entry.name, entry.uncompressed_size)?,
+            method => {
+                return Err(OoxmlError::UnsupportedCompressionMethod {
+                    name: entry.name.clone(),
+                    method,
+                })
+            }
+        };
+        if crc32(&out) != entry.crc32 {
+            return Err(OoxmlError::ChecksumMismatch {
                 name: entry.name.clone(),
-                method,
-            }),
+            });
         }
+        Ok(out)
     }
 
     /// Resolve an entry's local header and return the compressed-data range.
     fn local_data_range(&self, entry: &ZipEntry) -> Result<std::ops::Range<usize>, OoxmlError> {
         let off = entry.local_header_offset;
         let data = self.data;
-        if off + 30 > data.len() || read_u32(data, off) != 0x0403_4b50 {
-            return Err(OoxmlError::LocalHeaderCorrupt {
-                name: entry.name.clone(),
-            });
+        let corrupt = || OoxmlError::LocalHeaderCorrupt {
+            name: entry.name.clone(),
+        };
+        let name_start = off
+            .checked_add(30)
+            .filter(|&n| n <= self.central_offset)
+            .ok_or_else(corrupt)?;
+        if read_u32(data, off) != 0x0403_4b50 {
+            return Err(corrupt());
         }
         let name_len = read_u16(data, off + 26) as usize;
         let extra_len = read_u16(data, off + 28) as usize;
-        let name_start = off + 30;
-        let data_start = name_start + name_len + extra_len;
-        if data.get(name_start..name_start + name_len) != Some(entry.name.as_bytes()) {
+        let name_end = name_start.checked_add(name_len).ok_or_else(corrupt)?;
+        let data_start = name_end.checked_add(extra_len).ok_or_else(corrupt)?;
+        if data_start > self.central_offset
+            || data.get(name_start..name_end) != data.get(entry.name_range.clone())
+            || read_u16(data, off + 6) != entry.flags
+            || read_u16(data, off + 8) != entry.method
+            || read_u32(data, off + 14) != entry.crc32
+            || read_u32(data, off + 18) as usize != entry.compressed_size
+            || read_u32(data, off + 22) as usize != entry.uncompressed_size
+        {
             return Err(OoxmlError::LocalHeaderMismatch {
                 name: entry.name.clone(),
             });
         }
-        let data_end = data_start + entry.compressed_size;
-        if data_end > data.len() {
-            return Err(OoxmlError::EntryDataOutOfBounds {
+        let data_end = data_start
+            .checked_add(entry.compressed_size)
+            .filter(|&n| n <= self.central_offset)
+            .ok_or_else(|| OoxmlError::EntryDataOutOfBounds {
                 name: entry.name.clone(),
                 offset: data_start,
                 size: entry.compressed_size,
                 input_len: data.len(),
-            });
-        }
+            })?;
         Ok(data_start..data_end)
     }
 }
@@ -372,16 +440,23 @@ fn find_eocd(data: &[u8]) -> Result<usize, OoxmlError> {
     }
     let scan_len = data.len().min(CONTAINER_MAX_EOCD_SCAN_BYTES);
     let floor = data.len() - scan_len;
-    // Last start offset at which a 4-byte signature (and the fixed 22-byte
-    // EOCD record beginning with it) fits the buffer.
-    let mut pos = data.len() - 4;
+    // Only examine candidates whose complete fixed record fits.
+    let mut pos = data.len() - 22;
+    let mut found = None;
+    let mut fallback = None;
     loop {
         if read_u32(data, pos) == 0x0605_4b50 {
-            // pos + 22 <= data.len() holds because pos <= data.len() - 4 and
-            // the signature match implies pos + 4 <= data.len().
             let comment_len = read_u16(data, pos + 20) as usize;
-            if pos + 22 + comment_len <= data.len() {
-                return Ok(pos);
+            if pos.checked_add(22).and_then(|n| n.checked_add(comment_len)) == Some(data.len()) {
+                fallback.get_or_insert(pos);
+                let cd_end =
+                    (read_u32(data, pos + 16) as usize)
+                        .checked_add(read_u32(data, pos + 12) as usize);
+                if cd_end == Some(pos) && found.replace(pos).is_some() {
+                    return Err(OoxmlError::UnsupportedFeature {
+                        feature: "ambiguous_eocd",
+                    });
+                }
             }
         }
         if pos == floor || pos == 0 {
@@ -389,19 +464,13 @@ fn find_eocd(data: &[u8]) -> Result<usize, OoxmlError> {
         }
         pos -= 1;
     }
-    Err(OoxmlError::EocdNotFound(CONTAINER_MAX_EOCD_SCAN_BYTES))
+    found
+        .or(fallback)
+        .ok_or(OoxmlError::EocdNotFound(CONTAINER_MAX_EOCD_SCAN_BYTES))
 }
 
-/// Inflate a raw-deflate stream with hard budget checks. The claimed size is
-/// validated against the per-entry budget *before* any allocation, and the
-/// read is additionally capped with `take`, so a lying (too-small) claim
-/// cannot over-allocate either.
-fn inflate_raw(
-    raw: &[u8],
-    name: &str,
-    claimed: usize,
-    inflate_total: &mut usize,
-) -> Result<Vec<u8>, OoxmlError> {
+/// Admit output before allocation, identically for stored and deflated data.
+fn check_output_budget(name: &str, claimed: usize, total: usize) -> Result<usize, OoxmlError> {
     if claimed > CONTAINER_MAX_INFLATE_PER_ENTRY {
         return Err(OoxmlError::InflateBudgetExceeded {
             name: name.to_string(),
@@ -409,20 +478,29 @@ fn inflate_raw(
             limit: CONTAINER_MAX_INFLATE_PER_ENTRY,
         });
     }
-    let new_total = *inflate_total + claimed;
-    if new_total > CONTAINER_MAX_INFLATE_TOTAL {
-        return Err(OoxmlError::InflateTotalBudgetExceeded {
-            inflated: new_total,
+    total
+        .checked_add(claimed)
+        .filter(|&n| n <= CONTAINER_MAX_INFLATE_TOTAL)
+        .ok_or(OoxmlError::InflateTotalBudgetExceeded {
+            inflated: total.saturating_add(claimed),
             limit: CONTAINER_MAX_INFLATE_TOTAL,
-        });
-    }
-    let mut decoder = flate2::read::DeflateDecoder::new(raw).take(claimed as u64);
-    let mut out = Vec::with_capacity(claimed);
-    if decoder.read_to_end(&mut out).is_err() {
-        return Err(OoxmlError::InflateFailed {
+        })
+}
+
+/// Read one extra byte to distinguish a complete stream from a claimed prefix.
+fn inflate_raw(raw: &[u8], name: &str, claimed: usize) -> Result<Vec<u8>, OoxmlError> {
+    let limit = claimed
+        .checked_add(1)
+        .ok_or_else(|| OoxmlError::InflateFailed {
             name: name.to_string(),
-        });
-    }
+        })?;
+    let mut out = Vec::with_capacity(limit);
+    let mut decoder = flate2::Decompress::new(false);
+    let status = decoder
+        .decompress_vec(raw, &mut out, flate2::FlushDecompress::Finish)
+        .map_err(|_| OoxmlError::InflateFailed {
+            name: name.to_string(),
+        })?;
     if out.len() != claimed {
         return Err(OoxmlError::InflateSizeMismatch {
             name: name.to_string(),
@@ -430,8 +508,40 @@ fn inflate_raw(
             claimed,
         });
     }
-    *inflate_total = new_total;
+    if status != flate2::Status::StreamEnd || decoder.total_in() != raw.len() as u64 {
+        return Err(OoxmlError::InflateFailed {
+            name: name.to_string(),
+        });
+    }
     Ok(out)
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    // Compile-time table; no per-byte heap allocation or table rebuilding.
+    const TABLE: [u32; 256] = {
+        let mut table = [0; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                c = if c & 1 != 0 {
+                    0xedb8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+                bit += 1;
+            }
+            table[i] = c;
+            i += 1;
+        }
+        table
+    };
+    let mut crc = u32::MAX;
+    for &byte in data {
+        crc = TABLE[((crc ^ byte as u32) & 255) as usize] ^ (crc >> 8);
+    }
+    !crc
 }
 
 /// Run the DOC-001/DOC-002/DOC-003 container analysis over a ZIP-family
@@ -441,12 +551,13 @@ fn inflate_raw(
 /// evidence. Returns findings in detector order (inventory, topology
 /// anomalies, then WordprocessingML concealment, then extended-part
 /// coverage).
-pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
-    let mut findings: Vec<ContainerFinding> = Vec::new();
+pub fn analyze_package(data: &[u8]) -> ContainerAnalysis {
+    let mut findings = ContainerAnalysis::default();
     let archive = match ZipArchive::parse(data) {
         Ok(archive) => archive,
         Err(error) => {
-            findings.push(ContainerFinding {
+            incomplete(&mut findings, zip_reason(&error));
+            findings.findings.push(ContainerFinding {
                 path: "<package>".to_string(),
                 family: DOC_001_FAMILY.to_string(),
                 detail: bound_detail(format!("package rejected: {error}")),
@@ -477,10 +588,11 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
     );
 
     // DOC-001 topology anomalies (observations, not concealment detections).
-    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    let mut name_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for entry in entries {
         *name_counts.entry(entry.name()).or_insert(0) += 1;
         if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
+            incomplete(&mut findings, "zip_entry_budget");
             push_finding(
                 &mut findings,
                 ContainerFinding {
@@ -495,6 +607,7 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
         }
     }
     for (name, count) in name_counts.iter().filter(|(_, c)| **c > 1) {
+        incomplete(&mut findings, "zip_duplicate_name");
         push_finding(
             &mut findings,
             ContainerFinding {
@@ -505,6 +618,7 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
         );
     }
     for entry in entries.iter().filter(|e| e.flags() & 0x1 != 0) {
+        incomplete(&mut findings, "zip_encrypted_entry");
         push_finding(
             &mut findings,
             ContainerFinding {
@@ -540,7 +654,7 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
     let mut inflate_total = 0usize;
     match office_family {
         "docx" => {
-            analyze_document_xml(&archive, &mut findings);
+            analyze_document_xml(&archive, &mut inflate_total, &mut findings);
             analyze_office_parts(&archive, "docx", &mut inflate_total, &mut findings);
         }
         "pptx" | "xlsx" => {
@@ -554,63 +668,18 @@ pub fn analyze_package(data: &[u8]) -> Vec<ContainerFinding> {
 
 /// Deep-analyze `word/document.xml`: Unicode/text stego channels plus ASCII
 /// whitespace runs inside XML text nodes.
-fn analyze_document_xml(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerFinding>) {
-    let Some(entry) = archive.find(WORD_DOCUMENT) else {
-        return;
-    };
-    if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
-        // Already reported by the topology check; do not double-report.
-        return;
-    }
-    let mut inflate_total = 0usize;
-    let xml_bytes = match archive.read_entry(entry, &mut inflate_total) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            push_finding(
-                findings,
-                ContainerFinding {
-                    path: WORD_DOCUMENT.to_string(),
-                    family: DOC_001_FAMILY.to_string(),
-                    detail: bound_detail(format!("main part rejected: {error}")),
-                },
-            );
-            return;
-        }
-    };
-    let Ok(xml) = std::str::from_utf8(&xml_bytes) else {
-        push_finding(
-            findings,
-            ContainerFinding {
-                path: WORD_DOCUMENT.to_string(),
-                family: DOC_001_FAMILY.to_string(),
-                detail: "main part is not valid UTF-8; text channels not analyzed".to_string(),
-            },
-        );
-        return;
-    };
-
-    for finding in unicode_text::analyze_text(xml) {
-        push_finding(
-            findings,
-            ContainerFinding {
-                path: WORD_DOCUMENT.to_string(),
-                family: DOC_002_FAMILY.to_string(),
-                detail: bound_detail(format_text_finding(&finding)),
-            },
-        );
-    }
-
-    if let Some((runs, longest, first)) = detect_xml_whitespace_runs(xml) {
-        push_finding(
-            findings,
-            ContainerFinding {
-                path: WORD_DOCUMENT.to_string(),
-                family: DOC_002_FAMILY.to_string(),
-                detail: bound_detail(format!(
-                    "XML text-node whitespace runs: {runs} runs, longest {longest} chars, first at char offset {first}"
-                )),
-            },
-        );
+fn analyze_document_xml(
+    archive: &ZipArchive<'_>,
+    inflate_total: &mut usize,
+    findings: &mut ContainerAnalysis,
+) {
+    // Scan every interpretation of duplicate main parts, within the same budget.
+    for entry in archive
+        .entries()
+        .iter()
+        .filter(|e| e.name() == WORD_DOCUMENT)
+    {
+        analyze_part_text(archive, entry, inflate_total, findings, DOC_002_FAMILY);
     }
 }
 
@@ -650,7 +719,7 @@ fn analyze_office_parts(
     archive: &ZipArchive<'_>,
     family_kind: &str,
     inflate_total: &mut usize,
-    findings: &mut Vec<ContainerFinding>,
+    findings: &mut ContainerAnalysis,
 ) {
     for entry in archive.entries() {
         let name = entry.name();
@@ -671,7 +740,7 @@ fn analyze_office_parts(
             _ => false,
         };
         if is_text_part {
-            analyze_part_text(archive, entry, inflate_total, findings);
+            analyze_part_text(archive, entry, inflate_total, findings, DOC_003_FAMILY);
         }
     }
     if family_kind == "pptx" {
@@ -687,7 +756,8 @@ fn analyze_part_text(
     archive: &ZipArchive<'_>,
     entry: &ZipEntry,
     inflate_total: &mut usize,
-    findings: &mut Vec<ContainerFinding>,
+    findings: &mut ContainerAnalysis,
+    family: &str,
 ) {
     let path = entry.name().to_string();
     if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
@@ -698,6 +768,7 @@ fn analyze_part_text(
     let bytes = match archive.read_entry(entry, inflate_total) {
         Ok(bytes) => bytes,
         Err(error) => {
+            incomplete(findings, zip_reason(&error));
             push_finding(
                 findings,
                 ContainerFinding {
@@ -709,36 +780,56 @@ fn analyze_part_text(
             return;
         }
     };
-    let Ok(xml) = std::str::from_utf8(&bytes) else {
-        push_finding(
-            findings,
-            ContainerFinding {
-                path,
-                family: DOC_001_FAMILY.to_string(),
-                detail: "part is not valid UTF-8; text channels not analyzed".to_string(),
-            },
-        );
-        return;
+    let xml = match decode_xml(&bytes) {
+        Ok(xml) => xml,
+        Err(reason) => {
+            incomplete(findings, reason);
+            push_finding(
+                findings,
+                ContainerFinding {
+                    path,
+                    family: DOC_001_FAMILY.to_string(),
+                    detail: format!("XML text not analyzed: {reason}"),
+                },
+            );
+            return;
+        }
     };
+    if xml.truncated {
+        incomplete(findings, "xml_text_budget");
+    }
 
-    for finding in unicode_text::analyze_text(xml) {
+    for finding in unicode_text::analyze_text(&xml.text) {
         push_finding(
             findings,
             ContainerFinding {
                 path: path.clone(),
-                family: DOC_003_FAMILY.to_string(),
+                family: family.to_string(),
                 detail: bound_detail(format_text_finding(&finding)),
             },
         );
     }
-    if let Some((runs, longest, first)) = detect_xml_whitespace_runs(xml) {
+    for finding in unicode_text::analyze_text(&xml.attributes) {
+        push_finding(
+            findings,
+            ContainerFinding {
+                path: path.clone(),
+                family: family.to_string(),
+                detail: bound_detail(format!(
+                    "XML attribute values: {}",
+                    format_text_finding(&finding)
+                )),
+            },
+        );
+    }
+    if let Some((runs, longest, first)) = detect_xml_whitespace_runs(&xml.text) {
         push_finding(
             findings,
             ContainerFinding {
                 path,
-                family: DOC_003_FAMILY.to_string(),
+                family: family.to_string(),
                 detail: bound_detail(format!(
-                    "XML text-node whitespace runs: {runs} runs, longest {longest} chars, first at char offset {first}"
+                    "XML text-node whitespace runs: {runs} runs, longest {longest} chars, first at decoded-text char offset {first}"
                 )),
             },
         );
@@ -751,7 +842,7 @@ fn analyze_part_text(
 fn analyze_presentation_placeholders(
     archive: &ZipArchive<'_>,
     inflate_total: &mut usize,
-    findings: &mut Vec<ContainerFinding>,
+    findings: &mut ContainerAnalysis,
 ) {
     let Some(entry) = archive.find(PPT_PRESENTATION) else {
         return;
@@ -762,6 +853,7 @@ fn analyze_presentation_placeholders(
     let bytes = match archive.read_entry(entry, inflate_total) {
         Ok(bytes) => bytes,
         Err(error) => {
+            incomplete(findings, zip_reason(&error));
             push_finding(
                 findings,
                 ContainerFinding {
@@ -773,8 +865,12 @@ fn analyze_presentation_placeholders(
             return;
         }
     };
-    let Ok(xml) = std::str::from_utf8(&bytes) else {
-        return;
+    let xml = match decode_xml(&bytes) {
+        Ok(xml) => xml,
+        Err(reason) => {
+            incomplete(findings, reason);
+            return;
+        }
     };
     const PLACEHOLDERS: &[&str] = &[
         "<p:ph type=\"ftr\"",
@@ -786,7 +882,7 @@ fn analyze_presentation_placeholders(
     let found: Vec<&str> = PLACEHOLDERS
         .iter()
         .copied()
-        .filter(|marker| xml.contains(marker))
+        .filter(|marker| xml.source.contains(marker))
         .collect();
     if !found.is_empty() {
         push_finding(
@@ -807,7 +903,7 @@ fn analyze_presentation_placeholders(
 /// extensions and unrecognized non-media extensions inside media
 /// directories. Text-like extensions are already DOC-001 evidence and are
 /// skipped here to avoid double-reporting.
-fn analyze_media_entries(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerFinding>) {
+fn analyze_media_entries(archive: &ZipArchive<'_>, findings: &mut ContainerAnalysis) {
     for entry in archive.entries().iter().filter(|e| is_media_name(e.name())) {
         let Some(ext) = path_extension(entry.name()) else {
             push_finding(
@@ -859,41 +955,377 @@ fn analyze_media_entries(archive: &ZipArchive<'_>, findings: &mut Vec<ContainerF
     }
 }
 
-/// Find long ASCII space/tab runs inside XML text nodes (between `>` and `<`).
-///
-/// Non-ASCII whitespace is intentionally excluded here: [`crate::unicode_text`]'s
-/// `WHITESPACE_ANOMALY` detector already covers it.
-fn detect_xml_whitespace_runs(xml: &str) -> Option<(usize, usize, usize)> {
-    let mut in_text = false;
-    let mut runs = 0usize;
-    let mut longest = 0usize;
-    let mut first: Option<usize> = None;
-    let mut run = 0usize;
-    let mut run_start = 0usize;
-    for (i, c) in xml.char_indices() {
-        match c {
-            '<' | '>' => {
-                if run >= XML_WS_RUN_MIN {
-                    runs += 1;
-                    longest = longest.max(run);
-                    first.get_or_insert(run_start);
-                }
-                run = 0;
-                in_text = c == '>';
+struct DecodedXml {
+    source: String,
+    text: String,
+    attributes: String,
+    truncated: bool,
+}
+
+/// Small bounded XML tokenizer, not a renderer. No DTD or named entity lookup.
+/// Only predefined/numeric references and BOM-marked UTF-16 are supported.
+fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
+    let utf16 = bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]);
+    let source = if utf16 {
+        if !bytes.len().is_multiple_of(2) {
+            return Err("xml_encoding_invalid");
+        }
+        let little = bytes[0] == 0xff;
+        let units = bytes[2..].as_chunks::<2>().0.iter().map(|b| {
+            if little {
+                u16::from_le_bytes([b[0], b[1]])
+            } else {
+                u16::from_be_bytes([b[0], b[1]])
             }
-            ' ' | '\t' if in_text => {
-                if run == 0 {
-                    run_start = i;
+        });
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|_| "xml_encoding_invalid")?
+    } else {
+        std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
+            .map_err(|_| "xml_encoding_unsupported")?
+            .to_string()
+    };
+    if !source.chars().all(xml_character) {
+        return Err("xml_character_invalid");
+    }
+    // XML line-ending normalization applies to source literals, not references.
+    let source = if source.contains('\r') {
+        let mut normalized = String::with_capacity(source.len());
+        let mut chars = source.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
                 }
-                run += 1;
+                normalized.push('\n');
+            } else {
+                normalized.push(c);
             }
-            _ => run = 0,
+        }
+        normalized
+    } else {
+        source
+    };
+    let mut text = String::new();
+    let mut truncated = false;
+    let mut attributes = String::new();
+    let mut attributes_truncated = false;
+    let mut stack: Vec<&str> = Vec::new();
+    let mut root_seen = false;
+    let mut pos = 0;
+    while pos < source.len() {
+        let rest = &source[pos..];
+        if !rest.starts_with('<') {
+            let end = rest.find('<').unwrap_or(rest.len());
+            let value = &rest[..end];
+            if value.contains("]]>")
+                || (stack.is_empty() && !value.trim_matches(xml_space).is_empty())
+            {
+                return Err("xml_structure_invalid");
+            }
+            if !stack.is_empty() {
+                decode_references(value, |c| push_xml_char(&mut text, &mut truncated, c))?;
+            }
+            pos += end;
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            let end = comment.find("-->").ok_or("xml_structure_invalid")?;
+            if comment[..end].contains("--") || comment[..end].ends_with('-') {
+                return Err("xml_structure_invalid");
+            }
+            pos += 4 + end + 3;
+            continue;
+        }
+        if let Some(cdata) = rest.strip_prefix("<![CDATA[") {
+            if stack.is_empty() {
+                return Err("xml_structure_invalid");
+            }
+            let end = cdata.find("]]>").ok_or("xml_structure_invalid")?;
+            for c in cdata[..end].chars() {
+                push_xml_char(&mut text, &mut truncated, c);
+            }
+            pos += 9 + end + 3;
+            continue;
+        }
+        if rest.starts_with("<!") {
+            return Err("xml_dtd_unsupported");
+        }
+        if rest.starts_with("<?") {
+            let end = rest.find("?>").ok_or("xml_structure_invalid")?;
+            let body = &rest[2..end];
+            let target_end = body.find(xml_space).unwrap_or(body.len());
+            let target = &body[..target_end];
+            if !xml_name(target) {
+                return Err("xml_structure_invalid");
+            }
+            if target.eq_ignore_ascii_case("xml") {
+                if pos != 0 || target != "xml" {
+                    return Err("xml_structure_invalid");
+                }
+                let mut version_seen = false;
+                let mut standalone_seen = false;
+                xml_attributes(&body[target_end..], |name, value| {
+                    if name == "version" {
+                        if version_seen || standalone_seen {
+                            return Err("xml_structure_invalid");
+                        }
+                        if value != "1.0" {
+                            return Err("xml_version_unsupported");
+                        }
+                        version_seen = true;
+                    } else if !version_seen || standalone_seen {
+                        return Err("xml_structure_invalid");
+                    }
+                    if name == "encoding" {
+                        let supported = if utf16 {
+                            value.eq_ignore_ascii_case("UTF-16")
+                                || (bytes[0] == 0xff && value.eq_ignore_ascii_case("UTF-16LE"))
+                                || (bytes[0] == 0xfe && value.eq_ignore_ascii_case("UTF-16BE"))
+                        } else {
+                            value.eq_ignore_ascii_case("UTF-8")
+                        };
+                        if !supported {
+                            return Err("xml_encoding_unsupported");
+                        }
+                    }
+                    if name == "standalone" {
+                        if !matches!(value, "yes" | "no") {
+                            return Err("xml_structure_invalid");
+                        }
+                        standalone_seen = true;
+                    } else if !matches!(name, "version" | "encoding") {
+                        return Err("xml_structure_invalid");
+                    }
+                    Ok(())
+                })?;
+                if !version_seen {
+                    return Err("xml_structure_invalid");
+                }
+            }
+            pos += end + 2;
+            continue;
+        }
+        let mut quote = None;
+        let mut end = None;
+        for (i, c) in rest[1..].char_indices() {
+            match (quote, c) {
+                (Some(q), c) if q == c => quote = None,
+                (None, '\'' | '"') => quote = Some(c),
+                (None, '>') => {
+                    end = Some(i + 1);
+                    break;
+                }
+                (None, '<') => return Err("xml_structure_invalid"),
+                _ => {}
+            }
+        }
+        let end = end.ok_or("xml_structure_invalid")?;
+        let body = &rest[1..end];
+        if let Some(closing) = body.strip_prefix('/') {
+            let name = closing.trim_end_matches(xml_space);
+            if !xml_name(name) || stack.pop() != Some(name) {
+                return Err("xml_structure_invalid");
+            }
+        } else {
+            let empty = body.ends_with('/');
+            let body = if empty { &body[..body.len() - 1] } else { body };
+            let name_end = body.find(xml_space).unwrap_or(body.len());
+            let name = &body[..name_end];
+            if !xml_name(name) {
+                return Err("xml_structure_invalid");
+            }
+            xml_attributes(&body[name_end..], |_, value| {
+                if !value.is_empty()
+                    && !attributes.is_empty()
+                    && attributes.len() < unicode_text::MAX_TEXT_SCAN_BYTES
+                {
+                    push_xml_char(&mut attributes, &mut attributes_truncated, '\n');
+                }
+                decode_references(value, |c| {
+                    push_xml_char(&mut attributes, &mut attributes_truncated, c)
+                })
+            })?;
+            if stack.is_empty() {
+                if root_seen {
+                    return Err("xml_structure_invalid");
+                }
+                root_seen = true;
+            }
+            if !empty {
+                if stack.len() == 256 {
+                    return Err("xml_depth_budget");
+                }
+                stack.push(name);
+            }
+        }
+        // Separate text nodes, never invent a long run across markup.
+        if !text.is_empty()
+            && !text.ends_with('\n')
+            && text.len() < unicode_text::MAX_TEXT_SCAN_BYTES
+        {
+            push_xml_char(&mut text, &mut truncated, '\n');
+        }
+        pos += end + 1;
+    }
+    if !root_seen || !stack.is_empty() {
+        return Err("xml_structure_invalid");
+    }
+    Ok(DecodedXml {
+        source,
+        text,
+        attributes,
+        truncated: truncated || attributes_truncated,
+    })
+}
+
+fn xml_character(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+}
+
+fn xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
+}
+
+fn xml_name_start(c: char) -> bool {
+    matches!(c, ':' | '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}'
+        | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}'
+        | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}'
+        | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}'
+        | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
+}
+
+fn xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(xml_name_start)
+        && chars.all(|c| {
+            xml_name_start(c)
+                || matches!(c, '-' | '.' | '0'..='9'
+            | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}')
+        })
+}
+
+fn xml_attributes<'a>(
+    mut rest: &'a str,
+    mut visit: impl FnMut(&'a str, &'a str) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let mut names = std::collections::BTreeSet::new();
+    while !rest.is_empty() {
+        let trimmed = rest.trim_start_matches(xml_space);
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if trimmed.len() == rest.len() {
+            return Err("xml_structure_invalid");
+        }
+        let end = trimmed
+            .find(|c: char| c == '=' || xml_space(c))
+            .ok_or("xml_structure_invalid")?;
+        let name = &trimmed[..end];
+        if !xml_name(name) || !names.insert(name) {
+            return Err("xml_structure_invalid");
+        }
+        if names.len() > 1024 {
+            return Err("xml_attribute_budget");
+        }
+        rest = trimmed[end..].trim_start_matches(xml_space);
+        rest = rest
+            .strip_prefix('=')
+            .ok_or("xml_structure_invalid")?
+            .trim_start_matches(xml_space);
+        let quote = rest.chars().next().ok_or("xml_structure_invalid")?;
+        if !matches!(quote, '\'' | '"') {
+            return Err("xml_structure_invalid");
+        }
+        rest = &rest[1..];
+        let end = rest.find(quote).ok_or("xml_structure_invalid")?;
+        let value = &rest[..end];
+        if value.contains('<') {
+            return Err("xml_structure_invalid");
+        }
+        visit(name, value)?;
+        rest = &rest[end + 1..];
+    }
+    Ok(())
+}
+
+fn decode_references(value: &str, mut push: impl FnMut(char)) -> Result<(), &'static str> {
+    let mut rest = value;
+    while !rest.is_empty() {
+        if let Some(reference) = rest.strip_prefix('&') {
+            let end = reference.find(';').ok_or("xml_reference_invalid")?;
+            let name = &reference[..end];
+            let c = match name {
+                "amp" => '&',
+                "lt" => '<',
+                "gt" => '>',
+                "apos" => '\'',
+                "quot" => '"',
+                _ => {
+                    let n = if let Some(hex) = name.strip_prefix("#x") {
+                        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            return Err("xml_reference_invalid");
+                        }
+                        u32::from_str_radix(hex, 16).ok()
+                    } else if let Some(decimal) = name.strip_prefix('#') {
+                        if decimal.is_empty() || !decimal.bytes().all(|b| b.is_ascii_digit()) {
+                            return Err("xml_reference_invalid");
+                        }
+                        decimal.parse::<u32>().ok()
+                    } else {
+                        return Err("xml_entity_unsupported");
+                    };
+                    n.and_then(char::from_u32)
+                        .filter(|&c| xml_character(c))
+                        .ok_or("xml_reference_invalid")?
+                }
+            };
+            push(c);
+            rest = &reference[end + 1..];
+        } else {
+            let end = rest.find('&').unwrap_or(rest.len());
+            for c in rest[..end].chars() {
+                push(c);
+            }
+            rest = &rest[end..];
         }
     }
-    if run >= XML_WS_RUN_MIN {
-        runs += 1;
-        longest = longest.max(run);
-        first.get_or_insert(run_start);
+    Ok(())
+}
+
+fn push_xml_char(text: &mut String, truncated: &mut bool, c: char) {
+    if *truncated {
+        return;
+    }
+    if text.len() + c.len_utf8() <= unicode_text::MAX_TEXT_SCAN_BYTES {
+        text.push(c);
+    } else {
+        *truncated = true;
+    }
+}
+
+/// Long space/tab runs in decoded text; offsets count Unicode characters.
+fn detect_xml_whitespace_runs(text: &str) -> Option<(usize, usize, usize)> {
+    let mut runs = 0usize;
+    let mut longest = 0usize;
+    let mut first = None;
+    let mut run = 0usize;
+    let mut run_start = 0usize;
+    for (i, c) in text.chars().chain(std::iter::once('\n')).enumerate() {
+        if c == ' ' || c == '\t' {
+            if run == 0 {
+                run_start = i;
+            }
+            run += 1;
+        } else {
+            if run >= XML_WS_RUN_MIN {
+                runs += 1;
+                longest = longest.max(run);
+                first.get_or_insert(run_start);
+            }
+            run = 0;
+        }
     }
     first.map(|first| (runs, longest, first))
 }
@@ -932,19 +1364,55 @@ fn is_media_name(name: &str) -> bool {
 
 /// Push a finding unless the package hit [`CONTAINER_MAX_FINDINGS`]; the cap
 /// is recorded as its own finding so truncation is never silent.
-fn push_finding(findings: &mut Vec<ContainerFinding>, finding: ContainerFinding) {
-    if findings.len() >= CONTAINER_MAX_FINDINGS {
-        let exhausted = "finding budget exhausted; further findings suppressed";
-        if findings.last().is_none_or(|last| last.detail != exhausted) {
-            findings.push(ContainerFinding {
-                path: "<package>".to_string(),
-                family: ZIP_TOPOLOGY_FAMILY.to_string(),
-                detail: exhausted.to_string(),
-            });
-        }
+fn push_finding(analysis: &mut ContainerAnalysis, finding: ContainerFinding) {
+    let positive = matches!(
+        finding.family.as_str(),
+        DOC_002_FAMILY | DOC_003_FAMILY | "DOC-004"
+    );
+    analysis.detected |= positive;
+    if analysis.findings.len() < CONTAINER_MAX_FINDINGS {
+        analysis.findings.push(finding);
         return;
     }
-    findings.push(finding);
+    incomplete(analysis, "zip_finding_budget");
+    // The sentinel replaces the last display slot; detection is already latched.
+    let summary = if analysis.detected {
+        "finding budget exhausted; positive concealment evidence present; further findings suppressed"
+    } else {
+        "finding budget exhausted; further findings suppressed"
+    };
+    analysis.findings[CONTAINER_MAX_FINDINGS - 1] = ContainerFinding {
+        path: "<package>".to_string(),
+        family: ZIP_TOPOLOGY_FAMILY.to_string(),
+        detail: summary.to_string(),
+    };
+}
+
+fn incomplete(analysis: &mut ContainerAnalysis, reason: &'static str) {
+    if analysis.incomplete_reasons.len() < 16
+        && !analysis.incomplete_reasons.iter().any(|r| r == reason)
+    {
+        analysis.incomplete_reasons.push(reason.to_string());
+    }
+}
+
+fn zip_reason(error: &OoxmlError) -> &'static str {
+    match error {
+        OoxmlError::TooManyEntries { .. } => "zip_entry_count_budget",
+        OoxmlError::EntryNameTooLong { .. } => "zip_name_budget",
+        OoxmlError::InflateBudgetExceeded { .. } => "zip_entry_budget",
+        OoxmlError::InflateTotalBudgetExceeded { .. } => "zip_total_budget",
+        OoxmlError::EncryptedEntry { .. } => "zip_encrypted_entry",
+        OoxmlError::UnsupportedCompressionMethod { .. } => "zip_compression_unsupported",
+        OoxmlError::UnsupportedFeature {
+            feature: "multi_disk",
+        } => "zip_multi_disk_unsupported",
+        OoxmlError::UnsupportedFeature {
+            feature: "data_descriptor",
+        } => "zip_descriptor_unsupported",
+        OoxmlError::UnsupportedFeature { .. } => "zip_feature_unsupported",
+        _ => "zip_corrupt",
+    }
 }
 
 /// Bound a detail string to [`DETAIL_MAX_BYTES`] bytes at a char boundary.
@@ -983,7 +1451,7 @@ mod tests {
     /// implementation (no new dependencies).
     struct ZipBuilder {
         entries: Vec<EntrySpec>,
-        central_lies: HashMap<String, (Option<u32>, Option<u32>)>,
+        central_lies: BTreeMap<String, (Option<u32>, Option<u32>)>,
         encrypted: Vec<String>,
     }
 
@@ -991,7 +1459,7 @@ mod tests {
         fn new() -> Self {
             ZipBuilder {
                 entries: Vec::new(),
-                central_lies: HashMap::new(),
+                central_lies: BTreeMap::new(),
                 encrypted: Vec::new(),
             }
         }
@@ -1226,7 +1694,7 @@ mod tests {
                 name: "secret.txt".to_string()
             })
         );
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings
             .iter()
             .any(|f| f.family == DOC_001_FAMILY && f.path == "secret.txt"));
@@ -1261,7 +1729,7 @@ mod tests {
                 ..
             })
         ));
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_001_FAMILY
             && f.path == "bomb.bin"
             && f.detail.contains("inflate budget")));
@@ -1270,7 +1738,7 @@ mod tests {
     #[test]
     fn lying_small_claim_cannot_overallocate() {
         // Claim 16 bytes; the actual deflate stream inflates to far more.
-        // The budgeted read must stay bounded (take cap) and never panic.
+        // Local/central disagreement is rejected before decompression.
         let big = vec![0xABu8; 64 * 1024];
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&big).expect("deflate write");
@@ -1282,17 +1750,16 @@ mod tests {
             .build();
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("bomb.bin").expect("entry");
-        match archive.read_entry(entry, &mut 0) {
-            Ok(data) => assert_eq!(data.len(), 16),
-            Err(OoxmlError::InflateSizeMismatch { .. }) => {}
-            Err(other) => panic!("unexpected error: {other:?}"),
-        }
+        assert!(matches!(
+            archive.read_entry(entry, &mut 0),
+            Err(OoxmlError::LocalHeaderMismatch { .. })
+        ));
     }
 
     #[test]
     fn clean_docx_produces_no_concealment_findings() {
         let bytes = docx("Hello world");
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == ZIP_TOPOLOGY_FAMILY));
         assert!(findings_with_family(&findings, DOC_001_FAMILY).is_empty());
         assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
@@ -1302,7 +1769,7 @@ mod tests {
     fn laced_docx_document_xml_triggers_doc_002() {
         let laced = "Hello\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} world";
         let bytes = docx(laced);
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         let doc002 = findings_with_family(&findings, DOC_002_FAMILY);
         assert_eq!(doc002.len(), 1);
         assert!(doc002[0].detail.contains("ZERO_WIDTH"));
@@ -1313,7 +1780,7 @@ mod tests {
     fn whitespace_run_in_text_node_triggers_doc_002() {
         let spaced = format!("Hello{}", " ".repeat(12));
         let bytes = docx(&spaced);
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         let doc002 = findings_with_family(&findings, DOC_002_FAMILY);
         // The unicode_text WHITESPACE_ANOMALY channel and the XML text-node
         // run detector can both fire for the same run; require the
@@ -1362,11 +1829,11 @@ mod tests {
 
     #[test]
     fn clean_pptx_and_xlsx_produce_no_extended_findings() {
-        let findings = analyze_package(&pptx("Hello", None, None));
+        let findings = analyze_package(&pptx("Hello", None, None)).findings;
         assert!(findings_with_family(&findings, DOC_003_FAMILY).is_empty());
         assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
 
-        let findings = analyze_package(&xlsx("Shared text", "Sheet text"));
+        let findings = analyze_package(&xlsx("Shared text", "Sheet text")).findings;
         assert!(findings_with_family(&findings, DOC_003_FAMILY).is_empty());
         assert!(findings_with_family(&findings, DOC_002_FAMILY).is_empty());
     }
@@ -1374,7 +1841,7 @@ mod tests {
     #[test]
     fn laced_pptx_slide_triggers_doc_003() {
         let laced = "Hello\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} world";
-        let findings = analyze_package(&pptx(laced, None, None));
+        let findings = analyze_package(&pptx(laced, None, None)).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert!(doc003[0].detail.contains("ZERO_WIDTH"));
@@ -1384,7 +1851,7 @@ mod tests {
     #[test]
     fn laced_pptx_notes_trigger_doc_003() {
         let laced = "Note\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
-        let findings = analyze_package(&pptx("Clean", Some(laced), None));
+        let findings = analyze_package(&pptx("Clean", Some(laced), None)).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert_eq!(doc003[0].path, "ppt/notesSlides/notesSlide1.xml");
@@ -1393,7 +1860,7 @@ mod tests {
     #[test]
     fn presentation_placeholder_markup_is_reported() {
         let presentation = "<p:presentation><p:hf ftr=\"1\" sldNum=\"1\"/></p:presentation>";
-        let findings = analyze_package(&pptx("Clean", None, Some(presentation)));
+        let findings = analyze_package(&pptx("Clean", None, Some(presentation))).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert_eq!(doc003[0].path, PPT_PRESENTATION);
@@ -1403,7 +1870,7 @@ mod tests {
     #[test]
     fn laced_xlsx_shared_strings_trigger_doc_003() {
         let laced = "Shared\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
-        let findings = analyze_package(&xlsx(laced, "Clean"));
+        let findings = analyze_package(&xlsx(laced, "Clean")).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert!(doc003[0].detail.contains("ZERO_WIDTH"));
@@ -1413,7 +1880,7 @@ mod tests {
     #[test]
     fn laced_xlsx_sheet_triggers_doc_003() {
         let laced = "Cell\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c}\u{200b}\u{200c} text";
-        let findings = analyze_package(&xlsx("Clean", laced));
+        let findings = analyze_package(&xlsx("Clean", laced)).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert_eq!(doc003[0].path, "xl/worksheets/sheet1.xml");
@@ -1430,7 +1897,7 @@ mod tests {
                 format!("<w:hdr><w:p><w:r><w:t>{laced}</w:t></w:r></w:p></w:hdr>").as_bytes(),
             )
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
         assert!(doc003[0].detail.contains("ZERO_WIDTH"));
@@ -1446,7 +1913,7 @@ mod tests {
             .add_stored(WORD_DOCUMENT, document_xml("ok").as_bytes())
             .add_stored("word/media/dropper.exe", b"MZ binary")
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_003_FAMILY
             && f.path == "word/media/dropper.exe"
             && f.detail.contains("executable/script extension")));
@@ -1459,7 +1926,7 @@ mod tests {
             .add_stored(PPT_PRESENTATION, b"<p:presentation/>")
             .add_stored("ppt/media/blob.dat", b"opaque bytes")
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_003_FAMILY
             && f.path == "ppt/media/blob.dat"
             && f.detail.contains("unrecognized media extension")));
@@ -1475,7 +1942,7 @@ mod tests {
             .add_deflated("ppt/slides/slide1.xml", b"tiny")
             .lie_sizes("ppt/slides/slide1.xml", None, Some(0x7FFF_FFFF))
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_001_FAMILY
             && f.path == "ppt/slides/slide1.xml"
             && f.detail.contains("inflate budget")));
@@ -1487,7 +1954,7 @@ mod tests {
         let bytes = ZipBuilder::new()
             .add_stored("notes/readme.txt", b"plain notes")
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].family, ZIP_TOPOLOGY_FAMILY);
         assert!(findings[0].detail.contains("office family: none"));
@@ -1500,7 +1967,7 @@ mod tests {
             .add_stored(WORD_DOCUMENT, document_xml("ok").as_bytes())
             .add_stored("word/media/image1.txt", b"not really an image")
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_001_FAMILY
             && f.path == "word/media/image1.txt"
             && f.detail.contains("text-like")));
@@ -1512,7 +1979,7 @@ mod tests {
             .add_stored("dup.bin", b"one")
             .add_stored("dup.bin", b"two")
             .build();
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert!(findings.iter().any(|f| f.family == DOC_001_FAMILY
             && f.detail.contains("duplicate entry name: dup.bin (x2)")));
     }
@@ -1524,7 +1991,7 @@ mod tests {
         let len = bytes.len();
         bytes[len - 2] = 0xFF;
         bytes[len - 1] = 0xFF;
-        let findings = analyze_package(&bytes);
+        let findings = analyze_package(&bytes).findings;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].family, DOC_001_FAMILY);
         assert!(findings[0].detail.contains("package rejected"));
@@ -1547,7 +2014,7 @@ mod tests {
         let entry = archive.find("b.txt").expect("entry");
         assert!(matches!(
             archive.read_entry(entry, &mut 0),
-            Err(OoxmlError::InflateSizeMismatch { claimed: 9999, .. })
+            Err(OoxmlError::LocalHeaderMismatch { .. })
         ));
     }
 
@@ -1561,5 +2028,350 @@ mod tests {
             ZipArchive::parse(&bytes),
             Err(OoxmlError::EntryNameTooLong { .. })
         ));
+    }
+    #[test]
+    fn eocd_signatures_in_comments_are_data_not_headers() {
+        // Exact valid 26-byte crash reproducer from F01.
+        let mut exact = b"PK\x05\x06".to_vec();
+        exact.extend_from_slice(&[0; 16]);
+        exact.extend_from_slice(b"\x04\x00PK\x05\x06");
+        assert_eq!(exact.len(), 26);
+        assert!(ZipArchive::parse(&exact).unwrap().entries().is_empty());
+        let result = analyze_package(&exact);
+        assert!(!result.detected);
+        assert!(result.incomplete_reasons.is_empty());
+        assert!(!crate::forensics::scan_bytes(&exact).detected);
+        for trailing in 0..21 {
+            let mut bytes = ZipBuilder::new().build();
+            bytes[20..22].copy_from_slice(&((4 + trailing) as u16).to_le_bytes());
+            bytes.extend_from_slice(b"PK\x05\x06");
+            bytes.extend(std::iter::repeat_n(0, trailing));
+            assert!(ZipArchive::parse(&bytes).is_ok());
+        }
+    }
+
+    #[test]
+    fn split_and_descriptor_archives_are_typed_unsupported() {
+        let mut bytes = ZipBuilder::new().build();
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
+        assert!(matches!(
+            ZipArchive::parse(&bytes),
+            Err(OoxmlError::UnsupportedFeature {
+                feature: "multi_disk"
+            })
+        ));
+        assert_eq!(
+            analyze_package(&bytes).incomplete_reasons,
+            ["zip_multi_disk_unsupported"]
+        );
+        let mut bytes = ZipBuilder::new().add_stored("x", b"x").build();
+        let cd = read_u32(&bytes, bytes.len() - 6) as usize;
+        bytes[cd + 8..cd + 10].copy_from_slice(&8u16.to_le_bytes());
+        assert!(matches!(
+            ZipArchive::parse(&bytes),
+            Err(OoxmlError::UnsupportedFeature {
+                feature: "data_descriptor"
+            })
+        ));
+    }
+
+    #[test]
+    fn huge_local_offsets_and_local_central_disagreements_reject() {
+        let base = ZipBuilder::new().add_stored("x", b"data").build();
+        let cd = read_u32(&base, base.len() - 6) as usize;
+        let mut huge = base.clone();
+        huge[cd + 42..cd + 46].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
+        let archive = ZipArchive::parse(&huge).unwrap();
+        assert!(matches!(
+            archive.read_entry(&archive.entries()[0], &mut 0),
+            Err(OoxmlError::LocalHeaderCorrupt { .. })
+        ));
+        for field in [6, 8, 14, 18, 22, 30] {
+            let mut bytes = base.clone();
+            bytes[field] ^= 1;
+            let archive = ZipArchive::parse(&bytes).unwrap();
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[0], &mut 0),
+                Err(OoxmlError::LocalHeaderMismatch { .. })
+            ));
+        }
+        let mut bytes = base;
+        bytes[31] ^= 1; // content corruption, not header corruption
+        let archive = ZipArchive::parse(&bytes).unwrap();
+        assert!(matches!(
+            archive.read_entry(&archive.entries()[0], &mut 0),
+            Err(OoxmlError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn deflate_requires_exact_size_and_stream_completion_even_for_zero_claim() {
+        for claimed in [0, 16] {
+            let mut bytes = ZipBuilder::new()
+                .add_deflated("x", &[b'A'; 65536])
+                .lie_sizes("x", None, Some(claimed))
+                .build();
+            // Make local and central agree: the decompressor must reject the lie.
+            bytes[22..26].copy_from_slice(&claimed.to_le_bytes());
+            let archive = ZipArchive::parse(&bytes).unwrap();
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[0], &mut 0),
+                Err(OoxmlError::InflateSizeMismatch { .. })
+            ));
+        }
+        assert!(matches!(
+            inflate_raw(&[], "x", 0),
+            Err(OoxmlError::InflateFailed { .. })
+        ));
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"complete").unwrap();
+        let raw = encoder.finish().unwrap();
+        assert_eq!(inflate_raw(&raw, "x", 8).unwrap(), b"complete");
+        assert!(inflate_raw(&raw[..raw.len() - 1], "x", 8).is_err());
+        let mut extra = raw;
+        extra.push(0);
+        assert!(inflate_raw(&extra, "x", 8).is_err());
+    }
+
+    #[test]
+    fn stored_and_deflated_entry_and_total_budgets_match() {
+        let data = vec![b'A'; CONTAINER_MAX_INFLATE_PER_ENTRY + 1];
+        for deflated in [false, true] {
+            let builder = ZipBuilder::new();
+            let bytes = if deflated {
+                builder.add_deflated("x", &data)
+            } else {
+                builder.add_stored("x", &data)
+            }
+            .build();
+            let archive = ZipArchive::parse(&bytes).unwrap();
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[0], &mut 0),
+                Err(OoxmlError::InflateBudgetExceeded { .. })
+            ));
+            let data = &data[..CONTAINER_MAX_INFLATE_PER_ENTRY];
+            let mut builder = ZipBuilder::new();
+            for name in ["x", "y", "z"] {
+                builder = if deflated {
+                    builder.add_deflated(name, data)
+                } else {
+                    builder.add_stored(name, data)
+                };
+            }
+            let bytes = builder.build();
+            let archive = ZipArchive::parse(&bytes).unwrap();
+            let mut total = 0;
+            for entry in &archive.entries()[..2] {
+                archive.read_entry(entry, &mut total).unwrap();
+            }
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[2], &mut total),
+                Err(OoxmlError::InflateTotalBudgetExceeded { .. })
+            ));
+            assert_eq!(total, CONTAINER_MAX_INFLATE_TOTAL);
+            let mut overflowing_total = usize::MAX;
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[0], &mut overflowing_total),
+                Err(OoxmlError::InflateTotalBudgetExceeded { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn main_and_extended_parts_share_the_package_budget() {
+        let xml = format!("<r>{}</r>", "x".repeat(CONTAINER_MAX_INFLATE_PER_ENTRY - 7));
+        for deflated in [false, true] {
+            let mut builder =
+                ZipBuilder::new().add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes());
+            for name in [WORD_DOCUMENT, "word/header1.xml", "word/footer1.xml"] {
+                builder = if deflated {
+                    builder.add_deflated(name, xml.as_bytes())
+                } else {
+                    builder.add_stored(name, xml.as_bytes())
+                };
+            }
+            let result = analyze_package(&builder.build());
+            assert!(result
+                .incomplete_reasons
+                .iter()
+                .any(|r| r == "zip_total_budget"));
+            assert!(result
+                .incomplete_reasons
+                .iter()
+                .any(|r| r == "xml_text_budget"));
+            assert!(!result.detected);
+        }
+    }
+
+    #[test]
+    fn xml_literal_reference_cdata_and_utf16_channels_agree() {
+        for body in [
+            "A\u{200b}B",
+            "A&#x200B;B",
+            "A&#8203;B",
+            "<![CDATA[A\u{200b}B]]>",
+        ] {
+            let result = analyze_package(&docx(body));
+            assert!(result.detected);
+            assert!(result.incomplete_reasons.is_empty());
+            assert!(result.findings.iter().any(|f| f.family == DOC_002_FAMILY
+                && f.detail.contains("ZERO_WIDTH")
+                && f.detail.contains("offsets 1")));
+        }
+        for little in [false, true] {
+            let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><r>A&#x200B;B</r>";
+            let mut bytes = if little {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in xml.encode_utf16() {
+                bytes.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            let package = ZipBuilder::new()
+                .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+                .add_stored(WORD_DOCUMENT, &bytes)
+                .build();
+            let result = analyze_package(&package);
+            assert!(result.detected);
+            assert!(result.incomplete_reasons.is_empty());
+        }
+        for body in ["A&amp;B", "A&lt;B", "A&gt;B", "A&apos;B", "A&quot;B"] {
+            assert!(!analyze_package(&docx(body)).detected);
+        }
+    }
+
+    #[test]
+    fn xml_spaces_offsets_and_unsupported_syntax_are_honest() {
+        for body in ["é        B", "é        "] {
+            let result = analyze_package(&docx(body));
+            assert!(result
+                .findings
+                .iter()
+                .any(|f| f.detail.contains("whitespace runs") && f.detail.contains("offset 1")));
+        }
+        for (xml, reason) in [
+            (
+                "<!DOCTYPE r [<!ENTITY x SYSTEM 'file:///secret'>]><r>&x;</r>",
+                "xml_dtd_unsupported",
+            ),
+            ("<r>&undefined;</r>", "xml_entity_unsupported"),
+            ("<r>&#xD800;</r>", "xml_reference_invalid"),
+            ("<r><s></r>", "xml_structure_invalid"),
+            (
+                "<?xml version='1.0' encoding='ISO-8859-1'?><r/>",
+                "xml_encoding_unsupported",
+            ),
+        ] {
+            let package = ZipBuilder::new()
+                .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+                .add_stored(WORD_DOCUMENT, xml.as_bytes())
+                .build();
+            let result = analyze_package(&package);
+            assert!(!result.detected);
+            assert!(result.incomplete_reasons.iter().any(|r| r == reason));
+        }
+    }
+
+    #[test]
+    fn duplicate_main_parts_are_all_examined_and_positive_survives_finding_cap() {
+        let duplicate = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(WORD_DOCUMENT, b"<r>clean</r>")
+            .add_stored(WORD_DOCUMENT, "<r>A\u{200b}B</r>".as_bytes())
+            .build();
+        let result = analyze_package(&duplicate);
+        assert!(result.detected);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|r| r == "zip_duplicate_name"));
+        for observations in [62, 63, 64, 65] {
+            let mut builder = ZipBuilder::new()
+                .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+                .add_deflated(WORD_DOCUMENT, "<r>A\u{200b}B</r>".as_bytes());
+            for i in 0..observations {
+                builder = builder.add_stored(&format!("word/media/{i}.txt"), b"");
+            }
+            let result = analyze_package(&builder.build());
+            assert!(result.detected);
+            assert!(result.findings.len() <= CONTAINER_MAX_FINDINGS);
+            if observations >= 63 {
+                assert!(result
+                    .incomplete_reasons
+                    .iter()
+                    .any(|r| r == "zip_finding_budget"));
+                assert!(result.findings.last().unwrap().detail.contains("positive"));
+            }
+        }
+    }
+    #[test]
+    fn attribute_references_preserve_existing_unicode_channel_coverage() {
+        for value in ["A\u{200b}B", "A&#x200B;B", "A&#8203;B"] {
+            let xml = format!("<r hidden='{value}'>visible</r>");
+            let package = ZipBuilder::new()
+                .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+                .add_stored(WORD_DOCUMENT, xml.as_bytes())
+                .build();
+            let result = analyze_package(&package);
+            assert!(result.detected);
+            assert!(result.incomplete_reasons.is_empty());
+            assert!(result
+                .findings
+                .iter()
+                .any(|f| f.detail.contains("XML attribute values")
+                    && f.detail.contains("ZERO_WIDTH")));
+        }
+    }
+
+    #[test]
+    fn corrupt_read_attempts_consume_the_shared_output_reservation() {
+        let data = vec![b'x'; CONTAINER_MAX_INFLATE_PER_ENTRY];
+        let mut bytes = ZipBuilder::new().add_stored("x", &data).build();
+        bytes[31] ^= 1;
+        let archive = ZipArchive::parse(&bytes).unwrap();
+        let mut total = 0;
+        for _ in 0..2 {
+            assert!(matches!(
+                archive.read_entry(&archive.entries()[0], &mut total),
+                Err(OoxmlError::ChecksumMismatch { .. })
+            ));
+        }
+        assert!(matches!(
+            archive.read_entry(&archive.entries()[0], &mut total),
+            Err(OoxmlError::InflateTotalBudgetExceeded { .. })
+        ));
+    }
+    #[test]
+    fn complete_fake_eocd_in_a_comment_cannot_erase_the_real_document() {
+        let mut bytes = docx("A\u{200b}B");
+        let end = bytes.len();
+        bytes[end - 2..end].copy_from_slice(&22u16.to_le_bytes());
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0; 18]);
+        let result = analyze_package(&bytes);
+        assert!(result.detected);
+        assert!(result.incomplete_reasons.is_empty());
+    }
+
+    #[test]
+    fn exact_decoded_text_cap_is_complete_but_a_later_character_is_partial() {
+        for extra in [0, 1] {
+            let text = "x".repeat(unicode_text::MAX_TEXT_SCAN_BYTES + extra);
+            let result = analyze_package(&docx(&text));
+            assert!(!result.detected);
+            assert_eq!(
+                result
+                    .incomplete_reasons
+                    .iter()
+                    .any(|r| r == "xml_text_budget"),
+                extra != 0
+            );
+        }
     }
 }

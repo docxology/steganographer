@@ -35,13 +35,13 @@ framerate = 30
 opacity = 1.0
 
 [video.pipeline.payload]
-# Payload type embedded per frame: "signature" (default) | "custom"
+# Live signing supports the fixed signature payload only.
 type = "signature"
 # Payload size in bytes. Default: 109 (4 magic + 1 version + 8 frame_index + 32 hash + 64 signature)
 size = 109
-# Signing backend: "ed25519" (default, BLAKE3+Ed25519) | "ethereum" (Keccak-256+secp256k1 EIP-191)
+# Live signing backend: "ed25519". Other backends are separate core APIs.
 signing_backend = "ed25519"
-# Enable payload encryption (ChaCha20-Poly1305 AEAD).
+# Encryption/ECC/spreading below are offline encode options, not live composition.
 # encrypt = true
 # Encryption key (hex-encoded 32 bytes = 64 hex chars).
 # encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -49,30 +49,30 @@ signing_backend = "ed25519"
 # encryption_key_file = "keys/encryption.key"
 # Error correction: "none" (default) | "reed_solomon"
 # error_correction = "reed_solomon"
-# Multi-frame signature spreading: spread one signature across N frames (1 = no spreading).
+# Offline RGB LSB spreading: one signature across 2–8 frames; 1 disables spreading.
 # multi_frame_spread = 1
 
 [video.input]
-type = "device"
+type = "test" # Set "device" plus a backend to open capture hardware.
 # backend = "v4l2"
 # device = "/dev/video0"
 # backend = "avfoundation"
-# device = "FaceTime HD Camera"
+# device = "0" # avfoundation device-index; not a camera name
 # type = "file"
-# path = "input_video.raw"
+# path = "input_video.mkv"
 
 [video.output]
 type = "device"
 # backend = "v4l2loopback"
 # device = "/dev/video42"
 # type = "file"
-# path = "output_video.raw"
+# path = "output_video.mkv" # exact RGB Matroska; new file only
 
 [video.stego]
-# Ordered list of stego modules applied per frame.
-# Available: "lsb_signature", "overlay", "info_bar"
-# Order matters: LSB embeds first, overlay/info_bar render on top.
-pipeline = ["lsb_signature", "overlay", "info_bar"]
+# Signed live output uses exactly one invisible kernel.
+# Overlay and info_bar are available separately; composing them with signed LSB
+# is rejected because rendering can invalidate the delivered signature.
+pipeline = ["lsb_signature"]
 
 [video.stego.lsb_signature]
 # Number of least-significant bits to use per pixel byte (1–4).
@@ -103,18 +103,18 @@ show_timestamp = true
 [audio]
 
 [audio.input]
-type = "device"
+type = "test" # Set "device" plus a backend to open capture hardware.
 # backend = "pulseaudio"
 # backend = "pipewire"
 # backend = "coreaudio"
 # type = "file"
-# path = "input_audio.raw"
+# path = "input_audio.wav"
 
 [audio.output]
 type = "device"
 # backend = "pulseaudio"
 # type = "file"
-# path = "output_audio.raw"
+# path = "output_audio.wav" # whole selected PCM signed once; new file only
 
 [audio.stego]
 pipeline = ["lsb_signature"]
@@ -123,7 +123,7 @@ pipeline = ["lsb_signature"]
 # Number of LSBs per 16-bit audio sample (1–4).
 bits = 1
 # 32-byte hex-encoded key for pseudo-random sample index permutation.
-# Each frame uses: seed = key XOR frame_index → ChaCha8 PRNG → Fisher-Yates shuffle.
+# Each frame derives a keyed, constant-memory Feistel placement schedule.
 key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 # Alternatively, load key from file:
 # key_file = "keys/audio_stego.key"
@@ -135,11 +135,12 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 # Entirely disabled unless enabled = true.
 # [ots]
 # enabled = false
-# server_url = "https://opentimestamps.org"
-# method = "bitcoin"              # "bitcoin" | "ethereum"
+# server_url = "https://alice.btc.calendar.opentimestamps.org"
+# method = "bitcoin"              # Bitcoin only
 # interval_secs = 300             # minimum seconds between stamps
 # proof_dir = "ots_proofs"        # directory for .ots proof files
 # timeout_secs = 30               # HTTP request timeout
+# bitcoin_explorer_url = "https://blockstream.info/api" # trusted canonical-chain provider
 
 # ─── Packet Decode Limits (optional) ─────────────────────────────────────────
 #

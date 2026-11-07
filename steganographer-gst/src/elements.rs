@@ -4,17 +4,18 @@
 //! embedding mutates only LSB sample slots, so buffers stay the same size
 //! and caps never change. Wire format matches the sequential spatial-LSB
 //! carrier paths in steganographer-core (`carrier::SpatialLsb`), so output
-//! verifies with the existing `packet extract` CLI command and the same
+//! decodes with the existing `decode` CLI command and the same
 //! bits-per-unit setting.
 //!
 //! Element behavior:
-//! - `packet-hex`: pre-encoded generic packet bytes (hex). When set, every
-//!   frame is embedded with the packet (fresh frames re-embed; the packet
-//!   overwrites the same leading slots so extraction from any frame works).
-//! - `clear-payload`: when true and `packet-hex` is set, embedded bytes are
-//!   cleared from the first `packet_len` units of every frame after the
-//!   frame carrying the packet (single-frame delivery).
+//! - `packet-hex`: pre-encoded generic packet bytes (hex). Fresh frames
+//!   re-embed the packet unless single-delivery mode is selected.
+//! - `clear-payload`: sequential mode delivers each replacement packet once
+//!   per stream, then clears its sequential LSB footprint on later frames.
+//!   Keyed mode warns and continues re-embedding instead of claiming erasure.
 //! - When no packet is set, buffers pass through untouched.
+//! - Malformed packets and descriptor/configuration mismatches fail the
+//!   pipeline; insufficient-capacity frames remain warned skips.
 //! - Pad templates are restricted to packed one-plane `video/x-raw` formats
 //!   (RGB/BGR/RGBx/BGRx/XRGB/XBGR): negotiation fails loudly for anything
 //!   else. The runtime allowlist in `transform_ip` stays as a backstop.
@@ -30,12 +31,16 @@ use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::base_transform::BaseTransformImpl;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_base::BaseTransform;
-use gstreamer_video::VideoFormat;
-use gstreamer_video::VideoInfo;
-use steganographer_core::carrier::{CarrierEmbedder, EmbeddingConfig, KeyedSpatialLsb, SpatialLsb};
+use gstreamer_video::{VideoFormat, VideoFrameExt, VideoFrameRef, VideoInfo};
+use std::sync::Arc;
+use steganographer_core::carrier::{
+    CarrierEmbedder, CarrierError, EmbeddingConfig, KeyedSpatialLsb, SpatialLsb,
+};
+use steganographer_core::crypto::{decode_hex, encode_hex};
 use steganographer_core::kdf::derive_frame_embedding_key;
 mod imp {
     use super::*;
+    use gstreamer_base::subclass::base_transform::BaseTransformImplExt;
 
     /// One-shot warning flags, keyed by reason: the first occurrence of each
     /// reason warns, later occurrences stay silent.
@@ -65,26 +70,20 @@ mod imp {
         }
     }
 
-    /// Property-driven streaming parameters plus per-stream progress
-    /// counters, under one lock so a property write cannot interleave with a
-    /// `transform_ip` snapshot (stale counters, half-updated key/packet/bits).
-    ///
-    /// Streaming-order note: property changes apply at *frame granularity*.
-    /// Each in-flight frame works on the snapshot taken when it arrived; the
-    /// next frame after a `key-hex` or `bits-per-unit` change sees the new
-    /// value with the progress counters reset (it is treated as frame 0 and,
-    /// in keyed mode, embedded with the raw key). Keyed mode therefore
-    /// expects `key-hex` to be set before the pipeline reaches PLAYING, so
-    /// frame 0 is embedded with the raw key and decodes via the CLI
-    /// `--embedding-key` path.
+    /// Frame snapshots own immutable packet bytes. Placement generations guard
+    /// completion against key/bits/lifecycle resets; payload generations guard
+    /// one-shot delivery without restarting the keyed frame timeline.
     #[derive(Clone)]
     struct StreamState {
-        packet: Option<Vec<u8>>,
+        packet: Option<Arc<[u8]>>,
         key: Option<[u8; 32]>,
         bits_per_unit: u8,
         clear_payload: bool,
         /// Frames that already carried the full packet.
         embedded_frames: u64,
+        generation: u64,
+        payload_generation: u64,
+        payload_delivered: bool,
         /// Frames skipped (format or capacity limits); warned once per reason.
         skipped_frames: u64,
         warned: WarnFlags,
@@ -98,6 +97,9 @@ mod imp {
                 bits_per_unit: 1,
                 clear_payload: false,
                 embedded_frames: 0,
+                generation: 0,
+                payload_generation: 0,
+                payload_delivered: false,
                 skipped_frames: 0,
                 warned: WarnFlags::default(),
             }
@@ -118,9 +120,27 @@ mod imp {
         /// Reset per-stream progress after a property change that alters the
         /// placement or wire format: the next frame starts from frame 0.
         fn reset_progress(&mut self) {
+            self.generation = self.generation.wrapping_add(1);
+            self.payload_delivered = false;
             self.embedded_frames = 0;
             self.skipped_frames = 0;
             self.warned = WarnFlags::default();
+        }
+
+        fn replace_packet(&mut self, packet: Option<Arc<[u8]>>) {
+            self.packet = packet;
+            self.payload_generation = self.payload_generation.wrapping_add(1);
+            self.payload_delivered = false;
+        }
+
+        fn complete(&mut self, snapshot: &Self, delivered: bool) {
+            if self.generation != snapshot.generation {
+                return;
+            }
+            self.embedded_frames = self.embedded_frames.saturating_add(1);
+            if delivered && self.payload_generation == snapshot.payload_generation {
+                self.payload_delivered = true;
+            }
         }
     }
 
@@ -181,7 +201,8 @@ mod imp {
                                 "key-hex cleared; sequential placement from the next frame"
                             );
                         }
-                    } else if let Some(key) = decode_key(&hex) {
+                    } else if let Some(key) = decode_hex(&hex).ok().and_then(|b| b.try_into().ok())
+                    {
                         if stream.key != Some(key) {
                             stream.key = Some(key);
                             stream.reset_progress();
@@ -202,9 +223,9 @@ mod imp {
                             imp = self,
                             "packet-hex cleared; embedding disabled"
                         );
-                        self.stream.lock().packet = None;
-                    } else if let Some(bytes) = decode_hex_fixed(&hex, hex.len() / 2) {
-                        self.stream.lock().packet = Some(bytes);
+                        self.stream.lock().replace_packet(None);
+                    } else if let Ok(bytes) = decode_hex(&hex) {
+                        self.stream.lock().replace_packet(Some(bytes.into()));
                     } else {
                         gstreamer::warning!(
                             gstreamer::CAT_DEFAULT,
@@ -231,13 +252,13 @@ mod imp {
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
                 "key-hex" => match self.stream.lock().key {
-                    Some(key) => hex_encode(key).to_value(),
+                    Some(key) => encode_hex(&key).to_value(),
                     None => String::new().to_value(),
                 },
                 "packet-hex" => {
                     let stream = self.stream.lock();
                     match stream.packet.as_deref() {
-                        Some(bytes) => hex_encode_slice(bytes).to_value(),
+                        Some(bytes) => encode_hex(bytes).to_value(),
                         None => String::new().to_value(),
                     }
                 }
@@ -320,6 +341,18 @@ mod imp {
         const PASSTHROUGH_ON_SAME_CAPS: bool = false;
         const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
+        fn start(&self) -> Result<(), gstreamer::ErrorMessage> {
+            self.parent_start()?;
+            self.stream.lock().reset_progress();
+            Ok(())
+        }
+
+        fn stop(&self) -> Result<(), gstreamer::ErrorMessage> {
+            self.stream.lock().reset_progress();
+            *self.info.lock() = None;
+            self.parent_stop()
+        }
+
         fn set_caps(
             &self,
             incaps: &gstreamer::Caps,
@@ -335,10 +368,18 @@ mod imp {
             &self,
             buf: &mut gstreamer::BufferRef,
         ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
-            // One short lock: snapshot the streaming parameters for this
-            // frame so a concurrent property write cannot split the
-            // packet/key/bits triple or the frame counter across the embed.
+            // Completion is conditional on this snapshot's generations.
             let snap = self.stream.lock().clone();
+            self.transform_snapshot(buf, snap)
+        }
+    }
+
+    impl StegoVideo {
+        fn transform_snapshot(
+            &self,
+            buf: &mut gstreamer::BufferRef,
+            snap: StreamState,
+        ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
             let Some(packet_bytes) = snap.packet.as_deref() else {
                 return Ok(gstreamer::FlowSuccess::Ok);
             };
@@ -374,37 +415,39 @@ mod imp {
                 return Ok(gstreamer::FlowSuccess::Ok);
             };
 
-            let stride_bytes = info.stride()[0] as usize;
-            let row_units = info.width() as usize * bpp;
-            let height = info.height() as usize;
-            if stride_bytes == 0 || stride_bytes < row_units {
-                gstreamer::warning!(
-                    gstreamer::CAT_PERFORMANCE,
-                    imp = self,
-                    "plane stride {stride_bytes} smaller than one pixel row {row_units}; passing buffer through"
-                );
-                return Ok(gstreamer::FlowSuccess::Ok);
-            }
-
-            let mut map = buf.map_writable().map_err(|e| {
+            let mut frame = VideoFrameRef::from_buffer_ref_writable(buf, &info).map_err(|e| {
                 gstreamer::error!(
                     gstreamer::CAT_DEFAULT,
                     imp = self,
-                    "failed to map buffer writable: {e}"
+                    "failed to map writable video frame: {e}"
                 );
                 gstreamer::FlowError::Error
             })?;
-            let data = map.as_mut_slice();
-            if data.len() < stride_bytes * height {
+            // GstVideoFrame incorporates the actual buffer's VideoMeta offset
+            // and stride. Reject negative/overflowing layouts before obtaining
+            // a plane slice (whose dependency implementation uses stride * h).
+            let stride_bytes = usize::try_from(frame.plane_stride()[0])
+                .map_err(|_| gstreamer::FlowError::Error)?;
+            let row_units = (frame.width() as usize)
+                .checked_mul(bpp)
+                .ok_or(gstreamer::FlowError::Error)?;
+            let height = frame.height() as usize;
+            let extent = stride_bytes
+                .checked_mul(height)
+                .filter(|extent| *extent <= u32::MAX as usize)
+                .ok_or(gstreamer::FlowError::Error)?;
+            if stride_bytes < row_units || row_units == 0 || height == 0 {
+                return Err(gstreamer::FlowError::Error);
+            }
+            let data = frame
+                .plane_data_mut(0)
+                .map_err(|_| gstreamer::FlowError::Error)?;
+            if data.len() < extent {
                 self.note_skip(
                     SkipReason::FrameSize,
-                    &format!(
-                        "frame bytes {} exceed mapped buffer {}",
-                        stride_bytes * height,
-                        data.len()
-                    ),
+                    "mapped plane is smaller than its layout",
                 );
-                return Ok(gstreamer::FlowSuccess::Ok);
+                return Err(gstreamer::FlowError::Error);
             }
 
             embed_into_packed_frame(
@@ -416,12 +459,8 @@ mod imp {
                 packet_bytes,
                 &config,
                 &snap,
-            );
-            Ok(gstreamer::FlowSuccess::Ok)
+            )
         }
-    }
-
-    impl StegoVideo {
         /// Count a skipped frame and warn once per skip reason.
         fn note_skip(&self, reason: SkipReason, message: &str) {
             if self.stream.lock().note_skip(reason) {
@@ -452,8 +491,8 @@ mod imp {
         packet_bytes: &[u8],
         config: &EmbeddingConfig,
         snap: &StreamState,
-    ) {
-        if snap.key.is_some() && snap.clear_payload && snap.embedded_frames > 0 {
+    ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
+        if snap.key.is_some() && snap.clear_payload && snap.payload_delivered {
             let first = {
                 let mut stream = state.stream.lock();
                 let first = !stream.warned.keyed_clear;
@@ -467,7 +506,7 @@ mod imp {
                     "clear-payload is unsupported with keyed placement; re-embedding every frame"
                 );
             }
-        } else if snap.embedded_frames > 0 && snap.clear_payload {
+        } else if snap.payload_delivered && snap.clear_payload {
             // Clear the packet slots (packet_len * 8 LSB bits at the leading
             // sequential slots over the pixel-only stream) and stop embedding
             // after the first delivery frame.
@@ -479,8 +518,8 @@ mod imp {
                 packet_bytes.len(),
                 config.bits_per_unit,
             );
-            state.stream.lock().embedded_frames += 1;
-            return;
+            state.stream.lock().complete(snap, false);
+            return Ok(gstreamer::FlowSuccess::Ok);
         }
 
         // Wire format: the CLI packet path over the pixel-only byte stream —
@@ -509,14 +548,19 @@ mod imp {
             let mut pixel = gather_pixel_stream(data, stride_bytes, row_units, height);
             let result = embed(&mut pixel);
             if let Ok(report) = &result {
-                scatter_pixel_units(&pixel, data, stride_bytes, row_units, report.modified_units);
+                let units = if snap.key.is_some() {
+                    pixel.len()
+                } else {
+                    report.modified_units
+                };
+                scatter_pixel_units(&pixel, data, stride_bytes, row_units, units);
             }
             result
         };
 
         match result {
             Ok(report) => {
-                state.stream.lock().embedded_frames += 1;
+                state.stream.lock().complete(snap, true);
                 gstreamer::debug!(
                     gstreamer::CAT_DEFAULT,
                     imp = state,
@@ -525,11 +569,20 @@ mod imp {
                     report.modified_units
                 );
             }
-            Err(e) => state.note_skip(
+            Err(e @ CarrierError::InsufficientCapacity { .. }) => state.note_skip(
                 SkipReason::Capacity,
                 &format!("packet does not fit frame capacity: {e}; frames remain unembedded"),
             ),
+            Err(e) => {
+                gstreamer::element_imp_error!(
+                    state,
+                    gstreamer::StreamError::Format,
+                    ("invalid packet embedding configuration: {e}")
+                );
+                return Err(gstreamer::FlowError::Error);
+            }
         }
+        Ok(gstreamer::FlowSuccess::Ok)
     }
 
     /// Copy the pixel-only byte stream out of a stride-padded frame: logical
@@ -550,10 +603,9 @@ mod imp {
         pixel
     }
 
-    /// Write back the first `units` modified pixel units from the gathered
-    /// pixel-only stream (the inverse of [`gather_pixel_stream`]). The core
-    /// kernels only mutate the units they report as modified and never write
-    /// on the error path, so `units` bounds the write-back exactly.
+    /// Write back logical pixel units, never row padding. Sequential placement
+    /// modifies a prefix; keyed placement requires the complete logical stream
+    /// because modified_units is a count, not the last mutated index.
     fn scatter_pixel_units(
         pixel: &[u8],
         frame: &mut [u8],
@@ -587,37 +639,120 @@ mod imp {
             frame[(i / row_units) * stride_bytes + i % row_units] &= mask;
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use steganographer_core::carrier::CarrierExtractor;
+        use steganographer_core::packet::{
+            AlgorithmDescriptor, DecodeLimits, GenericPacket, PayloadKind, KERNEL_SPATIAL_LSB,
+            PLACEMENT_KEYED,
+        };
+
+        #[test]
+        fn stale_frame_cannot_advance_reset_key_or_bits() {
+            gstreamer::init().unwrap();
+            for reset_bits in [false, true] {
+                let element = glib::Object::new::<super::super::StegoVideo>();
+                let imp = element.imp();
+                let limits = DecodeLimits::default();
+                let packet = |bits| {
+                    GenericPacket::new_untransformed(
+                        b"new generation".to_vec(),
+                        [3; 16],
+                        [4; 8],
+                        PayloadKind::Text,
+                        AlgorithmDescriptor::new(PLACEMENT_KEYED, 1, Vec::new()),
+                        AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
+                        &limits,
+                    )
+                    .unwrap()
+                    .encode(&limits)
+                    .unwrap()
+                };
+                element.set_property("key-hex", encode_hex(&[1; 32]));
+                element.set_property("packet-hex", encode_hex(&packet(1)));
+                let info = VideoInfo::builder(VideoFormat::Rgb, 64, 32)
+                    .build()
+                    .unwrap();
+                *imp.info.lock() = Some(info.clone());
+                // Pause after the exact snapshot used by transform_ip, reset,
+                // then finish the old transform before processing the new one.
+                let stale = imp.stream.lock().clone();
+                let (key, bits) = if reset_bits {
+                    element.set_property("bits-per-unit", 2u32);
+                    element.set_property("packet-hex", encode_hex(&packet(2)));
+                    ([1; 32], 2)
+                } else {
+                    element.set_property("key-hex", encode_hex(&[2; 32]));
+                    ([2; 32], 1)
+                };
+                let mut old = gstreamer::Buffer::from_mut_slice(vec![0x40; info.size()]);
+                imp.transform_snapshot(old.get_mut().unwrap(), stale)
+                    .unwrap();
+                let mut new = gstreamer::Buffer::from_mut_slice(vec![0x40; info.size()]);
+                imp.transform_ip(new.get_mut().unwrap()).unwrap();
+                let map = new.map_readable().unwrap();
+                let report = KeyedSpatialLsb::new(key)
+                    .extract_packet(map.as_ref(), &EmbeddingConfig::new(bits).unwrap(), &limits)
+                    .expect("first frame of the reset generation uses its raw key");
+                assert_eq!(report.packet.body, b"new generation");
+            }
+        }
+
+        #[test]
+        fn stale_packet_completion_does_not_deliver_its_replacement() {
+            gstreamer::init().unwrap();
+            let element = glib::Object::new::<super::super::StegoVideo>();
+            let imp = element.imp();
+            let limits = DecodeLimits::default();
+            let packet = |body: &[u8]| {
+                GenericPacket::new_untransformed(
+                    body.to_vec(),
+                    [3; 16],
+                    [4; 8],
+                    PayloadKind::Text,
+                    AlgorithmDescriptor::new(
+                        steganographer_core::packet::PLACEMENT_SEQUENTIAL,
+                        1,
+                        Vec::new(),
+                    ),
+                    AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
+                    &limits,
+                )
+                .unwrap()
+                .encode(&limits)
+                .unwrap()
+            };
+            let info = VideoInfo::builder(VideoFormat::Rgb, 64, 32)
+                .build()
+                .unwrap();
+            *imp.info.lock() = Some(info.clone());
+            element.set_property("clear-payload", true);
+            element.set_property("packet-hex", encode_hex(&packet(b"A")));
+            let stale = imp.stream.lock().clone();
+            element.set_property("packet-hex", encode_hex(&packet(b"B")));
+            let mut old = gstreamer::Buffer::from_mut_slice(vec![0x40; info.size()]);
+            imp.transform_snapshot(old.get_mut().unwrap(), stale)
+                .unwrap();
+            let mut new = gstreamer::Buffer::from_mut_slice(vec![0x40; info.size()]);
+            imp.transform_ip(new.get_mut().unwrap()).unwrap();
+            let map = new.map_readable().unwrap();
+            assert_eq!(
+                SpatialLsb
+                    .extract_packet(map.as_ref(), &EmbeddingConfig::new(1).unwrap(), &limits)
+                    .unwrap()
+                    .packet
+                    .body,
+                b"B",
+            );
+        }
+    }
 }
 
 glib::wrapper! {
     pub struct StegoVideo(ObjectSubclass<imp::StegoVideo>)
         @extends BaseTransform, gstreamer::Element, gstreamer::Object;
-}
-
-/// Decode a hex string into exactly `out_len` bytes.
-fn decode_hex_fixed(s: &str, out_len: usize) -> Option<Vec<u8>> {
-    if s.len() != out_len * 2 || !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..out_len)
-        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
-        .collect()
-}
-
-/// Decode a hex string into a 32-byte key.
-fn decode_key(s: &str) -> Option<[u8; 32]> {
-    let bytes = decode_hex_fixed(s, 32)?;
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Some(key)
-}
-
-fn hex_encode(bytes: [u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_encode_slice(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Register steganographer elements, optionally under a loaded plugin.
@@ -634,201 +769,4 @@ pub fn register(plugin: Option<&gstreamer::Plugin>) -> Result<(), glib::BoolErro
         gstreamer::Rank::NONE,
         crate::audio_element::StegoAudio::static_type(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gstreamer_video::VideoFormat;
-    use steganographer_core::carrier::{CarrierEmbedder, CarrierExtractor};
-    use steganographer_core::packet::{
-        AlgorithmDescriptor, DecodeLimits, GenericPacket, PayloadKind, KERNEL_SPATIAL_LSB,
-        PLACEMENT_SEQUENTIAL,
-    };
-
-    #[test]
-    fn decodes_fixed_hex_keys() {
-        let key = decode_key(&"ab".repeat(32)).expect("valid 64-char hex");
-        assert_eq!(key[0], 0xab);
-        assert!(decode_key("zz").is_none());
-        assert!(decode_key("ab").is_none()); // wrong length
-    }
-
-    #[test]
-    fn decodes_arbitrary_hex_payloads() {
-        assert_eq!(
-            decode_hex_fixed("deadbeef", 4).unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(decode_hex_fixed("", 0).unwrap(), Vec::<u8>::new());
-        assert!(decode_hex_fixed("abc", 1).is_none()); // odd length
-        assert!(decode_hex_fixed("zzzz", 2).is_none()); // bad digits
-    }
-    #[test]
-    fn registers_element_type() {
-        gstreamer::init().unwrap();
-        let el = glib::Object::new::<StegoVideo>();
-        let kv: String = el.property("key-hex");
-        assert!(kv.is_empty());
-        assert!(!el.name().is_empty());
-        let ph: String = el.property("packet-hex");
-        assert!(ph.is_empty());
-        assert!(!el.property::<bool>("clear-payload"));
-        assert_eq!(el.property::<u32>("bits-per-unit"), 1);
-    }
-
-    #[test]
-    fn keyed_embed_differences_follow_frame_index() {
-        gstreamer::init().unwrap();
-        use steganographer_core::packet::PLACEMENT_KEYED;
-        let limits = DecodeLimits::default();
-        let payload = b"keyed placement".to_vec();
-        let packet = GenericPacket::new_untransformed(
-            payload,
-            [7u8; 16],
-            [9u8; 8],
-            PayloadKind::Text,
-            AlgorithmDescriptor::new(PLACEMENT_KEYED, 1, Vec::new()),
-            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
-            &limits,
-        )
-        .unwrap();
-        let packet_bytes = packet.encode(&limits).unwrap();
-        let config = EmbeddingConfig::new(1).unwrap();
-
-        // Two equal carrier frames embedded under different keys produce
-        // different modified-slot sets: the keyed schedule (derived from the
-        // key) spreads the packet differently, not at the leading slots.
-        let mut frame_a = vec![0x40u8; 4096];
-        KeyedSpatialLsb::new([1u8; 32])
-            .embed_packet(&mut frame_a, &packet_bytes, &config)
-            .unwrap();
-        let mut frame_b = vec![0x40u8; 4096];
-        KeyedSpatialLsb::new([2u8; 32])
-            .embed_packet(&mut frame_b, &packet_bytes, &config)
-            .unwrap();
-        let changed: Vec<usize> = frame_a
-            .iter()
-            .zip(&frame_b)
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .map(|(i, _)| i)
-            .collect();
-        assert!(
-            !changed.is_empty(),
-            "different keys must embed to different slot sets"
-        );
-        assert!(
-            changed.iter().any(|i| *i >= 64),
-            "keyed placement must reach beyond the leading bootstrap slots"
-        );
-    }
-
-    #[test]
-    fn keyed_frames_diverge_by_frame_index() {
-        gstreamer::init().unwrap();
-        use steganographer_core::kdf::derive_frame_embedding_key;
-        use steganographer_core::packet::PLACEMENT_KEYED;
-        let limits = DecodeLimits::default();
-        let packet = GenericPacket::new_untransformed(
-            b"frame-indexed".to_vec(),
-            [7u8; 16],
-            [9u8; 8],
-            PayloadKind::Text,
-            AlgorithmDescriptor::new(PLACEMENT_KEYED, 1, Vec::new()),
-            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
-            &limits,
-        )
-        .unwrap();
-        let packet_bytes = packet.encode(&limits).unwrap();
-        let config = EmbeddingConfig::new(1).unwrap();
-
-        // The element's exact embed rule: frame i uses the frame-scoped key.
-        let embed_frame = |index: u64| {
-            let mut frame = vec![0x40u8; 4096];
-            KeyedSpatialLsb::new(derive_frame_embedding_key(&[5u8; 32], index))
-                .embed_packet(&mut frame, &packet_bytes, &config)
-                .unwrap();
-            frame
-        };
-
-        let frame0 = embed_frame(0);
-        let frame1 = embed_frame(1);
-        let frame2 = embed_frame(2);
-
-        // Equal buffers, different frame indices: different slot sets.
-        assert_ne!(frame0, frame1, "frame 0 and 1 must embed differently");
-        assert_ne!(frame1, frame2, "frame 1 and 2 must embed differently");
-
-        // Each frame decodes with its own frame-scoped key.
-        for (index, frame) in [(0u64, &frame0), (1, &frame1), (2, &frame2)] {
-            let report = KeyedSpatialLsb::new(derive_frame_embedding_key(&[5u8; 32], index))
-                .extract_packet(frame, &config, &limits)
-                .unwrap();
-            assert_eq!(report.packet.body, b"frame-indexed");
-        }
-
-        // A frame-N carrier does not decode under the raw (frame-0) key.
-        assert!(KeyedSpatialLsb::new([5u8; 32])
-            .extract_packet(&frame1, &config, &limits)
-            .is_err());
-    }
-
-    #[test]
-    fn element_round_trips_packet_through_core_lsb() {
-        gstreamer::init().unwrap();
-        let limits = DecodeLimits::default();
-        let payload = b"hello gst roundtrip".to_vec();
-        let packet = GenericPacket::new_untransformed(
-            payload,
-            [7u8; 16],
-            [9u8; 8],
-            PayloadKind::Text,
-            AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new()),
-            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
-            &limits,
-        )
-        .unwrap();
-        let packet_bytes = packet.encode(&limits).unwrap();
-
-        // Element property accepts and echoes the hex packet.
-        let el = glib::Object::new::<StegoVideo>();
-        el.set_property("packet-hex", hex_encode_slice(&packet_bytes));
-        el.set_property("bits-per-unit", 1u32);
-        let read_back: String = el.property("packet-hex");
-        assert_eq!(read_back, hex_encode_slice(&packet_bytes));
-        assert_eq!(el.property::<u32>("bits-per-unit"), 1);
-
-        // The same wire format verifies through the core extractor.
-        let mut frame = vec![0x40u8; 1920 * 1080 * 3];
-        let config = EmbeddingConfig::new(1).unwrap();
-        SpatialLsb
-            .embed_packet(&mut frame, &packet_bytes, &config)
-            .unwrap();
-        let report = SpatialLsb.extract_packet(&frame, &config, &limits).unwrap();
-        assert_eq!(report.packet.body, b"hello gst roundtrip".to_vec());
-        assert_eq!(report.packet.envelope.packet_id, [7u8; 16]);
-    }
-
-    #[test]
-    fn video_info_round_trips_packed_formats() {
-        gstreamer::init().unwrap();
-        // Guards the format allowlist against drift: each allowlisted packed
-        // format must yield exactly one plane at 8 bits per component, which
-        // is what the byte-sequential kernel assumes.
-        for fmt in [
-            VideoFormat::Rgb,
-            VideoFormat::Bgr,
-            VideoFormat::Rgbx,
-            VideoFormat::Bgrx,
-            VideoFormat::Xrgb,
-            VideoFormat::Xbgr,
-        ] {
-            let info = gstreamer_video::VideoInfo::builder(fmt, 64, 32)
-                .build()
-                .unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
-            assert_eq!(info.n_planes(), 1, "{fmt:?} must stay single-plane");
-            assert_eq!(info.height(), 32);
-        }
-    }
 }

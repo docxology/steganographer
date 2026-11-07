@@ -29,6 +29,26 @@ pub const CHUNK_HEADER_BYTES: usize = 20;
 pub const CHUNK_PAYLOAD_MAX: usize = 16 * 1024 - CHUNK_HEADER_BYTES;
 /// Sessions idle longer than this are closed and swept.
 pub const SESSION_IDLE_TIMEOUT_SECS: u64 = 60;
+/// Application-message limit, shared with the WebSocket transport.
+pub const MESSAGE_MAX_BYTES: usize = crate::ws_handler::WS_MAX_MESSAGE_SIZE;
+/// A full-sized message needs at most this many application chunks.
+pub const MESSAGE_MAX_CHUNKS: usize = MESSAGE_MAX_BYTES.div_ceil(CHUNK_PAYLOAD_MAX);
+/// Maximum simultaneously incomplete application messages per peer.
+pub const INCOMPLETE_MESSAGE_MAX: usize = 4;
+/// Aggregate payload retained by incomplete messages per peer.
+pub const RETAINED_MESSAGE_MAX_BYTES: usize = MESSAGE_MAX_BYTES * 2;
+/// Incomplete messages have an absolute lifetime; duplicates cannot extend it.
+pub const MESSAGE_EXPIRY_SECS: u64 = 10;
+/// Includes offers being negotiated, not just established peers.
+#[cfg(feature = "webrtc")]
+pub const WEBRTC_SESSION_MAX: usize = 16;
+#[cfg(feature = "webrtc")]
+const REPLY_HIGH_WATER_BYTES: usize = MESSAGE_MAX_BYTES;
+#[cfg(feature = "webrtc")]
+const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(feature = "webrtc")]
+static SESSION_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(WEBRTC_SESSION_MAX);
 
 /// Split a payload into binary chunks with the framing header
 /// `[u32 magic][u64 msg_id][u32 chunk_index][u32 chunk_count][bytes]`.
@@ -36,7 +56,9 @@ pub const SESSION_IDLE_TIMEOUT_SECS: u64 = 60;
 pub fn frame_chunks(msg_id: u64, payload: &[u8]) -> Vec<Vec<u8>> {
     let count = payload.len().div_ceil(CHUNK_PAYLOAD_MAX).max(1);
     let mut out = Vec::with_capacity(count);
-    for (idx, chunk) in payload.chunks(CHUNK_PAYLOAD_MAX).enumerate() {
+    for idx in 0..count {
+        let start = idx * CHUNK_PAYLOAD_MAX;
+        let chunk = &payload[start..payload.len().min(start + CHUNK_PAYLOAD_MAX)];
         let mut buf = Vec::with_capacity(CHUNK_HEADER_BYTES + chunk.len());
         buf.extend_from_slice(&FRAMING_MAGIC.to_be_bytes());
         buf.extend_from_slice(&msg_id.to_be_bytes());
@@ -48,27 +70,57 @@ pub fn frame_chunks(msg_id: u64, payload: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// Reassembles chunked messages keyed by `msg_id`.
+/// Reassembles bounded application messages keyed by `msg_id`.
 #[cfg(feature = "webrtc")]
 #[derive(Default)]
 pub struct Reassembler {
     partial: std::collections::HashMap<u64, PartialMessage>,
+    retained_bytes: usize,
 }
 
 #[cfg(feature = "webrtc")]
 struct PartialMessage {
     chunks: Vec<Option<Vec<u8>>>,
     received: usize,
+    bytes: usize,
+    started_at: std::time::Instant,
 }
 
 #[cfg(feature = "webrtc")]
 impl Reassembler {
-    /// Feed one binary chunk; returns the fully reassembled payload when the
-    /// last chunk of a message arrives. Invalid chunks (bad magic, out-of-range
-    /// index, or count mismatch) are dropped and reported as an error.
+    fn remove(&mut self, msg_id: u64) -> Option<PartialMessage> {
+        let partial = self.partial.remove(&msg_id)?;
+        self.retained_bytes -= partial.bytes;
+        Some(partial)
+    }
+
+    fn expire_at(&mut self, now: std::time::Instant) {
+        self.partial.retain(|_, partial| {
+            let keep = now.saturating_duration_since(partial.started_at)
+                < std::time::Duration::from_secs(MESSAGE_EXPIRY_SECS);
+            if !keep {
+                self.retained_bytes -= partial.bytes;
+            }
+            keep
+        });
+    }
+
+    /// Reject invalid or over-budget chunks before allocating or copying.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+        self.push_at(chunk, std::time::Instant::now())
+    }
+
+    fn push_at(
+        &mut self,
+        chunk: &[u8],
+        now: std::time::Instant,
+    ) -> Result<Option<Vec<u8>>, &'static str> {
+        self.expire_at(now);
         if chunk.len() < CHUNK_HEADER_BYTES {
             return Err("chunk too short");
+        }
+        if chunk.len() > CHUNK_HEADER_BYTES + CHUNK_PAYLOAD_MAX {
+            return Err("chunk too large");
         }
         let magic = u32::from_be_bytes(chunk[0..4].try_into().unwrap());
         if magic != FRAMING_MAGIC {
@@ -77,8 +129,30 @@ impl Reassembler {
         let msg_id = u64::from_be_bytes(chunk[4..12].try_into().unwrap());
         let index = u32::from_be_bytes(chunk[12..16].try_into().unwrap()) as usize;
         let count = u32::from_be_bytes(chunk[16..20].try_into().unwrap()) as usize;
-        if count == 0 || index >= count {
-            return Err("chunk index out of range");
+        if count == 0 || count > MESSAGE_MAX_CHUNKS || index >= count {
+            self.remove(msg_id);
+            return Err("chunk count or index out of range");
+        }
+        if let Some(partial) = self.partial.get(&msg_id) {
+            if partial.chunks.len() != count {
+                self.remove(msg_id);
+                return Err("chunk count mismatch");
+            }
+            if partial.chunks[index].is_some() {
+                return Ok(None);
+            }
+        } else if self.partial.len() >= INCOMPLETE_MESSAGE_MAX {
+            return Err("too many incomplete messages");
+        }
+        let payload = &chunk[CHUNK_HEADER_BYTES..];
+        let message_bytes = self.partial.get(&msg_id).map_or(0, |p| p.bytes);
+        if message_bytes + payload.len() > MESSAGE_MAX_BYTES {
+            self.remove(msg_id);
+            return Err("message too large");
+        }
+        if self.retained_bytes + payload.len() > RETAINED_MESSAGE_MAX_BYTES {
+            self.remove(msg_id);
+            return Err("retained message budget exceeded");
         }
         let partial = self
             .partial
@@ -86,24 +160,16 @@ impl Reassembler {
             .or_insert_with(|| PartialMessage {
                 chunks: (0..count).map(|_| None).collect(),
                 received: 0,
+                bytes: 0,
+                started_at: now,
             });
-        if partial.chunks.len() != count {
-            self.partial.remove(&msg_id);
-            return Err("chunk count mismatch");
-        }
-        if partial.chunks[index].is_some() {
-            return Ok(None);
-        }
-        partial.chunks[index] = Some(chunk[CHUNK_HEADER_BYTES..].to_vec());
+        partial.chunks[index] = Some(payload.to_vec());
         partial.received += 1;
+        partial.bytes += payload.len();
+        self.retained_bytes += payload.len();
         if partial.received == count {
-            let partial = self.partial.remove(&msg_id).unwrap();
-            let total: usize = partial
-                .chunks
-                .iter()
-                .map(|c| c.as_ref().unwrap().len())
-                .sum();
-            let mut payload = Vec::with_capacity(total);
+            let partial = self.remove(msg_id).unwrap();
+            let mut payload = Vec::with_capacity(partial.bytes);
             for c in partial.chunks {
                 payload.extend_from_slice(&c.unwrap());
             }
@@ -122,6 +188,7 @@ pub struct WebrtcSession {
     pub pc: std::sync::Arc<dyn webrtc::peer_connection::PeerConnection>,
     /// Last time the session's DataChannel carried a message.
     pub last_activity: std::sync::Mutex<std::time::Instant>,
+    control: std::sync::Arc<SessionControl>,
 }
 
 #[cfg(feature = "webrtc")]
@@ -133,11 +200,82 @@ impl std::fmt::Debug for WebrtcSession {
     }
 }
 
-/// Register a session in the shared map. Returns the generated session id.
 #[cfg(feature = "webrtc")]
-pub fn register_session(
+struct SessionControl {
+    stopped: tokio::sync::watch::Sender<bool>,
+    encode_drain: tokio::sync::Mutex<()>,
+    media_drain: tokio::sync::Mutex<()>,
+    _slot: tokio::sync::SemaphorePermit<'static>,
+}
+
+#[cfg(feature = "webrtc")]
+impl SessionControl {
+    fn new(slot: tokio::sync::SemaphorePermit<'static>) -> Self {
+        let (stopped, _) = tokio::sync::watch::channel(false);
+        Self {
+            stopped,
+            encode_drain: tokio::sync::Mutex::new(()),
+            media_drain: tokio::sync::Mutex::new(()),
+            _slot: slot,
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.send_replace(true);
+    }
+
+    fn is_stopped(&self) -> bool {
+        *self.stopped.borrow()
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.stopped.subscribe();
+        while !*receiver.borrow_and_update() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Cancellation of an HTTP request must not detach an unclosed peer driver.
+#[cfg(feature = "webrtc")]
+struct OfferPeerGuard {
+    pc: Option<std::sync::Arc<dyn webrtc::peer_connection::PeerConnection>>,
+    control: std::sync::Arc<SessionControl>,
+}
+
+#[cfg(feature = "webrtc")]
+impl OfferPeerGuard {
+    async fn close(&mut self) {
+        if let Some(pc) = &self.pc {
+            self.control.stop();
+            let _ = pc.close().await;
+        }
+        self.pc = None;
+    }
+}
+
+#[cfg(feature = "webrtc")]
+impl Drop for OfferPeerGuard {
+    fn drop(&mut self) {
+        if let Some(pc) = self.pc.take() {
+            self.control.stop();
+            let control = self.control.clone();
+            tokio::spawn(async move {
+                let _ = pc.close().await;
+                drop(control);
+            });
+        }
+    }
+}
+
+/// Register a peer only after signaling has successfully completed.
+#[cfg(feature = "webrtc")]
+fn register_session(
     state: &DashboardState,
     pc: std::sync::Arc<dyn webrtc::peer_connection::PeerConnection>,
+    control: std::sync::Arc<SessionControl>,
 ) -> String {
     use rand::RngCore;
     let mut id_bytes = [0u8; 16];
@@ -152,64 +290,71 @@ pub fn register_session(
             WebrtcSession {
                 pc,
                 last_activity: std::sync::Mutex::new(std::time::Instant::now()),
+                control,
             },
         );
     session_id
 }
 
-/// Remove a session by id and close its peer connection. Returns true when
-/// the session existed.
+/// Stop admission, close the peer, and drain its owned work before removal.
 #[cfg(feature = "webrtc")]
 pub async fn remove_session(state: &DashboardState, session_id: &str) -> bool {
-    let sess = state
-        .webrtc_sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(session_id);
-    // Drop the media publisher; the media pump observes the session removal
-    // and exits (it also removes its own entry as a belt-and-braces cleanup).
-    state
+    let session = {
+        let sessions = state
+            .webrtc_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        sessions
+            .get(session_id)
+            .map(|sess| (sess.pc.clone(), sess.control.clone()))
+    };
+    let Some((pc, control)) = session else {
+        return false;
+    };
+    control.stop();
+    let _ = pc.close().await;
+    // spawn_blocking cannot be cancelled once running. Its owning pump always
+    // joins it while holding this gate, so no removed session can publish.
+    let _encode = control.encode_drain.lock().await;
+    let _media = control.media_drain.lock().await;
+    let publisher = state
         .media_publishers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(session_id);
-    match sess {
-        Some(sess) => {
-            let _ = sess.pc.close().await;
-            true
-        }
-        None => false,
+    if let Some(publisher) = publisher {
+        publisher.close();
     }
+    state
+        .webrtc_sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
+    true
 }
 
-/// Close and drop sessions whose DataChannel has been idle beyond
-/// [`SESSION_IDLE_TIMEOUT_SECS`]. Returns the number of swept sessions.
+/// Close idle peers through the same publisher/work-draining removal path.
 #[cfg(feature = "webrtc")]
 pub async fn sweep_idle_sessions(state: &DashboardState) -> usize {
-    let mut to_close = Vec::new();
-    {
-        let mut sessions = state
-            .webrtc_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        sessions.retain(|_id, sess| {
-            let idle_for = sess
-                .last_activity
+    let expired: Vec<_> = state
+        .webrtc_sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, sess)| {
+            sess.last_activity
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .elapsed();
-            if idle_for > std::time::Duration::from_secs(SESSION_IDLE_TIMEOUT_SECS) {
-                to_close.push(sess.pc.clone());
-                false
-            } else {
-                true
-            }
-        });
+                .elapsed()
+                >= std::time::Duration::from_secs(SESSION_IDLE_TIMEOUT_SECS)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut removed = 0;
+    for id in expired {
+        removed += usize::from(remove_session(state, &id).await);
     }
-    for pc in &to_close {
-        let _ = pc.close().await;
-    }
-    to_close.len()
+    removed
 }
 
 // ─── SDP signaling handler ────────────────────────────────────────────────────
@@ -251,42 +396,51 @@ pub async fn api_webrtc_offer(
     }
 }
 
-/// `GET /api/webrtc/config` — advertised WebRTC capabilities.
+/// `GET /api/webrtc/config` — bearer-protected transport capabilities.
 ///
-/// Registered unconditionally so the browser can probe support. The response
-/// mirrors the server's ICE server list so the client peer connection can use
-/// the same STUN/TURN configuration, and whether the server publishes the
-/// H.264 video track (`media`). `media` is true only when the `webrtc`
-/// feature is built in AND the transport policy allows WebRTC.
-pub async fn api_webrtc_config(State(state): State<std::sync::Arc<DashboardState>>) -> Response {
+/// TURN credentials are necessary for authorized peers, not public metadata.
+/// The H.264 track is a lossy preview and does not preserve LSB evidence.
+pub async fn api_webrtc_config(
+    State(state): State<std::sync::Arc<DashboardState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !crate::check_auth(&headers, &state.auth_token) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": "Unauthorized"})),
+        )
+            .into_response();
+    }
     #[cfg(feature = "webrtc")]
-    {
-        let ice_servers = state.ice_servers.clone();
-        let media = state.transport != crate::TransportPolicy::Websocket;
-        (axum::Json(json!({
-            "ice_servers": ice_servers,
-            "media": media,
-        })),)
-            .into_response()
-    }
+    let ice_servers = state.ice_servers.clone();
     #[cfg(not(feature = "webrtc"))]
-    {
-        let _ = state;
-        (axum::Json(json!({
-            "ice_servers": [],
-            "media": false,
-        })),)
-            .into_response()
-    }
+    let ice_servers: Vec<String> = Vec::new();
+    let webrtc = cfg!(feature = "webrtc");
+    let media = webrtc && state.transport != crate::TransportPolicy::Websocket;
+    axum::Json(json!({
+        "default_transport": state.transport.as_str(),
+        "ice_servers": ice_servers,
+        "webrtc": webrtc,
+        "data_channel": webrtc,
+        "media": media,
+        "capabilities": {
+            "websocket": true,
+            "webrtc": webrtc,
+            "rtp_preview": media,
+            "signed_media": "image/png",
+        },
+    }))
+    .into_response()
 }
 
 /// Async event handler that forwards the remote-created DataChannel to the
 /// session's frame pump.
 #[cfg(feature = "webrtc")]
 struct SessionEventHandler {
-    dc_tx:
-        tokio::sync::mpsc::UnboundedSender<std::sync::Arc<dyn webrtc::data_channel::DataChannel>>,
-    gather_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    dc_tx: tokio::sync::mpsc::Sender<std::sync::Arc<dyn webrtc::data_channel::DataChannel>>,
+    gather_tx: tokio::sync::mpsc::Sender<()>,
+    channel_seen: std::sync::atomic::AtomicBool,
+    control: std::sync::Arc<SessionControl>,
 }
 
 #[cfg(feature = "webrtc")]
@@ -296,7 +450,18 @@ impl webrtc::peer_connection::PeerConnectionEventHandler for SessionEventHandler
         &self,
         data_channel: std::sync::Arc<dyn webrtc::data_channel::DataChannel>,
     ) {
-        let _ = self.dc_tx.send(data_channel);
+        if self.control.is_stopped()
+            || self
+                .channel_seen
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = data_channel.close().await;
+            return;
+        }
+        if let Err(error) = self.dc_tx.try_send(data_channel) {
+            let _ = error.into_inner().close().await;
+            self.control.stop();
+        }
     }
 
     async fn on_ice_gathering_state_change(
@@ -304,7 +469,37 @@ impl webrtc::peer_connection::PeerConnectionEventHandler for SessionEventHandler
         state: webrtc::peer_connection::RTCIceGatheringState,
     ) {
         if state == webrtc::peer_connection::RTCIceGatheringState::Complete {
-            let _ = self.gather_tx.send(());
+            let _ = self.gather_tx.try_send(());
+        }
+    }
+
+    async fn on_connection_state_change(
+        &self,
+        state: webrtc::peer_connection::RTCPeerConnectionState,
+    ) {
+        use webrtc::peer_connection::RTCPeerConnectionState;
+        if matches!(
+            state,
+            RTCPeerConnectionState::Disconnected
+                | RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Closed
+        ) {
+            self.control.stop();
+        }
+    }
+
+    async fn on_ice_connection_state_change(
+        &self,
+        state: webrtc::peer_connection::RTCIceConnectionState,
+    ) {
+        use webrtc::peer_connection::RTCIceConnectionState;
+        if matches!(
+            state,
+            RTCIceConnectionState::Disconnected
+                | RTCIceConnectionState::Failed
+                | RTCIceConnectionState::Closed
+        ) {
+            self.control.stop();
         }
     }
 }
@@ -325,22 +520,45 @@ async fn handle_offer_with_webrtc(
             .into_response();
     }
 
-    // Channel for the DataChannel created by the remote (browser) side.
-    let (dc_tx, mut dc_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Parse strictly before allocating sockets or starting a peer driver.
+    let media_candidate = req.sdp.lines().any(|l| l.starts_with("m=video"))
+        && state.transport != crate::TransportPolicy::Websocket;
+    let offer = match webrtc::peer_connection::RTCSessionDescription::offer(req.sdp) {
+        Ok(offer) => offer,
+        Err(error) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": format!("invalid SDP offer: {}", error)})),
+            )
+                .into_response();
+        }
+    };
+    let slot = match SESSION_SLOTS.try_acquire() {
+        Ok(slot) => slot,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(json!({"error": "WebRTC session limit reached"})),
+            )
+                .into_response();
+        }
+    };
+    let control = std::sync::Arc::new(SessionControl::new(slot));
+    let (dc_tx, mut dc_rx) = tokio::sync::mpsc::channel(1);
 
     // ICE servers come from the configured list (empty by default: localhost
     // host candidates only, no traffic beyond loopback).
     let rtc_config = webrtc::peer_connection::RTCConfigurationBuilder::new()
         .with_ice_servers(parse_ice_servers(&state.ice_servers))
         .build();
-    let (gather_tx, mut gather_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (gather_tx, mut gather_rx) = tokio::sync::mpsc::channel(1);
     // The default MediaEngine carries no codecs; without registration the
     // video transceiver cannot be created. Only register when the offer
     // carries video and policy allows media, keeping data-only answers
     // byte-identical to the previous behavior.
-    let media_candidate = req.sdp.lines().any(|l| l.starts_with("m=video"))
-        && state.transport != crate::TransportPolicy::Websocket;
-    let base_builder = PeerConnectionBuilder::<String>::new().with_configuration(rtc_config);
+    let base_builder = PeerConnectionBuilder::<String>::new()
+        .with_configuration(rtc_config)
+        .with_data_channel_send_buffer_limit(REPLY_HIGH_WATER_BYTES);
     let builder = if media_candidate {
         let mut media_engine = webrtc::peer_connection::MediaEngine::default();
         if let Err(e) = media_engine.register_default_codecs() {
@@ -361,6 +579,8 @@ async fn handle_offer_with_webrtc(
         .with_handler(std::sync::Arc::new(SessionEventHandler {
             dc_tx,
             gather_tx,
+            channel_seen: std::sync::atomic::AtomicBool::new(false),
+            control: control.clone(),
         }))
         .build()
         .await
@@ -375,18 +595,13 @@ async fn handle_offer_with_webrtc(
         }
     };
 
-    let offer = match webrtc::peer_connection::RTCSessionDescription::offer(req.sdp) {
-        Ok(o) => o,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": format!("invalid SDP offer: {}", e)})),
-            )
-                .into_response();
-        }
+    let mut guard = OfferPeerGuard {
+        pc: Some(pc.clone()),
+        control: control.clone(),
     };
 
     if let Err(e) = pc.set_remote_description(offer).await {
+        guard.close().await;
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::Json(json!({"error": format!("set_remote_description failed: {}", e)})),
@@ -404,7 +619,7 @@ async fn handle_offer_with_webrtc(
         match setup_media_sender(&pc).await {
             Ok(p) => Some(p),
             Err(e) => {
-                let _ = pc.close().await;
+                guard.close().await;
                 return (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(json!({
@@ -421,7 +636,7 @@ async fn handle_offer_with_webrtc(
     let answer = match pc.create_answer(None).await {
         Ok(a) => a,
         Err(e) => {
-            let _ = pc.close().await;
+            guard.close().await;
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(json!({"error": format!("create_answer failed: {}", e)})),
@@ -430,7 +645,7 @@ async fn handle_offer_with_webrtc(
         }
     };
     if let Err(e) = pc.set_local_description(answer).await {
-        let _ = pc.close().await;
+        guard.close().await;
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(json!({"error": format!("set_local_description failed: {}", e)})),
@@ -470,7 +685,7 @@ async fn handle_offer_with_webrtc(
     let local_sdp = match pc.local_description().await {
         Some(d) => d.sdp,
         None => {
-            let _ = pc.close().await;
+            guard.close().await;
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(json!({"error": "local description missing"})),
@@ -479,7 +694,15 @@ async fn handle_offer_with_webrtc(
         }
     };
 
-    let session_id = register_session(&state, pc.clone());
+    if control.is_stopped() {
+        guard.close().await;
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "peer closed during negotiation"})),
+        )
+            .into_response();
+    }
+    let session_id = register_session(&state, pc.clone(), control.clone());
 
     if media_ready {
         if let Some(publisher) = publisher {
@@ -488,7 +711,12 @@ async fn handle_offer_with_webrtc(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(session_id.clone(), publisher.clone());
-            tokio::spawn(run_media_pump(state.clone(), session_id.clone(), publisher));
+            tokio::spawn(run_media_pump(
+                state.clone(),
+                session_id.clone(),
+                publisher,
+                control.clone(),
+            ));
         }
     }
 
@@ -496,20 +724,22 @@ async fn handle_offer_with_webrtc(
     let pump_state = state.clone();
     let pump_session_id = session_id.clone();
     tokio::spawn(async move {
-        let dc = match tokio::time::timeout(std::time::Duration::from_secs(10), dc_rx.recv()).await
-        {
-            Ok(Some(dc)) => dc,
-            _ => {
-                log::warn!(
-                    "WebRTC session {}: DataChannel never opened",
-                    pump_session_id
-                );
-                let _ = remove_session(&pump_state, &pump_session_id).await;
-                return;
+        let dc = tokio::select! {
+            biased;
+            _ = control.cancelled() => None,
+            result = tokio::time::timeout(std::time::Duration::from_secs(10), dc_rx.recv()) => {
+                result.ok().flatten()
             }
         };
-        run_frame_pump(pump_state, pump_session_id, dc).await;
+        match dc {
+            Some(dc) => run_frame_pump(pump_state, pump_session_id, dc, control).await,
+            None => {
+                let _ = remove_session(&pump_state, &pump_session_id).await;
+            }
+        }
     });
+    // The bounded session pump now owns explicit close/drain on every exit.
+    guard.pc = None;
 
     (axum::Json(json!({
         "sdp": local_sdp,
@@ -519,229 +749,262 @@ async fn handle_offer_with_webrtc(
         .into_response()
 }
 
-/// Stamp a reply with the latency echo fields and send it, chunking with the
-/// binary framing header when it exceeds the 16 KiB message limit. Chunks are
-/// paced so the loopback UDP buffers are not overrun.
+/// All replies share one sequential sender and a strict outstanding-byte budget.
 #[cfg(feature = "webrtc")]
 async fn send_reply(
     dc: &std::sync::Arc<dyn webrtc::data_channel::DataChannel>,
-    session_id: &str,
+    control: &SessionControl,
     msg_id: u64,
     received_unix_ms: u64,
     mut reply: serde_json::Value,
-) {
+) -> Result<(), &'static str> {
     reply["msg_id"] = json!(msg_id);
     if reply.get("received_unix_ms").is_none() {
         reply["received_unix_ms"] = json!(received_unix_ms);
     }
-    let reply_bytes = reply.to_string().into_bytes();
-    let send_result: Result<(), ()> = if reply_bytes.len() > CHUNK_PAYLOAD_MAX {
-        // Large replies are chunked with the same binary framing.
-        let reply_id = msg_id | (1 << 63);
-        let mut ok = true;
-        for (ci, chunk) in frame_chunks(reply_id, &reply_bytes).into_iter().enumerate() {
-            if ci > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            if dc.send(BytesMut::from(&chunk[..])).await.is_err() {
-                ok = false;
-                break;
+    let reply_text = reply.to_string();
+    if reply_text.len() > MESSAGE_MAX_BYTES {
+        return Err("reply exceeds message limit");
+    }
+    let send = async {
+        if reply_text.len() <= CHUNK_PAYLOAD_MAX {
+            wait_reply_capacity(dc, reply_text.len()).await?;
+            dc.send_text(&reply_text)
+                .await
+                .map_err(|_| "reply send failed")?;
+        } else {
+            let count = reply_text.len().div_ceil(CHUNK_PAYLOAD_MAX);
+            for (index, payload) in reply_text.as_bytes().chunks(CHUNK_PAYLOAD_MAX).enumerate() {
+                let len = CHUNK_HEADER_BYTES + payload.len();
+                wait_reply_capacity(dc, len).await?;
+                // Build only the next chunk, rather than copying the whole reply
+                // into another vector of chunks retained until its final send.
+                let mut chunk = BytesMut::with_capacity(len);
+                chunk.extend_from_slice(&FRAMING_MAGIC.to_be_bytes());
+                chunk.extend_from_slice(&(msg_id | (1 << 63)).to_be_bytes());
+                chunk.extend_from_slice(&(index as u32).to_be_bytes());
+                chunk.extend_from_slice(&(count as u32).to_be_bytes());
+                chunk.extend_from_slice(payload);
+                dc.send(chunk).await.map_err(|_| "reply send failed")?;
             }
         }
-        ok.then_some(()).ok_or(())
-    } else {
-        dc.send_text(&reply.to_string())
-            .await
-            .map(|_| ())
-            .map_err(|_| ())
+        Ok(())
     };
-    if send_result.is_err() {
-        log::info!("WebRTC session {}: send failed; closing pump", session_id);
+    tokio::select! {
+        biased;
+        _ = control.cancelled() => Err("session closed"),
+        result = tokio::time::timeout(REPLY_TIMEOUT, send) => {
+            result.map_err(|_| "reply drain timed out")?
+        }
     }
 }
 
-/// Per-session DataChannel frame pump: reassembles binary chunks, dispatches
-/// encode/ping/decode_poll requests through the shared pipeline, and sends
-/// replies with backpressure awareness.
-///
-/// Backpressure: the channel's `buffered_amount_low_threshold` is armed and
-/// sends are throttled while the outstanding (unacked) byte count exceeds the
-/// high-water mark, so a slow consumer cannot balloon server memory.
+#[cfg(feature = "webrtc")]
+fn reply_fits_budget(outstanding: usize, bytes: usize) -> bool {
+    outstanding
+        .checked_add(bytes)
+        .is_some_and(|total| total <= REPLY_HIGH_WATER_BYTES)
+}
+
+#[cfg(feature = "webrtc")]
+async fn wait_reply_capacity(
+    dc: &std::sync::Arc<dyn webrtc::data_channel::DataChannel>,
+    bytes: usize,
+) -> Result<(), &'static str> {
+    loop {
+        let outstanding = dc.outstanding_bytes().await.map_err(|_| "channel closed")?;
+        if reply_fits_budget(outstanding, bytes) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+// Deserialize only the protocol fields: ignored JSON must not expand into a
+// retained Value tree alongside the bounded image/reassembly buffers.
+#[cfg(feature = "webrtc")]
+#[derive(serde::Deserialize)]
+struct FrameRequest {
+    kind: String,
+    #[serde(default)]
+    msg_id: u64,
+    #[serde(default)]
+    sent_unix_ms: u64,
+    #[serde(default)]
+    jpeg_b64: Option<String>,
+}
+
+/// One admitted request and one joined encode job per peer, with no detached
+/// encode or send tasks. Not polling while busy lets the dependency's bounded
+/// receive queue apply SCTP backpressure instead of building an application queue.
+/// This bounds retained work, not queue residence time: an open-loop producer
+/// offering frames faster than lossless encoding must wait for reliable delivery.
 #[cfg(feature = "webrtc")]
 async fn run_frame_pump(
     state: std::sync::Arc<DashboardState>,
     session_id: String,
     dc: std::sync::Arc<dyn webrtc::data_channel::DataChannel>,
+    control: std::sync::Arc<SessionControl>,
 ) {
-    use webrtc::data_channel::DataChannelEvent;
-
     use crate::ws_handler::{
         process_decode_poll, process_encode_frame, DecodeSession, EncodeSession,
     };
+    use webrtc::data_channel::DataChannelEvent;
 
-    log::info!("WebRTC session {} DataChannel open", session_id);
-
-    const HIGH_WATER_BYTES: usize = 4 * 1024 * 1024;
-
-    let encode_session = std::sync::Arc::new(std::sync::Mutex::new(EncodeSession::new()));
+    let mut encode_session = Some(EncodeSession::new());
     let mut decode_session = DecodeSession::new();
     let mut reassembler = Reassembler::default();
-
-    // Backpressure thresholds (bytes): re-arm the send path once the peer
-    // drains below the low threshold.
-    let _ = dc.set_buffered_amount_low_threshold(64 * 1024).await;
-
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_secs(1));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let event = match dc.poll().await {
-            Some(ev) => ev,
-            None => break,
+        let event = tokio::select! {
+            biased;
+            _ = control.cancelled() => break,
+            _ = maintenance.tick() => {
+                reassembler.expire_at(std::time::Instant::now());
+                let expired = {
+                    let sessions = state.webrtc_sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    sessions.get(&session_id).is_none_or(|session| {
+                        session.last_activity.lock().unwrap_or_else(|e| e.into_inner()).elapsed()
+                            >= std::time::Duration::from_secs(SESSION_IDLE_TIMEOUT_SECS)
+                    })
+                };
+                if expired {
+                    break;
+                }
+                continue;
+            }
+            event = dc.poll() => match event {
+                Some(event) => event,
+                None => break,
+            }
         };
         match event {
-            DataChannelEvent::OnClose | DataChannelEvent::OnError => {
-                log::info!("WebRTC session {} DataChannel closed", session_id);
-                break;
-            }
+            DataChannelEvent::OnClose | DataChannelEvent::OnError => break,
             DataChannelEvent::OnMessage(msg) => {
                 {
-                    let mut sessions = state
+                    let sessions = state
                         .webrtc_sessions
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
-                    if let Some(sess) = sessions.get_mut(&session_id) {
-                        *sess.last_activity.lock().unwrap_or_else(|e| e.into_inner()) =
-                            std::time::Instant::now();
-                    }
+                    let Some(session) = sessions.get(&session_id) else {
+                        break;
+                    };
+                    *session
+                        .last_activity
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
                 }
                 let payload = if msg.is_string {
-                    // Control-plane style messages may arrive as plain text.
-                    Some(msg.data.to_vec())
+                    if msg.data.len() > MESSAGE_MAX_BYTES {
+                        break;
+                    }
+                    std::borrow::Cow::Borrowed(msg.data.as_ref())
                 } else {
                     match reassembler.push(&msg.data) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::warn!("WebRTC session {}: chunk dropped: {}", session_id, e);
-                            None
+                        Ok(Some(payload)) => std::borrow::Cow::Owned(payload),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            log::warn!("WebRTC session {}: invalid chunk: {}", session_id, error);
+                            break;
                         }
                     }
                 };
-                let Some(payload) = payload else { continue };
-                let request: serde_json::Value = match serde_json::from_slice(&payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("WebRTC session {}: invalid request JSON: {}", session_id, e);
-                        continue;
-                    }
+                let mut request: FrameRequest = match serde_json::from_slice(payload.as_ref()) {
+                    Ok(request) => request,
+                    Err(_) => break,
                 };
-                let msg_id = request.get("msg_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                drop(payload);
+                let msg_id = request.msg_id;
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-
-                let mut reply = match request.get("kind").and_then(|v| v.as_str()) {
-                    Some("ping") => json!({
-                        "kind": "pong",
-                        "msg_id": msg_id,
-                        "sent_unix_ms": request.get("sent_unix_ms").cloned().unwrap_or(json!(0)),
-                        "received_unix_ms": now_ms,
-                    }),
-                    Some("encode") => {
-                        // Heavy CPU work + the reply send run in a separate task
-                        // so the pump keeps draining the DataChannel event queue
-                        // under sustained frame load.
-                        let b64 = request
-                            .get("jpeg_b64")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        match b64 {
-                            Some(b64) => {
-                                let st = state.clone();
-                                let dc = dc.clone();
-                                let session_id = session_id.clone();
-                                let encode_session = encode_session.clone();
-                                tokio::spawn(async move {
-                                    let reply = match crate::ws_handler::base64_decode(&b64) {
-                                        Ok(jpeg) => tokio::task::spawn_blocking(move || {
-                                            let mut session = encode_session
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
-                                            process_encode_frame(&st, &mut session, &jpeg)
-                                        })
-                                        .await
-                                        .unwrap_or(None)
-                                        .unwrap_or_else(
-                                            || json!({"type": "encode_error", "msg_id": msg_id}),
-                                        ),
-                                        Err(e) => json!({
-                                            "type": "encode_error",
-                                            "msg_id": msg_id,
-                                            "error": e.to_string()
-                                        }),
-                                    };
-                                    send_reply(&dc, &session_id, msg_id, now_ms, reply).await;
-                                });
-                                continue;
-                            }
-                            None => json!({
-                                "type": "encode_error",
-                                "msg_id": msg_id,
-                                "error": "missing jpeg_b64"
-                            }),
-                        }
-                    }
-                    Some("decode_poll") | Some("poll") => {
-                        let mut r = process_decode_poll(&state, &mut decode_session);
-                        r["msg_id"] = json!(msg_id);
-                        r
-                    }
-                    other => {
-                        log::warn!("WebRTC session {}: unknown kind {:?}", session_id, other);
-                        continue;
-                    }
+                // Admission precedes base64 decode and blocking work, and applies
+                // equally to ping, encode, and decode replies.
+                let admitted = tokio::select! {
+                    biased;
+                    _ = control.cancelled() => false,
+                    result = tokio::time::timeout(
+                        REPLY_TIMEOUT,
+                        wait_reply_capacity(&dc, CHUNK_HEADER_BYTES + CHUNK_PAYLOAD_MAX),
+                    ) => matches!(result, Ok(Ok(()))),
                 };
-                // Latency echo: stamp every reply with msg_id + received time.
-                reply["msg_id"] = json!(msg_id);
-                if reply.get("received_unix_ms").is_none() {
-                    reply["received_unix_ms"] = json!(now_ms);
-                }
-
-                // Backpressure: wait until the peer drains before queueing more.
-                while dc.outstanding_bytes().await.unwrap_or(0) > HIGH_WATER_BYTES {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-                let reply_bytes = reply.to_string().into_bytes();
-                let send_result: Result<(), ()> = if reply_bytes.len() > CHUNK_PAYLOAD_MAX {
-                    // Large replies are chunked with the same binary framing.
-                    let reply_id = msg_id | (1 << 63);
-                    let mut ok = true;
-                    for (ci, chunk) in frame_chunks(reply_id, &reply_bytes).into_iter().enumerate()
-                    {
-                        // Pace chunks so the loopback UDP buffers are not overrun.
-                        if ci > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                        }
-                        if dc.send(BytesMut::from(&chunk[..])).await.is_err() {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    ok.then_some(()).ok_or(())
-                } else {
-                    dc.send_text(&reply.to_string())
-                        .await
-                        .map(|_| ())
-                        .map_err(|_| ())
-                };
-                if send_result.is_err() {
-                    log::info!("WebRTC session {}: send failed; closing pump", session_id);
+                if !admitted {
                     break;
                 }
-                log::info!("WebRTC session {}: reply {} fully sent", session_id, msg_id);
+                let reply = match request.kind.as_str() {
+                    "ping" => json!({
+                        "kind": "pong",
+                        "sent_unix_ms": request.sent_unix_ms,
+                    }),
+                    "encode" => {
+                        match request.jpeg_b64.take() {
+                            Some(b64) => {
+                                let _drain = control.encode_drain.lock().await;
+                                if control.is_stopped() {
+                                    break;
+                                }
+                                let mut session =
+                                    encode_session.take().expect("joined encode session");
+                                let encode_state = state.clone();
+                                let encode_control = control.clone();
+                                let job = tokio::task::spawn_blocking(move || {
+                                    let reply = if encode_control.is_stopped() {
+                                        None
+                                    } else {
+                                        match crate::ws_handler::base64_decode(&b64) {
+                                            Ok(jpeg) if jpeg.len() <= MESSAGE_MAX_BYTES => {
+                                                process_encode_frame(
+                                                    &encode_state,
+                                                    &mut session,
+                                                    &jpeg,
+                                                )
+                                            }
+                                            _ => None,
+                                        }
+                                    };
+                                    (session, reply)
+                                });
+                                // Always join: cancelling spawn_blocking would detach
+                                // an encoder that can still mutate the shared cache.
+                                match job.await {
+                                    Ok((session, reply)) => {
+                                        encode_session = Some(session);
+                                        reply.unwrap_or_else(|| {
+                                            json!({
+                                                "type": "encode_error",
+                                                "error": "invalid image or unsupported frame",
+                                            })
+                                        })
+                                    }
+                                    Err(error) => {
+                                        log::warn!(
+                                            "WebRTC session {}: encode job failed: {}",
+                                            session_id,
+                                            error
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => json!({"type": "encode_error", "error": "missing jpeg_b64"}),
+                        }
+                    }
+                    "decode_poll" | "poll" => {
+                        process_decode_poll(&state, &mut decode_session).await
+                    }
+                    _ => json!({"type": "error", "error": "unknown request kind"}),
+                };
+                if let Err(error) = send_reply(&dc, &control, msg_id, now_ms, reply).await {
+                    log::info!("WebRTC session {}: {}", session_id, error);
+                    break;
+                }
             }
             _ => {}
         }
     }
-
+    control.stop();
     let _ = dc.close().await;
     let _ = remove_session(&state, &session_id).await;
 }
@@ -750,8 +1013,8 @@ async fn run_frame_pump(
 //
 // When the browser's offer contains a video m-line and the transport policy
 // allows WebRTC, the server answers with a sendonly H.264 track carrying the
-// stego'd frames as RTP. The browser renders the track in a <video> element;
-// the DataChannel canvas view remains the primary verification surface.
+// rendered preview frames as RTP. H.264 does not retain LSB signatures:
+// only the lossless PNG delivered over the DataChannel is signed evidence.
 
 /// H.264 fmtp line announced for the published video track: baseline
 /// constrained profile, packetization mode 1 — the profile browsers offer
@@ -923,8 +1186,7 @@ struct EncoderSlot {
     encoder: Option<openh264::encoder::Encoder>,
 }
 
-/// Publishes stego'd frames as the H.264 RTP video track of one WebRTC
-/// session.
+/// Publishes a lossy H.264 preview for one WebRTC session, not signed evidence.
 ///
 /// `publish_frame` converts RGB pixels to I420, encodes them with a
 /// session-owned OpenH264 encoder, and hands the Annex-B bitstream to the
@@ -939,6 +1201,7 @@ pub struct MediaPublisher {
     payload_type: std::sync::atomic::AtomicU8,
     encoder: std::sync::Mutex<EncoderSlot>,
     last_frame_at: std::sync::Mutex<Option<std::time::Instant>>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "webrtc")]
@@ -971,6 +1234,7 @@ impl MediaPublisher {
                 encoder: None,
             }),
             last_frame_at: std::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -989,7 +1253,16 @@ impl MediaPublisher {
             .store(pt, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Encode and publish one stego'd frame as RTP.
+    fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.encoder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .encoder = None;
+    }
+
+    /// Encode and publish one preview frame as RTP (LSB data is not preserved).
     ///
     /// `rgb` must be tightly packed RGB8 of the given dimensions. The RTP
     /// timestamp advance is the measured inter-frame delta, clamped to
@@ -1005,8 +1278,18 @@ impl MediaPublisher {
         if pt == 0 {
             return Err(MediaPublishError::NotNegotiated);
         }
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(MediaPublishError::Rtp("publisher closed".into()));
+        }
+        if width == 0
+            || height == 0
+            || width > crate::ws_handler::IMAGE_MAX_DIMENSION
+            || height > crate::ws_handler::IMAGE_MAX_DIMENSION
+        {
+            return Err(MediaPublishError::Encode("invalid frame dimensions".into()));
+        }
         let expected = width as usize * height as usize * 3;
-        if rgb.len() < expected {
+        if rgb.len() != expected {
             return Err(MediaPublishError::Encode(format!(
                 "RGB buffer {} bytes, expected {} for {}x{}",
                 rgb.len(),
@@ -1075,7 +1358,7 @@ impl MediaPublisher {
         let sample = rtc::media::Sample {
             data: bytes::Bytes::from(annexb),
             duration,
-            ..Default::default()
+            ..rtc::media::Sample::new(now)
         };
         self.track
             .write_sample(self.ssrc, pt, &sample, &[])
@@ -1165,8 +1448,11 @@ async fn setup_media_sender(
     );
 
     let track = std::sync::Arc::new(
-        webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample::new(media_track)
-            .map_err(|e| format!("track creation failed: {}", e))?,
+        webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample::new(
+            std::time::Instant::now(),
+            media_track,
+        )
+        .map_err(|e| format!("track creation failed: {}", e))?,
     );
     let transceiver = pc
         .add_transceiver_from_track(
@@ -1209,23 +1495,26 @@ async fn discover_h264_payload_type(
     None
 }
 
-/// Per-session media pump: polls the shared encode pipeline for newly stego'd
-/// frames and publishes them on the session's H.264 track.
-///
-/// The pipeline stores every encoded frame's raw stego'd pixels in
-/// `DashboardState::last_encoded_frame` (shared by the WebSocket and
-/// DataChannel transports), so the pump publishes with zero extra JPEG
-/// decoding. Exits once the session leaves `webrtc_sessions` and removes its
-/// publisher from `media_publishers`.
+/// Publish new cache revisions as a lossy preview. Revisions, unlike encoder
+/// frame indices, remain monotonic when an encoder reconnects or is replaced.
 #[cfg(feature = "webrtc")]
 async fn run_media_pump(
     state: std::sync::Arc<DashboardState>,
     session_id: String,
     publisher: std::sync::Arc<MediaPublisher>,
+    control: std::sync::Arc<SessionControl>,
 ) {
     let mut last_published: Option<u64> = None;
     loop {
-        tokio::time::sleep(MEDIA_PUMP_POLL_INTERVAL).await;
+        tokio::select! {
+            biased;
+            _ = control.cancelled() => break,
+            _ = tokio::time::sleep(MEDIA_PUMP_POLL_INTERVAL) => {}
+        }
+        let _drain = control.media_drain.lock().await;
+        if control.is_stopped() {
+            break;
+        }
         let session_alive = state
             .webrtc_sessions
             .lock()
@@ -1240,27 +1529,40 @@ async fn run_media_pump(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(f) if Some(f.frame_index) > last_published => {
-                    Some((f.frame_index, f.width, f.height, f.rgb_data.clone()))
-                }
+                Some(frame) if Some(frame.revision) > last_published => Some((
+                    frame.revision,
+                    frame.width,
+                    frame.height,
+                    frame.rgb_data.clone(),
+                )),
                 _ => None,
             }
         };
-        let Some((frame_index, width, height, rgb)) = next else {
+        let Some((revision, width, height, rgb)) = next else {
             continue;
         };
-        match publisher.publish_frame(width, height, &rgb).await {
-            Ok(()) => last_published = Some(frame_index),
-            Err(MediaPublishError::NotNegotiated) => {}
-            Err(e) => log::warn!("WebRTC session {}: media publish failed: {}", session_id, e),
+        match tokio::time::timeout(REPLY_TIMEOUT, publisher.publish_frame(width, height, &rgb))
+            .await
+        {
+            Ok(Ok(())) => last_published = Some(revision),
+            Ok(Err(MediaPublishError::NotNegotiated)) => {}
+            result => {
+                log::warn!(
+                    "WebRTC session {}: media publishing stopped: {:?}",
+                    session_id,
+                    result
+                );
+                control.stop();
+                break;
+            }
         }
     }
+    publisher.close();
     state
         .media_publishers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&session_id);
-    log::info!("WebRTC session {}: media pump stopped", session_id);
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1268,6 +1570,58 @@ async fn run_media_pump(
 #[cfg(all(test, feature = "webrtc"))]
 mod tests {
     use super::*;
+
+    static LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn test_state() -> std::sync::Arc<DashboardState> {
+        use std::sync::{Arc, Mutex};
+        let signer = steganographer_core::Signer::generate();
+        Arc::new(DashboardState {
+            metrics: Arc::new(steganographer_core::StegoMetrics::new()),
+            signing_backend: "ed25519".into(),
+            identity: steganographer_core::crypto::encode_hex(&signer.verifying_key().to_bytes()),
+            width: 320,
+            height: 240,
+            last_encoded_frame: Mutex::new(None),
+            last_encoded_audio: Mutex::new(None),
+            live_config: Mutex::new(crate::LiveConfig::default()),
+            session_start: std::time::Instant::now(),
+            auth_token: None,
+            ots_config: steganographer_core::OtsConfig::default(),
+            ots_client: None,
+            ots_outcome: Mutex::new(None),
+            signer,
+            audio_key: [7; 32],
+            transport: crate::TransportPolicy::Auto,
+            webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
+            ice_servers: Vec::new(),
+            media_publishers: Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    async fn test_peer(
+        control: std::sync::Arc<SessionControl>,
+    ) -> std::sync::Arc<dyn webrtc::peer_connection::PeerConnection> {
+        let mut media_engine = webrtc::peer_connection::MediaEngine::default();
+        media_engine.register_default_codecs().unwrap();
+        let (dc_tx, _) = tokio::sync::mpsc::channel(1);
+        let (gather_tx, _) = tokio::sync::mpsc::channel(1);
+        std::sync::Arc::new(
+            webrtc::peer_connection::PeerConnectionBuilder::<String>::new()
+                .with_media_engine(media_engine)
+                .with_data_channel_send_buffer_limit(REPLY_HIGH_WATER_BYTES)
+                .with_udp_addrs(vec!["127.0.0.1:0".to_string()])
+                .with_handler(std::sync::Arc::new(SessionEventHandler {
+                    dc_tx,
+                    gather_tx,
+                    channel_seen: std::sync::atomic::AtomicBool::new(false),
+                    control,
+                }))
+                .build()
+                .await
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_chunk_framing_single_chunk_roundtrip() {
@@ -1323,5 +1677,524 @@ mod tests {
         assert!(re.push(&a[0]).unwrap().is_none());
         assert!(re.push(&b[0]).unwrap().is_some()); // b completes first
         assert!(re.push(&a[1]).unwrap().is_some()); // now a
+    }
+
+    fn chunk(msg_id: u64, index: u32, count: u32, payload: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(CHUNK_HEADER_BYTES + payload.len());
+        chunk.extend_from_slice(&FRAMING_MAGIC.to_be_bytes());
+        chunk.extend_from_slice(&msg_id.to_be_bytes());
+        chunk.extend_from_slice(&index.to_be_bytes());
+        chunk.extend_from_slice(&count.to_be_bytes());
+        chunk.extend_from_slice(payload);
+        chunk
+    }
+
+    #[test]
+    fn chunk_counts_are_rejected_before_partial_allocation() {
+        let mut re = Reassembler::default();
+        for count in [0, MESSAGE_MAX_CHUNKS as u32 + 1, u32::MAX] {
+            assert!(re.push(&chunk(1, 0, count, &[])).is_err());
+            assert!(re.partial.is_empty());
+            assert_eq!(re.retained_bytes, 0);
+        }
+        assert!(re.push(&chunk(1, 2, 2, &[])).is_err());
+        assert!(re
+            .push(&chunk(1, 0, 1, &vec![0; CHUNK_PAYLOAD_MAX + 1]))
+            .is_err());
+        assert!(re.partial.is_empty());
+    }
+
+    #[test]
+    fn incomplete_message_count_has_a_fixed_bound() {
+        let mut re = Reassembler::default();
+        for msg_id in 0..INCOMPLETE_MESSAGE_MAX as u64 {
+            assert!(re.push(&chunk(msg_id, 0, 2, &[1])).unwrap().is_none());
+        }
+        assert!(re.push(&chunk(100, 0, 2, &[1])).is_err());
+        assert_eq!(re.partial.len(), INCOMPLETE_MESSAGE_MAX);
+        assert_eq!(re.retained_bytes, INCOMPLETE_MESSAGE_MAX);
+    }
+
+    #[test]
+    fn message_bytes_are_bounded_even_with_a_valid_chunk_count() {
+        let mut re = Reassembler::default();
+        let payload = vec![7; CHUNK_PAYLOAD_MAX];
+        for index in 0..MESSAGE_MAX_CHUNKS as u32 - 1 {
+            assert!(re
+                .push(&chunk(1, index, MESSAGE_MAX_CHUNKS as u32, &payload))
+                .unwrap()
+                .is_none());
+        }
+        assert!(re
+            .push(&chunk(
+                1,
+                MESSAGE_MAX_CHUNKS as u32 - 1,
+                MESSAGE_MAX_CHUNKS as u32,
+                &payload,
+            ))
+            .is_err());
+        assert!(re.partial.is_empty());
+        assert_eq!(re.retained_bytes, 0);
+    }
+
+    #[test]
+    fn aggregate_retained_bytes_are_bounded_across_messages() {
+        let mut re = Reassembler::default();
+        let payload = vec![7; CHUNK_PAYLOAD_MAX];
+        for msg_id in 0..2 {
+            for index in 0..MESSAGE_MAX_CHUNKS as u32 - 1 {
+                assert!(re
+                    .push(&chunk(msg_id, index, MESSAGE_MAX_CHUNKS as u32, &payload))
+                    .unwrap()
+                    .is_none());
+            }
+        }
+        let retained = re.retained_bytes;
+        assert!(retained <= RETAINED_MESSAGE_MAX_BYTES);
+        assert!(re
+            .push(&chunk(3, 0, MESSAGE_MAX_CHUNKS as u32, &payload))
+            .is_err());
+        assert_eq!(re.retained_bytes, retained);
+        assert_eq!(re.partial.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_chunks_do_not_extend_absolute_expiry_or_charge_bytes() {
+        let mut re = Reassembler::default();
+        let now = std::time::Instant::now();
+        let first = chunk(1, 0, 2, &[1, 2, 3]);
+        assert!(re.push_at(&first, now).unwrap().is_none());
+        assert!(re
+            .push_at(
+                &first,
+                now + std::time::Duration::from_secs(MESSAGE_EXPIRY_SECS - 1),
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(re.retained_bytes, 3);
+        re.expire_at(now + std::time::Duration::from_secs(MESSAGE_EXPIRY_SECS));
+        assert!(re.partial.is_empty());
+        assert_eq!(re.retained_bytes, 0);
+        // An old final chunk cannot resurrect the expired first chunk.
+        assert!(re
+            .push_at(
+                &chunk(1, 1, 2, &[4]),
+                now + std::time::Duration::from_secs(MESSAGE_EXPIRY_SECS),
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(re.retained_bytes, 1);
+    }
+
+    #[test]
+    fn completion_and_count_mismatch_release_retained_budget() {
+        let mut re = Reassembler::default();
+        assert!(re.push(&chunk(1, 0, 2, &[1, 2])).unwrap().is_none());
+        assert_eq!(re.push(&chunk(1, 1, 2, &[3])).unwrap(), Some(vec![1, 2, 3]));
+        assert!(re.partial.is_empty());
+        assert_eq!(re.retained_bytes, 0);
+        assert!(re.push(&chunk(2, 0, 2, &[1, 2])).unwrap().is_none());
+        assert!(re.push(&chunk(2, 1, 3, &[3])).is_err());
+        assert!(re.partial.is_empty());
+        assert_eq!(re.retained_bytes, 0);
+    }
+
+    #[test]
+    fn empty_payload_has_one_complete_frame() {
+        let chunks = frame_chunks(1, &[]);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            Reassembler::default().push(&chunks[0]).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn exact_message_limit_roundtrips_without_retaining_completed_bytes() {
+        let payload = vec![0xA5; MESSAGE_MAX_BYTES];
+        let chunks = frame_chunks(1, &payload);
+        assert_eq!(chunks.len(), MESSAGE_MAX_CHUNKS);
+        let mut re = Reassembler::default();
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(re.push(chunk).unwrap().is_none());
+        }
+        assert_eq!(re.push(chunks.last().unwrap()).unwrap(), Some(payload));
+        assert!(re.partial.is_empty());
+        assert_eq!(re.retained_bytes, 0);
+    }
+
+    #[test]
+    fn expiration_releases_incomplete_slots_before_new_admission() {
+        let now = std::time::Instant::now();
+        let mut re = Reassembler::default();
+        for msg_id in 0..INCOMPLETE_MESSAGE_MAX as u64 {
+            assert!(re
+                .push_at(&chunk(msg_id, 0, 2, &[1]), now)
+                .unwrap()
+                .is_none());
+        }
+        assert!(re
+            .push_at(
+                &chunk(100, 0, 2, &[2]),
+                now + std::time::Duration::from_secs(MESSAGE_EXPIRY_SECS),
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(re.partial.len(), 1);
+        assert_eq!(re.retained_bytes, 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_latched_before_a_waiter_subscribes() {
+        static SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let control = SessionControl::new(SLOT.try_acquire().unwrap());
+        control.stop();
+        assert!(control.is_stopped());
+        tokio::time::timeout(std::time::Duration::from_millis(100), control.cancelled())
+            .await
+            .expect("an already stopped session must not wait for a new notification");
+    }
+
+    /// Stop consuming on a real reliable channel until the bounded reply sender
+    /// encounters backpressure, then drain and verify every byte of every reply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn slow_consumer_backpressures_replies_without_loss_or_budget_overshoot() {
+        use std::sync::Arc;
+        use webrtc::data_channel::DataChannelEvent;
+        use webrtc::peer_connection::PeerConnectionBuilder;
+
+        static SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let control = Arc::new(SessionControl::new(SLOT.try_acquire().unwrap()));
+        let (server_dc_tx, mut server_dc_rx) = tokio::sync::mpsc::channel(1);
+        let (server_gather_tx, mut server_gather_rx) = tokio::sync::mpsc::channel(1);
+        let server: Arc<dyn webrtc::peer_connection::PeerConnection> = Arc::new(
+            PeerConnectionBuilder::<String>::new()
+                .with_udp_addrs(vec!["127.0.0.1:0".into()])
+                .with_data_channel_send_buffer_limit(REPLY_HIGH_WATER_BYTES)
+                .with_handler(Arc::new(SessionEventHandler {
+                    dc_tx: server_dc_tx,
+                    gather_tx: server_gather_tx,
+                    channel_seen: std::sync::atomic::AtomicBool::new(false),
+                    control: control.clone(),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let (client_dc_tx, _client_dc_rx) = tokio::sync::mpsc::channel(1);
+        let (client_gather_tx, mut client_gather_rx) = tokio::sync::mpsc::channel(1);
+        let client: Arc<dyn webrtc::peer_connection::PeerConnection> = Arc::new(
+            PeerConnectionBuilder::<String>::new()
+                .with_udp_addrs(vec!["127.0.0.1:0".into()])
+                .with_handler(Arc::new(SessionEventHandler {
+                    dc_tx: client_dc_tx,
+                    gather_tx: client_gather_tx,
+                    channel_seen: std::sync::atomic::AtomicBool::new(false),
+                    control: control.clone(),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let client_dc = client.create_data_channel("frames", None).await.unwrap();
+        client
+            .set_local_description(client.create_offer(None).await.unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), client_gather_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        server
+            .set_remote_description(client.local_description().await.unwrap())
+            .await
+            .unwrap();
+        server
+            .set_local_description(server.create_answer(None).await.unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), server_gather_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        client
+            .set_remote_description(server.local_description().await.unwrap())
+            .await
+            .unwrap();
+        let server_dc =
+            tokio::time::timeout(std::time::Duration::from_secs(10), server_dc_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        for dc in [&client_dc, &server_dc] {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    match dc.poll().await {
+                        Some(DataChannelEvent::OnOpen) => break,
+                        Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) | None => {
+                            panic!("channel closed during negotiation");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        // Exceed both transport receive queues and the SCTP window, not merely
+        // the application chunk size. No consumer pump may drain in this phase.
+        const REPLIES: u64 = 8;
+        const BODY_BYTES: usize = MESSAGE_MAX_BYTES - 4096;
+        let send_dc = server_dc.clone();
+        let send_control = control.clone();
+        let sender = tokio::spawn(async move {
+            for id in 1..=REPLIES {
+                wait_reply_capacity(&send_dc, CHUNK_HEADER_BYTES + CHUNK_PAYLOAD_MAX)
+                    .await
+                    .unwrap();
+                send_reply(
+                    &send_dc,
+                    &send_control,
+                    id,
+                    0,
+                    json!({
+                        "body": ((b'a' + id as u8) as char).to_string().repeat(BODY_BYTES),
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let outstanding = server_dc.outstanding_bytes().await.unwrap();
+                assert!(outstanding <= REPLY_HIGH_WATER_BYTES);
+                if outstanding > REPLY_HIGH_WATER_BYTES - CHUNK_HEADER_BYTES - CHUNK_PAYLOAD_MAX {
+                    assert!(
+                        !sender.is_finished(),
+                        "consumer has not drained the offered workload"
+                    );
+                    break;
+                }
+                assert!(
+                    !sender.is_finished(),
+                    "workload must encounter real backpressure"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reply queue never reached its bounded high water");
+
+        let mut reassembler = Reassembler::default();
+        for id in 1..=REPLIES {
+            let payload = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                loop {
+                    assert!(server_dc.outstanding_bytes().await.unwrap() <= REPLY_HIGH_WATER_BYTES);
+                    match client_dc.poll().await {
+                        Some(DataChannelEvent::OnMessage(message)) => {
+                            assert!(!message.is_string, "large replies use chunk framing");
+                            if let Some(payload) = reassembler.push(&message.data).unwrap() {
+                                break payload;
+                            }
+                        }
+                        Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) | None => {
+                            panic!("channel closed before lossless delivery");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("reply delivery stalled after consumer resumed");
+            let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(
+                reply["msg_id"], id,
+                "exactly one ordered reply per admission"
+            );
+            let body = reply["body"].as_str().unwrap().as_bytes();
+            assert_eq!(body.len(), BODY_BYTES);
+            assert!(body.iter().all(|&byte| byte == b'a' + id as u8));
+        }
+        sender.await.unwrap();
+        server.close().await.unwrap();
+        client.close().await.unwrap();
+        assert!(server_dc.send_text("after close").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn config_credentials_require_the_configured_bearer_token() {
+        let mut state = test_state();
+        let config = std::sync::Arc::get_mut(&mut state).unwrap();
+        config.auth_token = Some("dashboard-secret".into());
+        config.ice_servers = vec!["turn:user:turn-secret@relay.invalid:3478".into()];
+        config.transport = crate::TransportPolicy::Websocket;
+        for token in [None, Some("Bearer wrong")] {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert(axum::http::header::AUTHORIZATION, token.parse().unwrap());
+            }
+            let response = api_webrtc_config(State(state.clone()), headers).await;
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("turn-secret"));
+        }
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer dashboard-secret".parse().unwrap(),
+        );
+        let response = api_webrtc_config(State(state), headers).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            response["ice_servers"][0],
+            "turn:user:turn-secret@relay.invalid:3478"
+        );
+        assert_eq!(response["default_transport"], "websocket");
+        assert_eq!(response["data_channel"], true);
+        assert_eq!(response["media"], false);
+        assert_eq!(response["capabilities"]["signed_media"], "image/png");
+    }
+
+    #[tokio::test]
+    async fn strict_invalid_sdp_never_retains_a_session_admission() {
+        let _serial = LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let before = SESSION_SLOTS.available_permits();
+        for _ in 0..3 {
+            let response = handle_offer_with_webrtc(
+                state.clone(),
+                OfferRequest {
+                    kind: "offer".into(),
+                    sdp: "v=0\r\no=bogus\r\n".into(),
+                },
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        assert!(state.webrtc_sessions.lock().unwrap().is_empty());
+        assert!(state.media_publishers.lock().unwrap().is_empty());
+        assert_eq!(SESSION_SLOTS.available_permits(), before);
+    }
+
+    #[tokio::test]
+    async fn session_limit_rejects_an_offer_before_building_a_peer() {
+        let _serial = LIFECYCLE_TEST_LOCK.lock().await;
+        let _slots = SESSION_SLOTS
+            .try_acquire_many(WEBRTC_SESSION_MAX as u32)
+            .unwrap();
+        let state = test_state();
+        let response = handle_offer_with_webrtc(
+            state.clone(),
+            OfferRequest {
+                kind: "offer".into(),
+                sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(state.webrtc_sessions.lock().unwrap().is_empty());
+        assert!(state.media_publishers.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_pump_closes_publishers_and_drains_admitted_work_before_removal() {
+        let _serial = LIFECYCLE_TEST_LOCK.lock().await;
+        let state = test_state();
+        let control =
+            std::sync::Arc::new(SessionControl::new(SESSION_SLOTS.try_acquire().unwrap()));
+        let pc = test_peer(control.clone()).await;
+        let dc = pc.create_data_channel("frames", None).await.unwrap();
+        let publisher = setup_media_sender(&pc).await.unwrap();
+        let session_id = register_session(&state, pc, control.clone());
+        state
+            .media_publishers
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), publisher.clone());
+        *state.webrtc_sessions.lock().unwrap()[&session_id]
+            .last_activity
+            .lock()
+            .unwrap() = std::time::Instant::now()
+            - std::time::Duration::from_secs(SESSION_IDLE_TIMEOUT_SECS + 1);
+        let drain = control.encode_drain.lock().await;
+        let pump = tokio::spawn(run_frame_pump(
+            state.clone(),
+            session_id.clone(),
+            dc,
+            control.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), control.cancelled())
+            .await
+            .unwrap();
+        assert!(
+            !pump.is_finished(),
+            "admitted work must be drained, not detached"
+        );
+        assert!(state
+            .webrtc_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&session_id));
+        assert!(state
+            .media_publishers
+            .lock()
+            .unwrap()
+            .contains_key(&session_id));
+        drop(drain);
+        tokio::time::timeout(std::time::Duration::from_secs(3), pump)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.webrtc_sessions.lock().unwrap().is_empty());
+        assert!(state.media_publishers.lock().unwrap().is_empty());
+        assert!(publisher.closed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(publisher.encoder.lock().unwrap().encoder.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_offer_guard_explicitly_closes_its_peer() {
+        let _serial = LIFECYCLE_TEST_LOCK.lock().await;
+        let control =
+            std::sync::Arc::new(SessionControl::new(SESSION_SLOTS.try_acquire().unwrap()));
+        let pc = test_peer(control.clone()).await;
+        let dc = pc.create_data_channel("frames", None).await.unwrap();
+        let guard = OfferPeerGuard {
+            pc: Some(pc.clone()),
+            control,
+        };
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while dc.poll().await.is_some() {}
+        })
+        .await
+        .unwrap();
+        assert!(dc.send_text("after close").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn oversize_reply_is_rejected_without_queueing_channel_bytes() {
+        let _serial = LIFECYCLE_TEST_LOCK.lock().await;
+        let control =
+            std::sync::Arc::new(SessionControl::new(SESSION_SLOTS.try_acquire().unwrap()));
+        let pc = test_peer(control.clone()).await;
+        let dc = pc.create_data_channel("frames", None).await.unwrap();
+        let reply = json!({"frame": "x".repeat(MESSAGE_MAX_BYTES)});
+        assert_eq!(
+            send_reply(&dc, &control, 1, 0, reply).await,
+            Err("reply exceeds message limit"),
+        );
+        assert_eq!(dc.outstanding_bytes().await.unwrap(), 0);
+        pc.close().await.unwrap();
     }
 }

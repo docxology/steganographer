@@ -15,6 +15,17 @@ pub struct AudioBuffer<'a> {
 }
 
 impl<'a> AudioBuffer<'a> {
+    /// Validate interleaved S16 sample geometry before processing.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.channels > 0, "Audio channels must be positive");
+        anyhow::ensure!(self.sample_rate > 0, "Audio sample rate must be positive");
+        anyhow::ensure!(
+            self.samples.len().is_multiple_of(self.channels as usize),
+            "Audio buffer contains an incomplete interleaved frame"
+        );
+        Ok(())
+    }
+
     /// Total number of samples across all channels.
     pub fn sample_count(&self) -> usize {
         self.samples.len()
@@ -42,4 +53,28 @@ pub trait AudioStegoModule: Send {
 
     /// Extract a signature payload from an audio buffer.
     fn extract(&self, buf: &AudioBuffer) -> anyhow::Result<Option<SignaturePayload>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_or_undefined_audio_geometry_is_rejected() {
+        let mut samples = [0; 3];
+        let mut buffer = AudioBuffer {
+            channels: 2,
+            sample_rate: 48000,
+            samples: &mut samples,
+            frame_index: 0,
+        };
+        assert!(buffer.validate().is_err());
+        buffer.channels = 1;
+        assert!(buffer.validate().is_ok());
+        buffer.sample_rate = 0;
+        assert!(buffer.validate().is_err());
+        buffer.sample_rate = 48000;
+        buffer.channels = 0;
+        assert!(buffer.validate().is_err());
+    }
 }

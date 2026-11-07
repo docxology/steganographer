@@ -2,63 +2,65 @@
 
 ## Purpose
 
-Web-based live dashboard for real-time round-trip steganography verification. Serves a single-page application via Axum with three tabs (Video, Audio, Documentation, plus an OpenTimestamps panel) that displays encode and decode panels side-by-side with frame-level metrics, live configuration controls, and signature preview. Decode handlers perform **real signature verification** against the pre-embed bytes using the session-wide keypair's public half.
+Axum dashboard with Video, Audio and Documentation tabs plus an OpenTimestamps panel. Live signing supports **Ed25519 + BLAKE3 + LSB only**. Verification extracts from the actual delivered lossless PNG / signed PCM, not a private pre-embed snapshot. UI verification labels are server-reported, not browser-side cryptographic verification of exported archives.
 
 ## Module Map
 
-| File | Lines | Key Functions |
-| ------ | ------- | --------------- |
-| `src/lib.rs` | 648 | `DashboardState` (incl. `signer`, `audio_key`, `ots_config`, `ots_client`), `LiveConfig` (incl. `transport: Transport`), `create_router()`, `start_server()`, `check_auth()`, `validate_live_config()`, OTS endpoints, embedded static assets, docs API |
-| `src/ws_handler.rs` | 1367 | `ws_encode_handler()`, `ws_decode_handler()`, `ws_audio_encode_handler()`, `ws_audio_decode_handler()`, `ws_gate()` (origin 403 + `?token=`/`bearer-<token>` 401), shared `FramePipeline` (sign → LSB embed → async bounded verify via `store_frame_and_enqueue_verify`, reused by the WebRTC path), `verify_signature()`, `EncodedFrame`/`EncodedAudioChunk` (pre-embed snapshots), `ots_metrics_json()` |
-| `src/webrtc.rs` | 409 | `api_webrtc_offer()` (WHIP-style POST, auth-gated, non-trickle answer), `WebrtcHandler` (`on_data_channel` frame loop), `reap_connection()` — webrtc-rs 0.21 data-channel transport into the shared pipeline |
+| File | Responsibility |
+| --- | --- |
+| `src/lib.rs` | `LiveConfig`, `DashboardState`, router, config/session/version/docs handlers, mutation auth/Origin policy and OTS integration |
+| `src/ws_handler.rs` | WebSocket gates, shared bounded signing pipeline, delivered-artifact extraction/verification, public identity, cache revisions and async verify slots |
+| `src/webrtc.rs` | Feature-gated SDP/data-channel transport, bounded assembly/admission/replies, shared encoder, peer/publisher lifecycle cleanup |
+| `src/static/app.js` | Video lifecycle, transport policy, config hydration/serialized updates, preview, server-result matching and stored-ZIP artifact archives |
+| `src/static/audio_tab.js` | Microphone lifecycle, bounded audio requests, returned signed-PCM playback/archives and server-reported verification |
+| `src/static/docs_tab.js` | Markdown navigation, sanitized rendering or safe text fallback |
+| `src/static/ots.js` | Real OTS status/stamp/verify UI; pending is not verified |
 
 ## Routes
 
-| Path | Method | Handler |
-| ------ | -------- | --------- |
-| `/` | GET | Serve `index.html` (Video + Audio + Docs tabs) |
-| `/style.css` | GET | Serve stylesheet |
-| `/app.js` | GET | Serve video tab JavaScript |
-| `/audio_tab.js` | GET | Serve audio tab JavaScript |
-| `/docs_tab.js` | GET | Serve docs tab JavaScript |
-| `/ots.js` | GET | Serve OpenTimestamps panel JavaScript |
-| `/ws/encode` | WS | Video encode — JPEG → LSB embed + sign → encoded frame |
-| `/ws/decode` | WS | Video decode — extract LSB payload → verify signature → result + signature preview |
-| `/ws/audio/encode` | WS | Audio encode — PCM → LSB embed + sign → signed chunk |
-| `/ws/audio/decode` | WS | Audio decode — extract LSB payload → verify signature → result + signature preview |
-| `/api/metrics` | GET | JSON metrics (frames, FPS, latency) |
-| `/api/metrics/reset` | POST | Reset metrics counters |
-| `/api/config` | GET/POST | Get/update live config (lsbBits, opacity, overlay, signRate, qrScale, resolution, stegoType, hashAlgorithm, encrypt, ecc, transport; POST validated: lsbBits 1–4, opacity 0.0–1.0, signRateMs ≥ 50, transport ∈ {websocket, webrtc}) |
-| `/api/session` | GET | Session stats: uptime, config snapshot, metrics, backend, identity |
-| `/api/version` | GET | Version info |
-| `/api/docs` | GET | List available documentation files |
-| `/api/docs/{name}` | GET | Return raw markdown content of a doc file |
-| `/ots/status` | GET | OpenTimestamps configuration status |
-| `/ots/stamp` | POST | Stamp a payload's Merkle root |
-| `/ots/verify` | POST | Verify an OTS proof |
-| `/api/webrtc/offer` | POST | WHIP-style signaling: browser SDP offer in, non-trickle answer out; data channel feeds the encode pipeline |
+| Path | Purpose |
+| --- | --- |
+| `/`, `/style.css`, `/app.js`, `/audio_tab.js`, `/docs_tab.js`, `/ots.js` | Embedded UI assets |
+| `/ws/encode`, `/ws/decode` | Image input → signed PNG; extraction/verification results |
+| `/ws/audio/encode`, `/ws/audio/decode` | PCM input → actual signed PCM; extraction/verification results |
+| `/api/config` | GET/POST snake_case live config; unsupported settings reject |
+| `/api/session`, `/api/version`, `/api/metrics` | Runtime identity/config/version and server metrics |
+| `/api/metrics/reset` | Guarded metrics reset |
+| `/api/docs`, `/api/docs/{name}` | Documentation inventory and Markdown |
+| `/api/webrtc/config` | Bearer-protected when configured; ICE capabilities, actual identity and default transport |
+| `/api/webrtc/offer` | Guarded SDP offer; shared signed-media data-channel pipeline when compiled |
+| `/ots/status`, `/ots/stamp`, `/ots/verify` | Current media commitment availability, bounded real proof operations |
 
-## Dynamic LSB Configuration
+## Signed Media and Identity Contract
 
-The dashboard supports live LSB bit-depth changes (1–4) via the UI slider. Both encode and decode handlers read the current `lsb_bits` from `DashboardState.live_config` each frame, ensuring encode/decode are always in sync. Audio uses `EncodedAudioChunk.lsb_bits` for the same purpose.
+- State owns one actual Ed25519 signer. Advertised `public_key`/identity must match it and stay stable for the runtime. Do not generate a decorative second identity. A runtime public key is not independently established person/organization identity; caller applications must pin a trusted key separately.
+- Video responses retain base64 `frame`, with `image_mime: "image/png"`, dimensions, frame index, LSB bit depth, public key and payload/commitment metadata. Verification decodes the exact delivered PNG, extracts the payload and recomputes kernel-canonical media binding.
+- Audio responses contain the actual signed `pcm_s16le`, sample rate/channels, frame index, LSB bit depth, public key and public `embedding_key` extraction metadata. Never verify or export unsigned microphone originals instead.
+- Canonical media excludes kernel-owned low-bit regions. Neither this signature nor generic payload signatures authenticate every file/container byte or arbitrary metadata field. Exact-artifact OTS commitments are a distinct scope.
+- Cache revisions are server-wide monotonic values, separate from connection-local sequence/frame indices. Results must match both artifact index and revision; a reconnect/config change cannot relabel stale verification as current. Use the artifact's bit depth, not latest config.
 
-## Security
-- **Default bind**: `127.0.0.1` (local-only). Use `--host 0.0.0.0` for network access.
-- **Auth**: `--auth-token <token>` enables Bearer token auth on the guarded POST routes (`/api/config`, `/api/metrics/reset`, `/ots/stamp`, `/ots/verify`, `/api/webrtc/offer`). Token comparison is constant-time via `subtle::ConstantTimeEq`. The WebRTC signaling POST needs no Origin check: a POST carries no ambient credentials and the response is unreadable cross-origin without CORS headers.
-- **WebRTC transport** (`transport: "webrtc"` in live config, or the UI toggle): data-channel messages reuse the WS size caps (4 MiB message, 4096×4096 image); answer PCs are closed by a reaper on disconnect/failure/data-channel-close or after a 60 s never-connected deadline.
-- **Real verification**: video/audio decode handlers verify the extracted `SignaturePayload` against the pre-embed pixel/sample snapshot (`signed_rgb` / `signed_samples`) using `DashboardState.signer`'s public half — a tampered frame flips `verified` to `false`. The session-wide `audio_key` (32 random bytes at startup) is shared by the audio encode/decode handlers.
-- **CORS**: Restricted to GET/POST methods with Content-Type header. No permissive cross-origin access.
-- **Warning**: Binding `0.0.0.0` without `--auth-token` logs a security warning.
+## UI and Archive Contract
 
-## Tech Stack
+- Preview opacity is display-only. Signed visual overlays, QR, MetaMask and Ethereum dashboard modes are unavailable; do not reinstate decorative controls that pretend to work. Library signing backends are not dashboard support.
+- Capture is sampled and backpressured, not continuous proof. Client signing has one in-flight request and lifecycle/request generations; stale async work must not draw, verify or archive into a new session.
+- Record stores exact returned PNG snapshots or signed PCM wrapped in WAV chunks in a bounded stored-ZIP with `manifest.json`. Include per-artifact public key, index, revision, bit depth and audio extraction metadata. No VP9/WebM re-encoding or original-microphone export as signed evidence.
+- Manifest metadata and session/metric exports are not independent trust evidence. The browser does not independently verify archives. Downloaded PNG/WAV entries require separate extraction/signature verification with an independently trusted public key; gaps and sampling remain relevant.
+- Entry/byte caps stop recording visibly before the next artifact, not silently drop it. Do not hardcode release validation counters in UI/docs.
+- Markdown HTML enters the DOM only after sanitization. Missing/failed renderer or sanitizer falls back to text, including offline use. Never insert raw `marked` output.
 
-- **Axum 0.8** with WebSocket support
-- **tokio** async runtime
-- **tower-http** CORS layer
-- **image** crate for JPEG ↔ RGB conversion
-- **base64** for binary frame encoding
-- Static assets embedded via `include_str!`
+## Configuration, Authentication and Transport
 
-## Test Coverage
+- Hydrate all supported live settings before serialized full-object POSTs. API fields are snake_case. Reject unsupported backend/hash/kernel/encryption/ECC selections rather than treating them as ignored switches.
+- Default bind is loopback. Bearer auth guards mutation routes and `/api/webrtc/config` when configured; public GET routes are not all protected. Tokenless mutations reject foreign browser Origin. WebSocket upgrades require allowed Origin and configured token via query/subprotocol. Absent Origin is permitted for nonbrowser use; it does not prove local identity.
+- CORS is not authentication. Network exposure needs deliberate token/TLS/reverse-proxy policy; warning on a tokenless non-loopback bind does not make it safe.
+- Video preference precedence: URL query > saved choice > server default. Only `auto` falls back from WebRTC to WebSocket. Pinned WebRTC fails visibly, and fallback must not overwrite the saved choice. Audio remains WebSocket.
+- WebSocket message/image/audio bounds, encoder admission, bounded verification queues and WebRTC chunk/reply/admission limits are required. Overload reports failure instead of unbounded queueing. Verification waits use async notification/deadlines, not reactor-blocking sleeps.
+- Stop/failure/reconnect must clear signing state, timers, sockets, peers, chunk assemblies, tracks and publishers. Server peers close on failure/disconnect/idle or never-connected timeout, including failed signaling paths.
 
-52 tests in `tests/dashboard_tests.rs` (plus 6 WebRTC/transport tests: transport serde, signaling auth/type/SDP validation, config transport field, and an in-process two-PeerConnection data-channel round trip through the real endpoint)
+## OTS Boundary
+
+Stamp the latest actual signed-media digest or reject when none exists. Pending calendar proof is not verified/Bitcoin-confirmed. Verification requires proof plus expected digest and trusts the configured Esplora provider; do not claim independent full-node validation. Dedicated OTS docs own the full protocol and storage contract.
+
+## Validation
+
+Parent/integration owner runs checks after edits land. Relevant checks cover delivered PNG/PCM verification and tampering, runtime identity consistency, config changes/reconnects and revision matching, HTTP/WS auth/Origin gates, real RTC interop/bounds/cleanup, safe Markdown fallback and archive extraction with the independent CLI. Canonical final counts live in root `AGENTS.md`, not here.

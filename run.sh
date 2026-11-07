@@ -23,7 +23,6 @@ RESET="\033[0m"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${SCRIPT_DIR}/steganographer.toml"
-CARGO_BIN="steganographer"
 KEY_DIR="${SCRIPT_DIR}/keys"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 
@@ -129,12 +128,7 @@ os_label() {
 # ── Ensure Rust toolchain ──────────────────────────────────────────────────────
 setup_path() {
     if ! command -v cargo &>/dev/null; then
-        if [ -f "$HOME/.cargo/env" ]; then
-            source "$HOME/.cargo/env"
-        elif [ -d "$HOME/.rustup/toolchains" ]; then
-            TOOLCHAIN=$(ls "$HOME/.rustup/toolchains" | head -1)
-            export PATH="$HOME/.rustup/toolchains/$TOOLCHAIN/bin:$PATH"
-        fi
+        export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
     fi
 }
 
@@ -515,11 +509,12 @@ action_show_info() {
             echo "    Default: v4l2src (/dev/video0)"
             echo "    Virtual: v4l2loopback (/dev/video42+)"
             if [ -d "/dev" ]; then
-                local video_devs
-                video_devs=$(ls /dev/video* 2>/dev/null | head -5)
-                if [ -n "$video_devs" ]; then
-                    echo "    Detected: $video_devs"
-                fi
+                local device
+                for device in /dev/video*; do
+                    if [ -e "$device" ]; then
+                        printf '    Detected: %s\n' "$device"
+                    fi
+                done
             fi
             ;;
     esac

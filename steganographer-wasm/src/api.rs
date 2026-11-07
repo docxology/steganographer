@@ -10,20 +10,32 @@
 //! - forensics: structural/statistical scan plus Unicode/text analysis
 //! - decode limits: JSON config surface over [`DecodeLimits`]
 //!
-//! Reports are returned as `serde_json::Value` so the wasm bindings can pass
-//! them to JavaScript as strings without any additional schema.
+//! Reports are returned as `serde_json::Value` and serialized to strings by the
+//! JS exports. Packet/extraction reports use [`PACKET_REPORT_SCHEMA`]: protocol
+//! `u64` fields (`original_len`, nullable `created_at_unix`) are decimal strings,
+//! never JSON numbers. Byte arrays and platform-sized carrier counts remain
+//! numeric arrays/counts (wasm32 counts fit exactly in JavaScript numbers).
 
 use serde_json::{json, Value};
 use steganographer_core::carrier::{
     AudioSpatialLsb, CarrierDescriptor, CarrierEmbedder, CarrierError, CarrierExtractor,
     EmbedReport, EmbeddingConfig, ExtractReport, SpatialLsb,
 };
+use steganographer_core::crypto::encode_hex;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, DigestAlgorithm, GenericPacket, PayloadKind,
     KERNEL_SPATIAL_LSB, PLACEMENT_SEQUENTIAL,
 };
 use steganographer_core::unicode_text;
 use steganographer_core::wasm_inspector;
+
+/// Lossless packet/extraction report schema introduced in release 0.8.
+///
+/// `schema` has this value; `original_len` is a decimal string and
+/// `created_at_unix` is a decimal string or null. All other existing fields
+/// retain their shapes. Extract reports additionally contain `consumed_units`
+/// and `bits_per_unit`.
+pub const PACKET_REPORT_SCHEMA: &str = "steganographer.packet-report.v2";
 
 // ─── Decode limits ──────────────────────────────────────────────────────────
 
@@ -103,6 +115,7 @@ pub fn packet_encode(
     bits_per_unit: u8,
     limits: Option<DecodeLimits>,
 ) -> Result<Vec<u8>, String> {
+    config(bits_per_unit)?;
     let limits = limits.unwrap_or_default();
     let packet_id_len = packet_id.len();
     let packet_id: [u8; 16] = packet_id
@@ -176,6 +189,8 @@ pub fn capacity_pcm_s16le(carrier: &[u8], bits_per_unit: u8) -> Result<Value, St
 /// Returns the modified carrier plus the embed report. The packet must have
 /// been encoded with the same `bits_per_unit` (its kernel descriptor records
 /// it) and must fit the capacity reported by [`capacity_rgb`].
+/// Descriptor validation borrows the encoded packet without imposing default
+/// decode limits. The caller's explicit encode/extract limits remain effective.
 pub fn embed_rgb(
     mut carrier: Vec<u8>,
     packet: &[u8],
@@ -234,14 +249,12 @@ pub fn extract_pcm_s16le(
 
 // ─── Forensics ──────────────────────────────────────────────────────────────
 
-/// Run the structural/statistical forensic scan over raw bytes (core
-/// `forensics::scan_bytes`, exposed through the zero-I/O `wasm_inspector`
-/// facade) and append the Unicode/text findings.
+/// Run the structural/statistical forensic scan over raw bytes through core's
+/// zero-I/O inspector, retaining bounded text/container evidence and explicit
+/// completeness status.
 pub fn forensic_scan(data: &[u8]) -> Value {
-    let mut report = serde_json::to_value(wasm_inspector::inspect_bytes(data))
-        .expect("WasmInspectionReport serializes");
-    report["text_findings"] = text_findings_json(&unicode_text::analyze_bytes(data));
-    report
+    serde_json::to_value(wasm_inspector::inspect_bytes(data))
+        .expect("WasmInspectionReport serializes")
 }
 
 /// Run the Unicode/text steganography detectors over raw bytes
@@ -259,6 +272,30 @@ pub fn text_analyze_text(text: &str) -> Value {
 
 fn config(bits_per_unit: u8) -> Result<EmbeddingConfig, String> {
     EmbeddingConfig::new(bits_per_unit).map_err(|e: CarrierError| e.to_string())
+}
+
+// Keep the original JS number until it has passed integer/range checks.
+// wasm-bindgen's u8/u16 ABI would narrow it before our typed API could reject it.
+#[cfg(any(target_arch = "wasm32", test))]
+fn checked_js_unsigned(value: f64, maximum: u16, name: &str) -> Result<u16, String> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=f64::from(maximum)).contains(&value) {
+        return Err(format!("{name} must be a finite integer in 0..={maximum}"));
+    }
+    Ok(value as u16)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn js_bits_per_unit(value: f64) -> Result<u8, String> {
+    let bits = checked_js_unsigned(value, u16::from(u8::MAX), "bits_per_unit")? as u8;
+    config(bits)?;
+    Ok(bits)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn js_payload_kind(value: f64) -> Result<u16, String> {
+    let kind = checked_js_unsigned(value, u16::MAX, "payload_kind")?;
+    PayloadKind::try_from(kind).map_err(|e| e.to_string())?;
+    Ok(kind)
 }
 
 fn ensure_even_byte_len(byte_len: usize) -> Result<(), String> {
@@ -304,10 +341,6 @@ fn payload_kind_name(kind: PayloadKind) -> &'static str {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn descriptor_value(descriptor: &AlgorithmDescriptor) -> Value {
     json!({
         "algorithm": descriptor.algorithm,
@@ -319,20 +352,21 @@ fn descriptor_value(descriptor: &AlgorithmDescriptor) -> Value {
 /// Public metadata + body of a decoded generic packet, as JSON.
 fn packet_report(packet: &GenericPacket) -> Value {
     json!({
-        "packet_id": hex(&packet.envelope.packet_id),
+        "schema": PACKET_REPORT_SCHEMA,
+        "packet_id": encode_hex(&packet.envelope.packet_id),
         "payload_kind": packet.envelope.payload_kind as u16,
         "payload_kind_name": payload_kind_name(packet.envelope.payload_kind),
-        "original_len": packet.envelope.original_len,
+        "original_len": packet.envelope.original_len.to_string(),
         "digest": {
             "algorithm": digest_name(packet.envelope.content_digest.algorithm),
-            "hex": hex(&packet.envelope.content_digest.bytes),
+            "hex": encode_hex(&packet.envelope.content_digest.bytes),
         },
         "body": packet.body,
         "body_len": packet.body.len(),
         "mime_type": packet.envelope.mime_type,
         "filename": packet.envelope.filename,
-        "created_at_unix": packet.envelope.created_at_unix,
-        "parent_id": packet.envelope.parent_id.as_ref().map(|id| hex(id)),
+        "created_at_unix": packet.envelope.created_at_unix.map(|value| value.to_string()),
+        "parent_id": packet.envelope.parent_id.as_ref().map(|id| encode_hex(id)),
         "transforms": packet.envelope.transforms.iter().map(|t| json!({
             "algorithm": t.algorithm,
             "version": t.version,
@@ -343,12 +377,12 @@ fn packet_report(packet: &GenericPacket) -> Value {
         "kernel": descriptor_value(&packet.envelope.kernel),
         "extensions": packet.envelope.extensions.iter().map(|f| json!({
             "id": f.id,
-            "value_hex": hex(&f.value),
+            "value_hex": encode_hex(&f.value),
         })).collect::<Vec<_>>(),
         "locator": {
             "flags": packet.locator.flags,
-            "nonce_hex": hex(&packet.locator.nonce),
-            "packet_len": packet.encoded_len().unwrap_or(0),
+            "nonce_hex": encode_hex(&packet.locator.nonce),
+            "packet_len": packet.encoded_len().expect("decoded packet length fits platform"),
         },
     })
 }
@@ -375,4 +409,46 @@ fn text_findings_json(findings: &[unicode_text::TextFinding]) -> Value {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{js_bits_per_unit, js_payload_kind};
+
+    #[test]
+    fn original_js_numbers_are_checked_before_narrowing() {
+        for bad in [
+            -1.0,
+            0.0,
+            5.0,
+            255.0,
+            256.0,
+            257.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(js_bits_per_unit(bad).is_err(), "accepted strength {bad}");
+        }
+        for bits in 1..=4 {
+            assert_eq!(js_bits_per_unit(f64::from(bits)).unwrap(), bits);
+        }
+        for bad in [
+            -1.0,
+            0.0,
+            6.0,
+            65_536.0,
+            65_537.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(js_payload_kind(bad).is_err(), "accepted payload kind {bad}");
+        }
+        for kind in 1..=5 {
+            assert_eq!(js_payload_kind(f64::from(kind)).unwrap(), kind);
+        }
+    }
 }

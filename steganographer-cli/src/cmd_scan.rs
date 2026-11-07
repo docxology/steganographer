@@ -19,6 +19,9 @@ struct ScanFinding {
     /// `true` when only the first `max_bytes` bytes were examined.
     truncated: bool,
     detected: bool,
+    container_detected: bool,
+    incomplete: bool,
+    incomplete_reasons: Vec<String>,
     entropy: f64,
     file_family: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,17 +79,26 @@ impl ScanFinding {
         let statistical_detected = scan.statistical.detected && detectors.statistical;
         // The profile's detector set filters which findings are reported;
         // detection and the exit-4 policy follow the filtered report.
-        // Container findings have no detector knob and always contribute.
+        // Container observations alone never imply concealment.
         // Verdict follows the core content-derived verdict (magic, text,
         // container concealment); statistical results are observations and
         // never trigger the exit-4 threshold by themselves.
         let detected =
-            embedded_magic.is_some() || !text_findings.is_empty() || !container_findings.is_empty();
+            embedded_magic.is_some() || !text_findings.is_empty() || scan.container_detected;
         ScanFinding {
             file: path.display().to_string(),
             size,
             truncated,
             detected,
+            container_detected: scan.container_detected,
+            incomplete: truncated || scan.incomplete,
+            incomplete_reasons: {
+                let mut reasons = scan.incomplete_reasons;
+                if truncated {
+                    reasons.push("max_bytes".to_string());
+                }
+                reasons
+            },
             entropy: scan.entropy,
             file_family: scan.file_family.as_str().to_string(),
             embedded_magic,
@@ -215,8 +227,15 @@ fn walk(
     files_scanned: &mut usize,
     findings: &mut Vec<ScanFinding>,
     errors: &mut Vec<String>,
+    incomplete_reasons: &mut Vec<String>,
 ) {
-    if depth > max_depth || *files_scanned >= max_files {
+    if depth > max_depth {
+        if !incomplete_reasons
+            .iter()
+            .any(|reason| reason == "max_depth")
+        {
+            incomplete_reasons.push("max_depth".to_string());
+        }
         return;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -226,16 +245,23 @@ fn walk(
             return;
         }
     };
-    for entry in entries.flatten() {
-        if *files_scanned >= max_files {
-            return;
-        }
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(format!("{}: {error}", dir.display()));
+                continue;
+            }
+        };
         let path = entry.path();
         // `file_type` does not follow symlinks, so links and special files are
         // skipped rather than opened.
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
-            Err(_) => continue,
+            Err(error) => {
+                errors.push(format!("{}: {error}", path.display()));
+                continue;
+            }
         };
         if file_type.is_dir() {
             walk(
@@ -248,8 +274,18 @@ fn walk(
                 files_scanned,
                 findings,
                 errors,
+                incomplete_reasons,
             );
         } else if file_type.is_file() {
+            if *files_scanned >= max_files {
+                if !incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "max_files")
+                {
+                    incomplete_reasons.push("max_files".to_string());
+                }
+                return;
+            }
             *files_scanned += 1;
             match scan_one(&path, max_bytes, detectors) {
                 Ok(finding) => findings.push(finding),
@@ -283,8 +319,8 @@ pub fn check_input_symlink(path: &Path, follow_input_symlink: bool) -> Result<()
 
 /// Run the scan and return the process exit code per the finalized table:
 /// `0` clean, `4` findings meet the caller-selected failure threshold,
-/// `5` a resource limit truncated files without producing findings (the
-/// result is inconclusive).
+/// `5` incomplete due to resource limits, `6` traversal or read errors.
+/// Actual findings retain exit `4`, including incomplete/error runs.
 ///
 /// Errors during the scan are collected into the report and do not abort
 /// the run; only argument/usage errors return `Err`. A symlinked input is
@@ -300,10 +336,26 @@ pub fn run(
     follow_input_symlink: bool,
     profile: Option<&ProfileConfig>,
 ) -> anyhow::Result<i32> {
+    if format == "json" || format == "jsonl" {
+        crate::envelope::activate_json_mode("scan");
+    }
+    anyhow::ensure!(max_files > 0, "max-files must be greater than zero");
+    anyhow::ensure!(max_bytes > 0, "max-bytes must be greater than zero");
+    anyhow::ensure!(
+        matches!(format, "plain" | "json" | "jsonl"),
+        "unsupported scan format '{format}'"
+    );
     let path = Path::new(input);
     check_input_symlink(path, follow_input_symlink).map_err(anyhow::Error::msg)?;
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| anyhow::anyhow!("cannot access '{input}': {error}"))?;
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::new(error).context(crate::envelope::UsageError(format!(
+                "cannot access '{input}': input path not found"
+            )))
+        } else {
+            anyhow::Error::new(error).context(format!("cannot access '{input}'"))
+        }
+    })?;
 
     let detectors = profile
         .map(ScanDetectors::from_profile)
@@ -315,6 +367,7 @@ pub fn run(
     let mut findings: Vec<ScanFinding> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut files_scanned = 0usize;
+    let mut incomplete_reasons = Vec::new();
 
     if metadata.is_file() {
         files_scanned = 1;
@@ -333,20 +386,34 @@ pub fn run(
             &mut files_scanned,
             &mut findings,
             &mut errors,
+            &mut incomplete_reasons,
         );
     } else {
         anyhow::bail!("'{input}' is not a regular file or directory");
     }
 
-    if format == "json" || format == "jsonl" {
-        crate::envelope::activate_json_mode("scan");
+    for finding in &findings {
+        for reason in &finding.incomplete_reasons {
+            if !incomplete_reasons.contains(reason) {
+                incomplete_reasons.push(reason.clone());
+            }
+        }
     }
-    emit(format, &findings, &errors, files_scanned)?;
+    let any_incomplete =
+        !incomplete_reasons.is_empty() || findings.iter().any(|finding| finding.incomplete);
+    emit(
+        format,
+        &findings,
+        &errors,
+        files_scanned,
+        &incomplete_reasons,
+    )?;
     let any_detected = findings.iter().any(|finding| finding.detected);
-    let any_truncated = findings.iter().any(|finding| finding.truncated);
     Ok(if any_detected {
         4
-    } else if any_truncated {
+    } else if !errors.is_empty() {
+        6
+    } else if any_incomplete {
         5
     } else {
         0
@@ -372,9 +439,11 @@ fn emit(
     findings: &[ScanFinding],
     errors: &[String],
     files_scanned: usize,
+    incomplete_reasons: &[String],
 ) -> anyhow::Result<()> {
     let detected: Vec<&ScanFinding> = findings.iter().filter(|f| f.detected).collect();
-    let truncated = findings.iter().any(|finding| finding.truncated);
+    let incomplete =
+        !incomplete_reasons.is_empty() || findings.iter().any(|finding| finding.incomplete);
     let summary = ScanSummary {
         files_scanned,
         findings: detected.len(),
@@ -391,7 +460,7 @@ fn emit(
             for finding in findings {
                 let record = JsonlRecord {
                     schema: crate::envelope::SCHEMA,
-                    status: if finding.truncated {
+                    status: if finding.incomplete {
                         "partial"
                     } else {
                         "success"
@@ -410,16 +479,22 @@ fn emit(
                 };
                 println!("{}", serde_json::to_string(&record)?);
             }
-            let mut envelope = if truncated {
+            let mut envelope = if incomplete || !errors.is_empty() {
                 crate::envelope::partial(
                     "scan",
-                    serde_json::json!({"summary": summary}),
+                    serde_json::json!({"summary": summary, "incomplete": incomplete, "incomplete_reasons": incomplete_reasons}),
                     Vec::new(),
                 )
             } else {
-                crate::envelope::success("scan", serde_json::json!({"summary": summary}))
+                crate::envelope::success(
+                    "scan",
+                    serde_json::json!({"summary": summary, "incomplete": false, "incomplete_reasons": incomplete_reasons}),
+                )
             };
             envelope.errors = errors.iter().map(scan_error).collect();
+            if !errors.is_empty() {
+                envelope.status = "error";
+            }
             println!("{}", serde_json::to_string(&envelope)?);
         }
         "json" => {
@@ -427,23 +502,30 @@ fn emit(
                 "findings": detected,
                 "summary": summary,
                 "errors": errors.iter().map(scan_error).collect::<Vec<_>>(),
+                "files": findings,
+                "incomplete": incomplete,
+                "incomplete_reasons": incomplete_reasons,
             });
             let warnings: Vec<String> = findings
                 .iter()
-                .filter(|finding| finding.truncated)
+                .filter(|finding| finding.incomplete)
                 .map(|finding| {
                     format!(
-                        "file '{}' exceeded the byte budget and was truncated; \
-                         result may be incomplete",
-                        finding.file
+                        "file '{}' was not completely examined ({})",
+                        finding.file,
+                        finding.incomplete_reasons.join(", ")
                     )
                 })
                 .collect();
-            let envelope = if truncated {
+            let mut envelope = if incomplete || !errors.is_empty() {
                 crate::envelope::partial("scan", output, warnings)
             } else {
                 crate::envelope::success("scan", output)
             };
+            if !errors.is_empty() {
+                envelope.status = "error";
+                envelope.errors = errors.iter().map(scan_error).collect();
+            }
             crate::envelope::print(&envelope);
         }
         _ => {
@@ -475,6 +557,9 @@ fn emit(
             }
             for error in errors {
                 eprintln!("error: {error}");
+            }
+            for reason in incomplete_reasons {
+                eprintln!("incomplete: {reason}");
             }
             println!(
                 "Scanned {} file(s), {} finding(s), {} error(s)",

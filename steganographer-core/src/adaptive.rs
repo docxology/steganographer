@@ -92,7 +92,8 @@ impl AdaptiveLsbVideo {
         for y in 0..h {
             for x in 0..w {
                 // Gather pixel values in the window (upper bits only)
-                let mut values: Vec<u8> = Vec::with_capacity(WINDOW * WINDOW);
+                let mut values = [0u8; WINDOW * WINDOW];
+                let mut count = 0;
                 let y_start = y.saturating_sub(half);
                 let y_end = (y + half + 1).min(h);
                 let x_start = x.saturating_sub(half);
@@ -102,20 +103,17 @@ impl AdaptiveLsbVideo {
                     for wx in x_start..x_end {
                         let pixel_offset = wy * stride + wx * bpp;
                         if pixel_offset < data.len() {
-                            values.push(data[pixel_offset] & mask);
+                            values[count] = data[pixel_offset] & mask;
+                            count += 1;
                         }
                     }
                 }
 
-                let variance = compute_variance(&values);
+                let variance = compute_variance(&values[..count]);
 
                 // Emit an entry for each embeddable byte of this pixel.
                 let base_offset = y * stride + x * bpp;
-                // Emit an entry for each embeddable byte of this pixel.
-                // FMT-002: the last channel of BGRA8 is the alpha byte and is
-                // never an embedding candidate. (Row padding does not exist
-                // in core `VideoFrame` data, which is packed —
-                // `stride == width * bpp` — so nothing else is excluded.)
+                // Alpha and row padding are not embedding candidates.
                 for b in 0..bpp {
                     if frame.format == VideoFormat::Bgra8 && b + 1 == bpp {
                         continue;
@@ -181,6 +179,7 @@ impl VideoStegoModule for AdaptiveLsbVideo {
             Some(s) => s.to_bytes().to_vec(),
             None => return Ok(()), // No payload to embed
         };
+        frame.validate_packed_layout()?;
 
         let payload_bits = Self::bytes_to_bits(&payload_bytes);
         let total_bits = HEADER_BITS + payload_bits.len();
@@ -188,27 +187,11 @@ impl VideoStegoModule for AdaptiveLsbVideo {
         // Select positions based on variance
         let positions = self.select_positions(frame);
 
-        if positions.len() < total_bits {
-            anyhow::bail!(
-                "Insufficient high-variance positions: need {} bits, found {} positions (threshold={})",
-                total_bits,
-                positions.len(),
-                self.threshold
-            );
-        }
-
         // Build the bit stream: 32-bit length prefix + payload bits
         let len_bits = Self::bytes_to_bits(&(payload_bits.len() as u32).to_le_bytes());
         let mut all_bits = len_bits;
         all_bits.extend_from_slice(&payload_bits);
 
-        // Embed using all `bits_per_byte` LSBs — each position holds one bit-value
-        // (0 or 1 for 1-bit mode, 0-3 for 2-bit mode, etc.)
-        // But since positions are byte-level, we embed one bit per position for
-        // 1-bit mode, and for multi-bit, we pack bits differently.
-        // For simplicity and correctness, we embed 1 logical bit per position
-        // using the low `bits_per_byte` bits as the value.
-        // To support multi-bit: we need fewer positions (total_bits / bits_per_byte).
         let positions_needed = total_bits.div_ceil(self.bits as usize);
         if positions.len() < positions_needed {
             anyhow::bail!(
@@ -235,7 +218,7 @@ impl VideoStegoModule for AdaptiveLsbVideo {
             .collect();
 
         // Use only the first `positions_needed` positions
-        let embed_positions: Vec<usize> = positions.into_iter().take(positions_needed).collect();
+        let embed_positions = &positions[..positions_needed];
 
         // Write
         let mask = (1u8 << self.bits) - 1;
@@ -250,6 +233,7 @@ impl VideoStegoModule for AdaptiveLsbVideo {
     }
 
     fn extract(&self, frame: &VideoFrame) -> anyhow::Result<Option<SignaturePayload>> {
+        frame.validate_packed_layout()?;
         let positions = self.select_positions(frame);
 
         let min_header_positions = HEADER_BITS.div_ceil(self.bits as usize);
@@ -366,6 +350,41 @@ mod tests {
     use super::*;
     use crate::crypto::Signer;
     use crate::video::VideoFormat;
+    #[test]
+    fn multibit_minimum_pixels_and_one_pixel_short() {
+        let payload = make_payload(5);
+        for bits in 1..=4 {
+            let needed = (32 + SignaturePayload::SERIALIZED_SIZE * 8).div_ceil(bits as usize);
+            let width = needed.div_ceil(3) as u32;
+            let mut data = vec![0x80; width as usize * 3];
+            let mut frame = VideoFrame {
+                width,
+                height: 1,
+                stride: width * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 0,
+            };
+            let mut kernel = AdaptiveLsbVideo::new(0, bits);
+            kernel.embed(&mut frame, Some(&payload)).unwrap();
+            assert_eq!(
+                kernel.extract(&frame).unwrap().unwrap().to_bytes(),
+                payload.to_bytes()
+            );
+            let mut short = vec![0x80; (width as usize - 1) * 3];
+            let before = short.clone();
+            let mut frame = VideoFrame {
+                width: width - 1,
+                height: 1,
+                stride: (width - 1) * 3,
+                format: VideoFormat::Rgb8,
+                data: &mut short,
+                frame_index: 0,
+            };
+            assert!(kernel.embed(&mut frame, Some(&payload)).is_err());
+            assert_eq!(short, before);
+        }
+    }
 
     /// Create a test frame with a gradient pattern (high variance at edges).
     fn make_frame(width: u32, height: u32, _frame_index: u64) -> (Vec<u8>, VideoFormat) {

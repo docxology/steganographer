@@ -8,7 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-steganographer-core = { path = ".." }
+steganographer-core = { path = "..", default-features = false }
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -50,6 +50,12 @@ doc = false
 [[bin]]
 name = "fuzz_nested_decode"
 path = "fuzz_targets/fuzz_nested_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_forensics"
+path = "fuzz_targets/fuzz_forensics.rs"
 test = false
 doc = false
 

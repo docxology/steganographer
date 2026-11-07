@@ -5,26 +5,21 @@ use steganographer_core::packet::TransformDescriptor;
 use steganographer_core::transforms::{reverse, TransformContext};
 use steganographer_core::EncryptionKey;
 
-/// Fuzz [`transforms::reverse`] with fully adversarial bodies and transform
-/// descriptors.
-///
-/// Input layout (best-effort; truncated input is fine):
-/// ```text
-/// packet_id:       [u8; 16]
-/// payload_kind:    u16 BE
-/// original_len:    u32 BE   (adversarial — may claim up to 4 GiB)
-/// transform_count: u8       (clamped to 8)
-/// per transform:   algorithm u16 BE, version u8, critical u8,
-///                  params_len u16 BE (clamped to 256), params
-/// remainder:       encoded body
-/// ```
-///
-/// The target must never panic and must never allocate beyond what the
-/// input body plus the internal transform ceilings (ECC geometry check,
-/// DEFLATE output cap) allow. It is exercised both without a key (missing-key
-/// and unauthenticated paths) and with a fixed key (AEAD paths).
+// Fuzz transforms::reverse with adversarial bodies and descriptors.
+//
+// Input layout (best-effort; truncated input is fine):
+// packet_id:       [u8; 16]
+// payload_kind:    u16 BE
+// original_len:    u32 BE (may claim up to 4 GiB)
+// transform_count: u8 (clamped to 8)
+// per transform:   algorithm u16 BE, version u8, critical u8,
+//                  params_len u16 BE (clamped to 256), params
+// remainder:       encoded body
+//
+// Exercise missing-key/unauthenticated paths and AEAD with a fixed key.
+// The decoder must remain panic-free and honor its internal allocation caps.
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 22 {
+    if data.len() < 23 {
         return;
     }
     let mut packet_id = [0u8; 16];
@@ -44,8 +39,8 @@ fuzz_target!(|data: &[u8]| {
         let algorithm = u16::from_be_bytes([data[cursor], data[cursor + 1]]);
         let version = data[cursor + 2];
         let critical = data[cursor + 3] != 0;
-        let params_len = usize::from(u16::from_be_bytes([data[cursor + 4], data[cursor + 5]]))
-            .min(256);
+        let params_len =
+            usize::from(u16::from_be_bytes([data[cursor + 4], data[cursor + 5]])).min(256);
         cursor += 6;
         if data.len() - cursor < params_len {
             break;

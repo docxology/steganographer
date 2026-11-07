@@ -15,7 +15,17 @@
 
 let docsFileList = [];
 let docsActiveFile = null;
+let docsLoadedFile = null;
 let docsInitialized = false;
+let docsInitPromise = null;
+let docsSearchBound = false;
+let docsLoadPromise = null;
+let docsLoadController = null;
+let docsLoadGeneration = 0;
+let docsTargetFragment = '';
+
+// API names are identities relative to the repository's docs/ directory.
+const DOCS_BASE_URL = new URL('/docs/', window.location.href);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DOM REFERENCES
@@ -61,38 +71,55 @@ const DOC_METADATA = {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Initialize the Docs tab. Called once when the Docs tab is first activated.
+ * Called by the dashboard's shared switchTab action, including on revisits.
+ * Only a successful list is retained; overlapping activations share one promise.
  */
-async function initDocsTab() {
-    if (docsInitialized) return;
-    docsInitialized = true;
-
-    console.log('[docs] Initializing documentation tab');
-
-    // Setup search filter
-    if (docsEl.searchInput) {
+function initDocsTab() {
+    if (!docsSearchBound && docsEl.searchInput) {
         docsEl.searchInput.addEventListener('input', filterDocs);
+        docsSearchBound = true;
+    }
+    if (docsInitPromise) return docsInitPromise;
+    if (docsInitialized) {
+        if (docsActiveFile && docsLoadedFile !== docsActiveFile) {
+            return loadDoc(docsActiveFile, docsTargetFragment);
+        }
+        return Promise.resolve();
     }
 
-    // Fetch doc list
-    try {
-        const res = await fetch('/api/docs');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        docsFileList = await res.json();
-        console.log(`[docs] Loaded ${docsFileList.length} documentation files`);
-    } catch (err) {
-        console.error('[docs] Failed to load docs list:', err);
-        docsEl.content.innerHTML = '<p class="docs-error">Failed to load documentation list.</p>';
-        return;
-    }
+    showDocsMessage('Loading documentation list…', 'docs-loading');
+    docsInitPromise = (async () => {
+        try {
+            const res = await fetch('/api/docs');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            docsFileList = await res.json();
+            renderSidebar();
+            docsInitialized = true;
 
-    renderSidebar();
-
-    // Auto-load README.md (or first doc) on init
-    const defaultDoc = docsFileList.includes('README.md') ? 'README.md' : docsFileList[0];
-    if (defaultDoc) {
-        loadDoc(defaultDoc);
-    }
+            const defaultDoc = docsFileList.includes('README.md') ? 'README.md' : docsFileList[0];
+            if (defaultDoc) {
+                // Keep list initialization independent of a slow document or diagram.
+                loadDoc(defaultDoc);
+            } else {
+                showDocsMessage('No documentation is available in this dashboard.', 'docs-placeholder');
+            }
+        } catch (err) {
+            docsInitialized = false;
+            console.error('[docs] Failed to load docs list:', err);
+            showDocsMessage('Failed to load documentation list. Select Docs again or use Retry.', 'docs-error');
+            const item = document.createElement('li');
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'docs-file-item';
+            retry.textContent = 'Retry documentation list';
+            retry.addEventListener('click', initDocsTab);
+            item.appendChild(retry);
+            docsEl.fileList?.replaceChildren(item);
+        }
+    })().finally(() => {
+        docsInitPromise = null;
+    });
+    return docsInitPromise;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -103,28 +130,43 @@ function renderSidebar() {
     const list = docsEl.fileList;
     if (!list) return;
 
-    list.innerHTML = '';
+    list.replaceChildren();
     for (const name of docsFileList) {
-        const meta = DOC_METADATA[name] || { icon: '📄', label: name.replace('.md', '') };
+        const meta = DOC_METADATA[name] || { icon: '📄', label: name.replace(/\.md$/i, '') };
         const li = document.createElement('li');
-        li.className = 'docs-file-item';
-        li.dataset.name = name;
-        li.innerHTML = `<span class="docs-file-icon">${meta.icon}</span>
-            <span class="docs-file-label">${meta.label}</span>
-            <span class="docs-file-name">${name}</span>`;
-        li.addEventListener('click', () => loadDoc(name));
+        li.className = 'docs-file-entry';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'docs-file-item';
+        button.dataset.name = name;
+        button.title = name;
+        for (const [className, text] of [
+            ['docs-file-icon', meta.icon],
+            ['docs-file-label', meta.label],
+            ['docs-file-name', name],
+        ]) {
+            const span = document.createElement('span');
+            span.className = className;
+            span.textContent = text;
+            if (className === 'docs-file-icon') span.setAttribute('aria-hidden', 'true');
+            button.appendChild(span);
+        }
+        button.addEventListener('click', () => loadDoc(name));
+        li.appendChild(button);
         list.appendChild(li);
     }
+    filterDocs();
 }
 
 function filterDocs() {
-    const query = (docsEl.searchInput?.value || '').toLowerCase();
-    const items = docsEl.fileList?.querySelectorAll('.docs-file-item') || [];
+    const query = (docsEl.searchInput?.value || '').trim().toLowerCase();
+    const items = docsEl.fileList?.querySelectorAll('.docs-file-item[data-name]') || [];
     for (const item of items) {
         const name = item.dataset.name.toLowerCase();
-        const meta = DOC_METADATA[item.dataset.name];
-        const label = meta ? meta.label.toLowerCase() : '';
-        item.style.display = (name.includes(query) || label.includes(query)) ? '' : 'none';
+        const label = (DOC_METADATA[item.dataset.name]?.label || '').toLowerCase();
+        // Hide the list wrapper so CSS display:flex on the button cannot
+        // override hidden, and nonmatches leave keyboard navigation too.
+        item.parentElement.hidden = !name.includes(query) && !label.includes(query);
     }
 }
 
@@ -132,132 +174,224 @@ function filterDocs() {
 // DOCUMENT LOADING & RENDERING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function loadDoc(name) {
-    if (docsActiveFile === name) return;
-    docsActiveFile = name;
+function showDocsMessage(message, className) {
+    const paragraph = document.createElement('p');
+    paragraph.className = className;
+    paragraph.textContent = message;
+    docsEl.content?.replaceChildren(paragraph);
+    if (docsEl.wordCount) docsEl.wordCount.textContent = '—';
+}
 
-    // Update active state in sidebar
-    const items = docsEl.fileList?.querySelectorAll('.docs-file-item') || [];
-    for (const item of items) {
-        item.classList.toggle('active', item.dataset.name === name);
-    }
-
-    // Show loading state
+function loadDoc(name, fragment = '') {
     const contentEl = docsEl.content;
-    if (!contentEl) return;
-    contentEl.innerHTML = '<div class="docs-loading"><span class="docs-spinner"></span> Loading…</div>';
+    // Never turn a markdown path into an arbitrary server/filesystem request.
+    if (!contentEl || !docsFileList.includes(name)) return Promise.resolve(false);
+    if (docsActiveFile === name) {
+        docsTargetFragment = fragment;
+        if (docsLoadedFile === name) {
+            scrollDocToFragment(fragment);
+            return Promise.resolve(true);
+        }
+        if (docsLoadPromise) return docsLoadPromise;
+    }
 
-    // Update title
+    docsLoadController?.abort();
+    const controller = new AbortController();
+    const generation = ++docsLoadGeneration;
+    const isCurrent = () => generation === docsLoadGeneration
+        && docsActiveFile === name && !controller.signal.aborted;
+    docsLoadController = controller;
+    docsActiveFile = name;
+    docsLoadedFile = null;
+    docsTargetFragment = fragment;
+
+    const items = docsEl.fileList?.querySelectorAll('.docs-file-item[data-name]') || [];
+    for (const item of items) {
+        const active = item.dataset.name === name;
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+    }
+
+    showDocsMessage('Loading…', 'docs-loading');
+    contentEl.setAttribute('aria-busy', 'true');
     const meta = DOC_METADATA[name] || { icon: '📄', label: name };
-    if (docsEl.contentTitle) {
-        docsEl.contentTitle.textContent = `${meta.icon} ${meta.label}`;
-    }
+    if (docsEl.contentTitle) docsEl.contentTitle.textContent = `${meta.icon} ${meta.label}`;
 
+    docsLoadPromise = (async () => {
+        try {
+            const res = await fetch(`/api/docs/${encodeURIComponent(name)}`, { signal: controller.signal });
+            if (!isCurrent()) return false;
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const markdown = await res.text();
+            if (!isCurrent()) return false;
+            const draft = await renderDocMarkdown(markdown, generation, isCurrent);
+            if (!isCurrent() || !draft) return false;
+
+            prepareDocLinks(draft, name);
+            contentEl.replaceChildren(...draft.childNodes);
+            docsLoadedFile = name;
+            const wordCount = markdown.split(/\s+/).filter(word => word.length > 0).length;
+            if (docsEl.wordCount) docsEl.wordCount.textContent = `${wordCount.toLocaleString()} words`;
+            scrollDocToFragment(docsTargetFragment);
+            return true;
+        } catch (err) {
+            if (!isCurrent() || err.name === 'AbortError') return false;
+            console.error(`[docs] Failed to load ${name}:`, err);
+            showDocsMessage(`Failed to load "${name}": ${err.message}. Select this document again to retry.`, 'docs-error');
+            return false;
+        }
+    })().finally(() => {
+        if (isCurrent()) {
+            docsLoadPromise = null;
+            docsLoadController = null;
+            contentEl.removeAttribute('aria-busy');
+        }
+    });
+    return docsLoadPromise;
+}
+
+async function renderDocMarkdown(markdown, generation, isCurrent) {
+    const draft = document.createElement('div');
+    let sanitized = false;
     try {
-        const res = await fetch(`/api/docs/${encodeURIComponent(name)}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const markdown = await res.text();
-
-        // Render markdown to HTML using marked.js, then sanitize with
-        // DOMPurify BEFORE it reaches innerHTML — markdown sources are
-        // server-supplied, but this keeps script/style/event-handler
-        // injection out even if a doc source is ever attacker-influenced.
-        if (typeof marked !== 'undefined' && marked.parse) {
-            const rawHtml = marked.parse(markdown, {
-                gfm: true,
-                breaks: false,
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function'
+            && typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function') {
+            const rawHtml = await marked.parse(markdown, { gfm: true, breaks: false });
+            if (!isCurrent()) return null;
+            // This is the only HTML sink. Never insert marked output when
+            // the sanitizer is absent or throws, including in offline mode.
+            draft.innerHTML = DOMPurify.sanitize(rawHtml, {
+                USE_PROFILES: { html: true, svg: true, svgFilters: true },
             });
-            contentEl.innerHTML =
-                typeof DOMPurify !== 'undefined'
-                    ? DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true, svg: true, svgFilters: true } })
-                    : rawHtml;
-            if (typeof DOMPurify === 'undefined') {
-                console.warn('[docs] DOMPurify not loaded; rendered unsanitized');
-            }
-        } else {
-            // Fallback: render as preformatted text
-            contentEl.innerHTML = `<pre class="docs-raw">${escapeHtml(markdown)}</pre>`;
-            console.warn('[docs] marked.js not loaded, using raw text fallback');
+            sanitized = true;
         }
-
-        // Update word count
-        const wordCount = markdown.split(/\s+/).filter(w => w.length > 0).length;
-        if (docsEl.wordCount) {
-            docsEl.wordCount.textContent = `${wordCount.toLocaleString()} words`;
-        }
-
-        // Make links open in new tab
-        contentEl.querySelectorAll('a').forEach(a => {
-            // Internal doc links: load in-place
-            const href = a.getAttribute('href') || '';
-            if (href.endsWith('.md') && !href.startsWith('http')) {
-                const docName = href.split('/').pop();
-                if (docsFileList.includes(docName)) {
-                    a.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        loadDoc(docName);
-                    });
-                    a.style.cursor = 'pointer';
-                    return;
-                }
-            }
-            // External links: open in new tab
-            if (href.startsWith('http')) {
-                a.setAttribute('target', '_blank');
-                a.setAttribute('rel', 'noopener noreferrer');
-            }
-        });
-
-        console.log(`[docs] Rendered ${name} (${wordCount} words)`);
-
-        // ── Mermaid rendering ───────────────────────────────────────────
-        // marked.js renders ```mermaid blocks as <code class="language-mermaid">
-        // We need to convert these to <div class="mermaid"> and call mermaid.run()
-        if (typeof mermaid !== 'undefined') {
-            const mermaidBlocks = contentEl.querySelectorAll('code.language-mermaid');
-            if (mermaidBlocks.length > 0) {
-                console.log(`[docs] Found ${mermaidBlocks.length} Mermaid diagrams`);
-                mermaidBlocks.forEach((block, i) => {
-                    const pre = block.parentElement;  // <pre><code class="language-mermaid">
-                    const div = document.createElement('div');
-                    div.className = 'mermaid';
-                    div.textContent = block.textContent;
-                    pre.replaceWith(div);
-                });
-                try {
-                    mermaid.run({ nodes: contentEl.querySelectorAll('.mermaid') });
-                    console.log(`[docs] Mermaid rendered ${mermaidBlocks.length} diagrams`);
-                } catch (err) {
-                    console.warn('[docs] Mermaid rendering error:', err);
-                }
-            }
-        }
-
     } catch (err) {
-        console.error(`[docs] Failed to load ${name}:`, err);
-        contentEl.innerHTML = `<p class="docs-error">Failed to load "${name}": ${escapeHtml(err.message)}</p>`;
+        console.warn('[docs] Markdown rendering unavailable; showing text:', err);
     }
+    if (!isCurrent()) return null;
+    if (!sanitized) {
+        const pre = document.createElement('pre');
+        pre.className = 'docs-raw';
+        pre.textContent = markdown;
+        draft.replaceChildren(pre);
+        return draft;
+    }
+
+    const blocks = draft.querySelectorAll('code.language-mermaid');
+    if (!blocks.length || typeof mermaid === 'undefined' || typeof mermaid.run !== 'function') {
+        return draft;
+    }
+
+    const diagrams = [];
+    for (const [index, block] of blocks.entries()) {
+        const node = document.createElement('div');
+        node.className = 'mermaid';
+        node.id = `docs-mermaid-${generation}-${index}`;
+        node.textContent = block.textContent;
+        diagrams.push({ node, source: block.textContent });
+        const pre = block.parentElement;
+        if (pre?.tagName === 'PRE') pre.replaceWith(node);
+        else block.replaceWith(node);
+    }
+
+    // Mermaid needs connected elements for layout. Render in an inert,
+    // offscreen document, never in the active article. The page's strict
+    // Mermaid security configuration is deliberately left intact.
+    draft.className = 'docs-content';
+    draft.setAttribute('aria-hidden', 'true');
+    draft.setAttribute('inert', '');
+    Object.assign(draft.style, {
+        position: 'fixed',
+        left: '-100000px',
+        top: '0',
+        width: `${docsEl.content?.clientWidth || 800}px`,
+        pointerEvents: 'none',
+    });
+    document.body.appendChild(draft);
+    try {
+        await mermaid.run({ nodes: diagrams.map(diagram => diagram.node) });
+    } catch (err) {
+        if (isCurrent()) console.warn('[docs] Mermaid rendering error:', err);
+        for (const { node, source } of diagrams) {
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.className = 'language-mermaid';
+            code.textContent = source;
+            pre.appendChild(code);
+            node.replaceWith(pre);
+        }
+        const notice = document.createElement('p');
+        notice.className = 'docs-error';
+        notice.textContent = 'Diagrams could not be rendered; their source is shown below.';
+        draft.prepend(notice);
+    } finally {
+        draft.remove();
+    }
+    return isCurrent() ? draft : null;
 }
 
-function escapeHtml(str) {
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
+function prepareDocLinks(draft, sourceName) {
+    const sourceUrl = new URL(sourceName, DOCS_BASE_URL);
+    const identities = new Map(docsFileList.map(name => [new URL(name, DOCS_BASE_URL).pathname, name]));
+    for (const link of draft.querySelectorAll('a[href]')) {
+        const href = link.getAttribute('href').trim();
+        let url;
+        try {
+            url = new URL(href, sourceUrl);
+        } catch {
+            markUnavailableDocLink(link, href);
+            continue;
+        }
+        if (((url.protocol === 'https:' || url.protocol === 'http:') && url.origin !== sourceUrl.origin)
+            || url.protocol === 'mailto:') {
+            link.setAttribute('href', url.href);
+            link.setAttribute('target', '_blank');
+            link.setAttribute('rel', 'noopener noreferrer');
+            continue;
+        }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TAB ACTIVATION HOOK
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Listen for tab switches — initialize docs tab on first activation
-document.addEventListener('DOMContentLoaded', () => {
-    const docsTabBtn = document.getElementById('tab-btn-docs');
-    if (docsTabBtn) {
-        docsTabBtn.addEventListener('click', () => {
-            // Small delay to ensure tab content is visible before fetch
-            setTimeout(initDocsTab, 50);
+        const targetName = url.origin === sourceUrl.origin
+            && (url.protocol === 'https:' || url.protocol === 'http:')
+            ? identities.get(url.pathname) : null;
+        if (!targetName) {
+            markUnavailableDocLink(link, href);
+            continue;
+        }
+        // Preserve the whole identity: plans/.../README.md is not README.md.
+        // Even opening this link's href separately stays on the dashboard.
+        link.setAttribute('href', url.hash || '#');
+        link.removeAttribute('target');
+        link.removeAttribute('download');
+        link.addEventListener('click', event => {
+            event.preventDefault();
+            loadDoc(targetName, url.hash);
         });
     }
-});
+}
+
+function markUnavailableDocLink(link, href) {
+    const label = document.createElement('span');
+    label.className = 'docs-unavailable-link';
+    label.textContent = `${link.textContent || href} (unavailable in dashboard)`;
+    label.title = `Not embedded in this dashboard: ${href}`;
+    link.replaceWith(label);
+}
+
+function scrollDocToFragment(fragment) {
+    const content = docsEl.content;
+    if (!content) return;
+    if (!fragment || fragment === '#') {
+        content.scrollTop = 0;
+        return;
+    }
+    let id;
+    try {
+        id = decodeURIComponent(fragment.slice(1));
+    } catch {
+        return;
+    }
+    const target = Array.from(content.querySelectorAll('[id], a[name]'))
+        .find(node => node.id === id || node.getAttribute('name') === id);
+    target?.scrollIntoView({ block: 'start' });
+}

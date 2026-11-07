@@ -1,11 +1,11 @@
 //! FOR-001 calibration corpus runner (roadmap v0.8.0).
 //!
-//! Loads `testdata/corpus/manifest.json`, generates every benign/triggered
-//! sample deterministically from the manifest's generator specs, runs
-//! [`steganographer_core::forensics::scan_bytes`] over each, and asserts the
-//! expected per-detector finding counts. Also asserts that the manifest and
-//! [`steganographer_core::forensics::detector_registry`] cover exactly the
-//! same detector IDs.
+//! Loads unchanged historical generator specs and checks semantic observations,
+//! coverage/availability and aggregate verdicts. Historical `benign`/`triggered`
+//! keys are fixture-side names, not empirical clean/stego ground truth.
+//! Statistical ramps exercise statistic direction or degeneracy; independently
+//! labeled embedding-rate controls live with the statistical implementation.
+//! Registry and manifest must cover exactly the same detector IDs.
 //!
 //! Corpus samples are generated, never stored: every fixture is a small
 //! deterministic byte array (<= 64 KiB) built from the manifest specs, so no
@@ -22,9 +22,8 @@ use steganographer_core::forensics::{
 
 const MANIFEST: &str = include_str!("../testdata/corpus/manifest.json");
 
-/// The hand-shuffled 26-letter alphabet used by `balanced_ascii`: every byte
-/// value pair (2i, 2i+1) ends up count-balanced, keeping the statistical
-/// detectors quiet so each detector is calibrated in isolation.
+/// Historical hand-shuffled alphabet used for text-isolation controls.
+/// Balanced histograms do not establish absence of steganography.
 const BALANCED_ALPHABET: &str = "anbocpdqerfsgthuivjwkxlym";
 
 /// Generate a corpus sample from one manifest `benign`/`triggered` spec.
@@ -332,6 +331,41 @@ fn calibration_corpus_matches_manifest() {
             "triggered sample for {id} did not produce the expected findings: {:?}",
             triggered_scan.message
         );
+        for (side, scan) in [("benign", &benign_scan), ("triggered", &triggered_scan)] {
+            assert_eq!(scan.incomplete, !scan.incomplete_reasons.is_empty());
+            if id.starts_with("STAT_") {
+                // Histogram patterns alone do not become forensic verdicts.
+                assert!(!scan.detected, "{id}/{side}: {}", scan.message);
+                let method = match id {
+                    "STAT_CHI2" => &scan.statistical.chi_squared,
+                    "STAT_SPA" => &scan.statistical.sample_pairs,
+                    "STAT_RS" => &scan.statistical.rs_analysis,
+                    _ => unreachable!(),
+                };
+                if let Some(available) = expected
+                    .get(format!("{side}_available").as_str())
+                    .and_then(Value::as_bool)
+                {
+                    assert_eq!(
+                        method.available, available,
+                        "{id}/{side}: {}",
+                        method.message
+                    );
+                }
+            }
+        }
+        if matches!(id, DOC_002_FAMILY | DOC_003_FAMILY | DOC_004_FAMILY) {
+            assert!(!benign_scan.container_detected, "{id} clean container");
+            assert!(triggered_scan.container_detected, "{id} content evidence");
+            assert!(triggered_scan.detected);
+        }
+        if id == DOC_001_FAMILY {
+            assert!(!triggered_scan.container_detected);
+            assert!(
+                triggered_scan.incomplete,
+                "oversized claimed part is not complete"
+            );
+        }
     }
 
     // Reverse coverage: every registered detector has a corpus entry.

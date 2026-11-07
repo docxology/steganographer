@@ -1,70 +1,44 @@
-//! gst-launch acceptance round-trip for the `stegoaudio` element.
-//!
-//! Acceptance (2) of the Native GStreamer plugin backlog item: the element
-//! must round-trip a PCM S16 packet, verified by a decode check. The
-//! `print_packet_hex` helper prints the encoded packet to stdout so a shell
-//! gst-launch run can embed it live; the in-process test proves the same
-//! bytes decode through the core extractor (the element's sequential embed
-//! path IS the core `AudioSpatialLsb` kernel).
-//!
-//! The lower half of this file adds direct element-level tests that run the
-//! real `stegovideo`/`stegoaudio` elements in-process (no gst-launch binary):
-//! pad-template allowlists, negotiation gates, stride-padded frame embedding,
-//! clear-payload footprints and multi-channel audio. Keyed placement
-//! divergence is covered by the `#[cfg(test)]` unit tests in
-//! `src/elements.rs` and `src/audio_element.rs`.
+//! Real native-element regressions. Packet recovery is checked from the
+//! transformed carrier, including per-buffer layouts and stream lifecycles.
 
 use gstreamer::prelude::*;
-use gstreamer_app::AppSink;
-use steganographer_core::carrier::SpatialLsb;
+use gstreamer_app::{AppSink, AppSrc};
 use steganographer_core::carrier::{
-    AudioSpatialLsb, CarrierEmbedder, CarrierExtractor, EmbeddingConfig,
+    AudioSpatialLsb, CarrierExtractor, EmbeddingConfig, KeyedAudioSpatialLsb, KeyedSpatialLsb,
+    SpatialLsb,
 };
+use steganographer_core::crypto::encode_hex;
+use steganographer_core::kdf::derive_frame_embedding_key;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, GenericPacket, PayloadKind, KERNEL_SPATIAL_LSB,
-    PLACEMENT_SEQUENTIAL,
+    PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
 };
 
 fn encode_test_packet(payload: &[u8], bits: u8) -> Vec<u8> {
+    encode_packet(payload, bits, false)
+}
+
+fn encode_packet(payload: &[u8], bits: u8, keyed: bool) -> Vec<u8> {
     let limits = DecodeLimits::default();
     let packet = GenericPacket::new_untransformed(
         payload.to_vec(),
         [0x42u8; 16],
         [0x24u8; 8],
         PayloadKind::Text,
-        AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new()),
+        AlgorithmDescriptor::new(
+            if keyed {
+                PLACEMENT_KEYED
+            } else {
+                PLACEMENT_SEQUENTIAL
+            },
+            1,
+            Vec::new(),
+        ),
         AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
         &limits,
     )
     .expect("packet builds");
     packet.encode(&limits).expect("packet encodes")
-}
-
-/// Decode check: packet bytes embedded the way the element embeds them
-/// (sequential audio LSB, low byte of every second sample) decode back to
-/// the original payload.
-#[test]
-fn stegoaudio_wire_format_round_trips() {
-    let limits = DecodeLimits::default();
-    let packet_bytes = encode_test_packet(b"stegoaudio gst-launch acceptance", 2);
-    let mut pcm = vec![0x40u8; 2 * 16384];
-    AudioSpatialLsb
-        .embed_packet(&mut pcm, &packet_bytes, &EmbeddingConfig::new(2).unwrap())
-        .expect("embeds into 16384 samples at 2 bits");
-    let report = AudioSpatialLsb
-        .extract_packet(&pcm, &EmbeddingConfig::new(2).unwrap(), &limits)
-        .expect("decodes");
-    assert_eq!(report.packet.body, b"stegoaudio gst-launch acceptance");
-}
-
-/// Print the encoded packet hex for shell gst-launch runs:
-/// `cargo test -p steganographer-gst --test gst_roundtrip print_packet_hex -- --nocapture`
-#[test]
-fn print_packet_hex() {
-    let packet_bytes = encode_test_packet(b"stegoaudio gst-launch acceptance", 2);
-    let hex: String = packet_bytes.iter().map(|b| format!("{b:02x}")).collect();
-    println!("PACKET_HEX_LEN={}", packet_bytes.len());
-    println!("PACKET_HEX={hex}");
 }
 
 // ── Element-level tests ─────────────────────────────────────────────────────
@@ -74,10 +48,6 @@ fn ensure_elements_registered() {
         steganographer_gst::elements::register(None).expect("registers stegovideo/stegoaudio");
     });
     std::sync::LazyLock::force(&REGISTERED);
-}
-
-fn hex_encode_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Launch a pipeline string and return its Bin plus the named AppSink.
@@ -234,13 +204,18 @@ fn stegoaudio_rejects_non_s16le_negotiation() {
 fn stegovideo_stride_padded_frame_round_trips() {
     ensure_elements_registered();
     let limits = DecodeLimits::default();
-    let packet_bytes = encode_test_packet(b"stride padded video", 1);
+    let payload = vec![b'x'; 300];
+    let packet_bytes = encode_test_packet(&payload, 1);
+    assert!(
+        packet_bytes.len() * 8 > 638 * 3,
+        "packet must cross a padded row"
+    );
     let pipeline_str = format!(
         "videotestsrc num-buffers=1 pattern=black ! \
          video/x-raw,format=RGB,width=638,height=4 ! \
          stegovideo packet-hex={} bits-per-unit=1 ! \
          appsink name=sink emit-signals=false sync=false max-buffers=4",
-        hex_encode_bytes(&packet_bytes)
+        encode_hex(&packet_bytes)
     );
     let (bin, appsink) = launch_with_appsink(&pipeline_str, "sink");
     start(&bin);
@@ -308,7 +283,7 @@ fn stegovideo_stride_padded_frame_round_trips() {
     let report = SpatialLsb
         .extract_packet(&pixel, &EmbeddingConfig::new(1).unwrap(), &limits)
         .expect("packet decodes from the pixel-only stream");
-    assert_eq!(report.packet.body, b"stride padded video".to_vec());
+    assert_eq!(report.packet.body, payload);
 }
 
 /// clear-payload at every supported strength: frame 0 carries the packet and
@@ -324,7 +299,7 @@ fn stegovideo_clear_payload_footprint_equals_fresh_carrier() {
              video/x-raw,format=RGB,width=64,height=8 ! \
              stegovideo packet-hex={} bits-per-unit={} clear-payload=true ! \
              appsink name=sink emit-signals=false sync=false max-buffers=4",
-            hex_encode_bytes(&packet_bytes),
+            encode_hex(&packet_bytes),
             bits
         );
         let (bin, appsink) = launch_with_appsink(&pipeline_str, "sink");
@@ -380,7 +355,7 @@ fn stegoaudio_round_trips_multi_channel_interleaved() {
              audio/x-raw,format=S16LE,rate=8000,channels={channels} ! \
              stegoaudio packet-hex={} bits-per-unit=1 ! \
              appsink name=sink emit-signals=false sync=false max-buffers=4",
-            hex_encode_bytes(&packet_bytes)
+            encode_hex(&packet_bytes)
         );
         let (bin, appsink) = launch_with_appsink(&pipeline_str, "sink");
         start(&bin);
@@ -400,5 +375,287 @@ fn stegoaudio_round_trips_multi_channel_interleaved() {
             .extract_packet(map.as_ref(), &EmbeddingConfig::new(1).unwrap(), &limits)
             .expect("packet decodes from the interleaved S16LE buffer");
         assert_eq!(report.packet.body, b"audio element acceptance".to_vec());
+    }
+}
+
+/// AppSrc keeps buffers and property changes under the test's control. The
+/// guard also shuts down streaming if a carrier assertion fails.
+struct ElementHarness {
+    bin: gstreamer::Bin,
+    source: AppSrc,
+    sink: AppSink,
+    stego: gstreamer::Element,
+}
+
+impl ElementHarness {
+    fn new(audio: bool, width: u32, height: u32) -> Self {
+        ensure_elements_registered();
+        let kind = if audio { "stegoaudio" } else { "stegovideo" };
+        let (bin, sink) = launch_with_appsink(
+            &format!(
+                "appsrc name=source format=time ! {kind} name=stego ! \
+                 appsink name=sink sync=false async=false"
+            ),
+            "sink",
+        );
+        let source = bin.by_name("source").unwrap().downcast::<AppSrc>().unwrap();
+        let caps = if audio {
+            gstreamer_audio::AudioInfo::builder(gstreamer_audio::AudioFormat::S16le, 8000, 1)
+                .build()
+                .unwrap()
+                .to_caps()
+                .unwrap()
+        } else {
+            gstreamer_video::VideoInfo::builder(gstreamer_video::VideoFormat::Rgb, width, height)
+                .build()
+                .unwrap()
+                .to_caps()
+                .unwrap()
+        };
+        source.set_caps(Some(&caps));
+        let stego = bin.by_name("stego").unwrap();
+        Self {
+            bin,
+            source,
+            sink,
+            stego,
+        }
+    }
+
+    fn exchange(&self, input: gstreamer::Buffer) -> Vec<u8> {
+        self.source.push_buffer(input).expect("buffer accepted");
+        let sample = self
+            .sink
+            .try_pull_sample(gstreamer::ClockTime::from_seconds(10))
+            .expect("transformed buffer arrives");
+        let bytes = sample
+            .buffer()
+            .unwrap()
+            .map_readable()
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        bytes
+    }
+
+    fn fresh(&self, audio: bool) -> Vec<u8> {
+        self.exchange(gstreamer::Buffer::from_mut_slice(vec![
+            0x40;
+            if audio {
+                16384
+            } else {
+                64 * 32 * 3
+            }
+        ]))
+    }
+}
+
+impl Drop for ElementHarness {
+    fn drop(&mut self) {
+        self.bin
+            .set_state(gstreamer::State::Null)
+            .expect("pipeline stops");
+    }
+}
+
+fn recover(carrier: &[u8], audio: bool, key: Option<[u8; 32]>, bits: u8) -> Option<Vec<u8>> {
+    let config = EmbeddingConfig::new(bits).unwrap();
+    let limits = DecodeLimits::default();
+    let report = match (audio, key) {
+        (false, None) => SpatialLsb.extract_packet(carrier, &config, &limits),
+        (false, Some(key)) => KeyedSpatialLsb::new(key).extract_packet(carrier, &config, &limits),
+        (true, None) => AudioSpatialLsb.extract_packet(carrier, &config, &limits),
+        (true, Some(key)) => {
+            KeyedAudioSpatialLsb::new(key).extract_packet(carrier, &config, &limits)
+        }
+    };
+    report.ok().map(|report| report.packet.body)
+}
+
+#[test]
+fn stegovideo_keyed_and_sequential_preserve_actual_layout() {
+    for (width, offset, extra_stride) in [(640u32, 0usize, 0usize), (638, 0, 0), (638, 37, 12)] {
+        for keyed in [false, true] {
+            let height = 4usize;
+            let harness = ElementHarness::new(false, width, height as u32);
+            let info = gstreamer_video::VideoInfo::builder(
+                gstreamer_video::VideoFormat::Rgb,
+                width,
+                height as u32,
+            )
+            .build()
+            .unwrap();
+            let row = width as usize * 3;
+            let stride = info.stride()[0] as usize + extra_stride;
+            let payload = vec![b'p'; 300];
+            let packet = encode_packet(&payload, 1, keyed);
+            assert!(packet.len() * 8 > row);
+            let key = [0x59; 32];
+            harness
+                .stego
+                .set_property("packet-hex", encode_hex(&packet));
+            if keyed {
+                harness.stego.set_property("key-hex", encode_hex(&key));
+            }
+            let mut bytes = vec![0xa5; offset + stride * height + 29];
+            for y in 0..height {
+                bytes[offset + y * stride..offset + y * stride + row].fill(0x40);
+            }
+            let before = bytes.clone();
+            let mut buffer = gstreamer::Buffer::from_mut_slice(bytes);
+            if offset != 0 {
+                gstreamer_video::VideoMeta::add_full(
+                    buffer.get_mut().unwrap(),
+                    gstreamer_video::VideoFrameFlags::empty(),
+                    gstreamer_video::VideoFormat::Rgb,
+                    width,
+                    height as u32,
+                    &[offset],
+                    &[stride as i32],
+                )
+                .expect("explicit VideoMeta layout");
+            }
+            start(&harness.bin);
+            let output = harness.exchange(buffer);
+            assert_eq!(output.len(), before.len());
+            let mut pixel = Vec::new();
+            for y in 0..height {
+                pixel.extend_from_slice(&output[offset + y * stride..offset + y * stride + row]);
+            }
+            assert_eq!(
+                recover(&pixel, false, keyed.then_some(key), 1),
+                Some(payload)
+            );
+            for (i, (&old, &new)) in before.iter().zip(&output).enumerate() {
+                let pixel =
+                    i >= offset && i < offset + stride * height && (i - offset) % stride < row;
+                if !pixel {
+                    assert_eq!(old, new, "sentinel/padding byte {i} changed");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_elements_restart_delivery_and_key_timeline() {
+    for audio in [false, true] {
+        for keyed in [false, true] {
+            let harness = ElementHarness::new(audio, 64, 32);
+            let key = [0x73; 32];
+            harness.stego.set_property(
+                "packet-hex",
+                encode_hex(&encode_packet(b"restart", 1, keyed)),
+            );
+            harness.stego.set_property("clear-payload", !keyed);
+            if keyed {
+                harness.stego.set_property("key-hex", encode_hex(&key));
+            }
+            for _ in 0..2 {
+                start(&harness.bin);
+                let first = harness.fresh(audio);
+                assert_eq!(
+                    recover(&first, audio, keyed.then_some(key), 1),
+                    Some(b"restart".to_vec())
+                );
+                let second = harness.fresh(audio);
+                if keyed {
+                    assert_eq!(
+                        recover(&second, audio, Some(derive_frame_embedding_key(&key, 1)), 1),
+                        Some(b"restart".to_vec())
+                    );
+                    assert!(recover(&second, audio, Some(key), 1).is_none());
+                } else {
+                    assert!(recover(&second, audio, None, 1).is_none());
+                }
+                harness
+                    .bin
+                    .set_state(gstreamer::State::Null)
+                    .expect("stream stops");
+            }
+        }
+    }
+}
+
+#[test]
+fn native_elements_deliver_each_replacement_once_without_resetting_key_timeline() {
+    for audio in [false, true] {
+        for keyed in [false, true] {
+            let harness = ElementHarness::new(audio, 64, 32);
+            let key = [0x35; 32];
+            harness.stego.set_property("clear-payload", !keyed);
+            if keyed {
+                harness.stego.set_property("key-hex", encode_hex(&key));
+            }
+            start(&harness.bin);
+            let mut index = 0;
+            for payload in [b"packet A".as_slice(), b"packet B".as_slice()] {
+                harness
+                    .stego
+                    .set_property("packet-hex", encode_hex(&encode_packet(payload, 1, keyed)));
+                let delivered = harness.fresh(audio);
+                let expected_key = keyed.then(|| derive_frame_embedding_key(&key, index));
+                assert_eq!(
+                    recover(&delivered, audio, expected_key, 1),
+                    Some(payload.to_vec())
+                );
+                index += 1;
+                if !keyed {
+                    let cleared = harness.fresh(audio);
+                    assert!(recover(&cleared, audio, None, 1).is_none());
+                    index += 1;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_elements_reject_unicode_hex_without_losing_previous_carrier_settings() {
+    for audio in [false, true] {
+        let harness = ElementHarness::new(audio, 64, 32);
+        let key = [0x92; 32];
+        harness.stego.set_property(
+            "packet-hex",
+            encode_hex(&encode_packet(b"unchanged", 1, true)),
+        );
+        harness.stego.set_property("key-hex", encode_hex(&key));
+        for invalid in ["aéa".to_owned(), "xyz".to_owned(), "zz".to_owned()] {
+            harness.stego.set_property("packet-hex", invalid);
+        }
+        harness
+            .stego
+            .set_property("key-hex", format!("aé{}", "a".repeat(61)));
+        start(&harness.bin);
+        assert_eq!(
+            recover(&harness.fresh(audio), audio, Some(key), 1),
+            Some(b"unchanged".to_vec())
+        );
+    }
+}
+
+#[test]
+fn native_elements_report_invalid_packet_configuration_as_pipeline_error() {
+    ensure_elements_registered();
+    for (packet, bits) in [
+        (encode_test_packet(b"wrong strength", 1), 2),
+        (encode_packet(b"missing placement key", 1, true), 1),
+        (vec![0xff], 1),
+    ] {
+        for (source, element) in [
+            (
+                "videotestsrc num-buffers=1 ! video/x-raw,format=RGB,width=64,height=64",
+                "stegovideo",
+            ),
+            (
+                "audiotestsrc num-buffers=1 samplesperbuffer=4096 ! audio/x-raw,format=S16LE,channels=1,rate=44100",
+                "stegoaudio",
+            ),
+        ] {
+            expect_negotiation_error(&format!(
+                "{source} ! {element} packet-hex={} bits-per-unit={bits} ! fakesink",
+                encode_hex(&packet),
+            ));
+        }
     }
 }

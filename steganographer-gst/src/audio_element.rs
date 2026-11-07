@@ -5,7 +5,7 @@
 //! caps, using the sequential `carrier::AudioSpatialLsb` kernel by default and
 //! the keyed `carrier::KeyedAudioSpatialLsb` carrier when `key-hex` is set.
 //! Wire format matches the sequential/keyed spatial-LSB audio paths in
-//! steganographer-core, so output verifies with the existing `packet extract`
+//! steganographer-core, so output decodes with the existing `decode`
 //! CLI command (`--stego-type lsb_audio`, plus `--embedding-key` for keyed
 //! carriers).
 //!
@@ -15,15 +15,16 @@
 //!   leading slots of each buffer so extraction from the first buffer works).
 //! - `key-hex`: 32-byte hex embedding key. When set, packet bits are placed by
 //!   the keyed permutation (and a keyed recognition tag occupies the canonical
-//!   bootstrap slots); extraction then requires `packet extract
-//!   --embedding-key`. Keyed placement is carrier-scoped in steganographer-core
+//!   bootstrap slots); extraction then requires `decode --embedding-key`.
+//!   Keyed placement is carrier-scoped in steganographer-core
 //!   (the recognition tag binds the unit count), so keyed output decodes from a
 //!   single buffer, not from a multi-buffer concatenation.
-//! - `clear-payload`: sequential mode only. After the first embedded buffer,
-//!   clear the packet LSB slots instead of re-embedding (single-buffer
-//!   delivery). With a key set, `clear-payload` is ignored with a one-time
-//!   warning (keyed slots are permutation-scattered; re-embedding is kept).
+//! - `clear-payload`: sequential mode delivers each replacement packet once
+//!   per stream, then clears the packet LSB slots on later buffers. With a
+//!   key set, it is ignored with a one-time warning: re-embedding continues.
 //! - When no packet is set, buffers pass through untouched.
+//! - Malformed packets and descriptor/configuration mismatches fail the
+//!   pipeline; insufficient-capacity buffers remain warned skips.
 //! - Pad templates are restricted to `audio/x-raw, format=S16LE,
 //!   layout=interleaved`: negotiation fails loudly for anything else. The
 //!   `set_caps` gate stays as a backstop.
@@ -39,12 +40,15 @@ use gstreamer_audio::AudioLayout;
 use gstreamer_base::subclass::base_transform::BaseTransformImpl;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_base::BaseTransform;
+use std::sync::Arc;
 use steganographer_core::carrier::{
-    AudioSpatialLsb, CarrierEmbedder, EmbeddingConfig, KeyedAudioSpatialLsb,
+    AudioSpatialLsb, CarrierEmbedder, CarrierError, EmbeddingConfig, KeyedAudioSpatialLsb,
 };
+use steganographer_core::crypto::{decode_hex, encode_hex};
 use steganographer_core::kdf::derive_frame_embedding_key;
 mod imp {
     use super::*;
+    use gstreamer_base::subclass::base_transform::BaseTransformImplExt;
     /// One-shot warning flags, keyed by reason: the first occurrence of each
     /// reason warns, later occurrences stay silent.
     #[derive(Clone, Copy, Default)]
@@ -70,26 +74,19 @@ mod imp {
         }
     }
 
-    /// Property-driven streaming parameters plus per-stream progress
-    /// counters, under one lock so a property write cannot interleave with a
-    /// `transform_ip` snapshot (stale counters, half-updated key/packet/bits).
-    ///
-    /// Streaming-order note: property changes apply at *buffer granularity*.
-    /// Each in-flight buffer works on the snapshot taken when it arrived; the
-    /// next buffer after a `key-hex` or `bits-per-unit` change sees the new
-    /// value with the progress counters reset (it is treated as buffer 0
-    /// and, in keyed mode, embedded with the raw key). Keyed mode therefore
-    /// expects `key-hex` to be set before the pipeline reaches PLAYING, so
-    /// buffer 0 is embedded with the raw key and decodes via the CLI
-    /// `--embedding-key` path.
+    /// Immutable frame snapshots with separate placement and payload generations:
+    /// old completions cannot advance a reset key or deliver a replacement packet.
     #[derive(Clone)]
     struct StreamState {
-        packet: Option<Vec<u8>>,
+        packet: Option<Arc<[u8]>>,
         key: Option<[u8; 32]>,
         bits_per_unit: u8,
         clear_payload: bool,
         /// Buffers that already carried the full packet.
         embedded_buffers: u64,
+        generation: u64,
+        payload_generation: u64,
+        payload_delivered: bool,
         /// Buffers skipped (capacity or alignment limits); warned once per
         /// reason.
         skipped_buffers: u64,
@@ -104,6 +101,9 @@ mod imp {
                 bits_per_unit: 1,
                 clear_payload: false,
                 embedded_buffers: 0,
+                generation: 0,
+                payload_generation: 0,
+                payload_delivered: false,
                 skipped_buffers: 0,
                 warned: WarnFlags::default(),
             }
@@ -124,9 +124,27 @@ mod imp {
         /// Reset per-stream progress after a property change that alters the
         /// placement or wire format: the next buffer starts from buffer 0.
         fn reset_progress(&mut self) {
+            self.generation = self.generation.wrapping_add(1);
+            self.payload_delivered = false;
             self.embedded_buffers = 0;
             self.skipped_buffers = 0;
             self.warned = WarnFlags::default();
+        }
+
+        fn replace_packet(&mut self, packet: Option<Arc<[u8]>>) {
+            self.packet = packet;
+            self.payload_generation = self.payload_generation.wrapping_add(1);
+            self.payload_delivered = false;
+        }
+
+        fn complete(&mut self, snapshot: &Self, delivered: bool) {
+            if self.generation != snapshot.generation {
+                return;
+            }
+            self.embedded_buffers = self.embedded_buffers.saturating_add(1);
+            if delivered && self.payload_generation == snapshot.payload_generation {
+                self.payload_delivered = true;
+            }
         }
     }
 
@@ -187,7 +205,8 @@ mod imp {
                                 "key-hex cleared; sequential placement from the next buffer"
                             );
                         }
-                    } else if let Some(key) = decode_key(&hex) {
+                    } else if let Some(key) = decode_hex(&hex).ok().and_then(|b| b.try_into().ok())
+                    {
                         if stream.key != Some(key) {
                             stream.key = Some(key);
                             stream.reset_progress();
@@ -208,9 +227,9 @@ mod imp {
                             imp = self,
                             "packet-hex cleared; embedding disabled"
                         );
-                        self.stream.lock().packet = None;
-                    } else if let Some(bytes) = decode_hex_fixed(&hex, hex.len() / 2) {
-                        self.stream.lock().packet = Some(bytes);
+                        self.stream.lock().replace_packet(None);
+                    } else if let Ok(bytes) = decode_hex(&hex) {
+                        self.stream.lock().replace_packet(Some(bytes.into()));
                     } else {
                         gstreamer::warning!(
                             gstreamer::CAT_DEFAULT,
@@ -237,13 +256,13 @@ mod imp {
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
                 "key-hex" => match self.stream.lock().key {
-                    Some(key) => hex_encode(key).to_value(),
+                    Some(key) => encode_hex(&key).to_value(),
                     None => String::new().to_value(),
                 },
                 "packet-hex" => {
                     let stream = self.stream.lock();
                     match stream.packet.as_deref() {
-                        Some(bytes) => hex_encode_slice(bytes).to_value(),
+                        Some(bytes) => encode_hex(bytes).to_value(),
                         None => String::new().to_value(),
                     }
                 }
@@ -314,6 +333,18 @@ mod imp {
         const PASSTHROUGH_ON_SAME_CAPS: bool = false;
         const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
+        fn start(&self) -> Result<(), gstreamer::ErrorMessage> {
+            self.parent_start()?;
+            self.stream.lock().reset_progress();
+            Ok(())
+        }
+
+        fn stop(&self) -> Result<(), gstreamer::ErrorMessage> {
+            self.stream.lock().reset_progress();
+            *self.info.lock() = None;
+            self.parent_stop()
+        }
+
         fn set_caps(
             &self,
             incaps: &gstreamer::Caps,
@@ -338,10 +369,18 @@ mod imp {
             &self,
             buf: &mut gstreamer::BufferRef,
         ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
-            // One short lock: snapshot the streaming parameters for this
-            // buffer so a concurrent property write cannot split the
-            // packet/key/bits triple or the buffer counter across the embed.
+            // Completion is conditional on this snapshot's generations.
             let snap = self.stream.lock().clone();
+            self.transform_snapshot(buf, snap)
+        }
+    }
+
+    impl StegoAudio {
+        fn transform_snapshot(
+            &self,
+            buf: &mut gstreamer::BufferRef,
+            snap: StreamState,
+        ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
             let Some(packet_bytes) = snap.packet.as_deref() else {
                 return Ok(gstreamer::FlowSuccess::Ok);
             };
@@ -379,7 +418,7 @@ mod imp {
                 return Ok(gstreamer::FlowSuccess::Ok);
             }
 
-            if snap.key.is_some() && snap.clear_payload && snap.embedded_buffers > 0 {
+            if snap.key.is_some() && snap.clear_payload && snap.payload_delivered {
                 let first = {
                     let mut stream = self.stream.lock();
                     let first = !stream.warned.keyed_clear;
@@ -393,12 +432,12 @@ mod imp {
                         "clear-payload is unsupported with keyed placement; re-embedding every buffer"
                     );
                 }
-            } else if snap.embedded_buffers > 0 && snap.clear_payload {
+            } else if snap.payload_delivered && snap.clear_payload {
                 // Clear the packet slots (packet_len * 8 LSB bits at the
                 // leading sequential sample slots) and stop embedding after
                 // the first delivery buffer.
                 clear_packet_slots(data, packet_bytes.len(), snap.bits_per_unit);
-                self.stream.lock().embedded_buffers += 1;
+                self.stream.lock().complete(&snap, false);
                 return Ok(gstreamer::FlowSuccess::Ok);
             }
 
@@ -414,7 +453,7 @@ mod imp {
             };
             match result {
                 Ok(report) => {
-                    self.stream.lock().embedded_buffers += 1;
+                    self.stream.lock().complete(&snap, true);
                     gstreamer::debug!(
                         gstreamer::CAT_DEFAULT,
                         imp = self,
@@ -423,16 +462,21 @@ mod imp {
                         report.modified_units
                     );
                 }
-                Err(e) => self.note_skip(
+                Err(e @ CarrierError::InsufficientCapacity { .. }) => self.note_skip(
                     SkipReason::Capacity,
                     &format!("packet does not fit buffer capacity: {e}; buffer remains unembedded"),
                 ),
+                Err(e) => {
+                    gstreamer::element_imp_error!(
+                        self,
+                        gstreamer::StreamError::Format,
+                        ("invalid packet embedding configuration: {e}")
+                    );
+                    return Err(gstreamer::FlowError::Error);
+                }
             }
             Ok(gstreamer::FlowSuccess::Ok)
         }
-    }
-
-    impl StegoAudio {
         /// Count a skipped buffer and warn once per skip reason.
         fn note_skip(&self, reason: SkipReason, message: &str) {
             if self.stream.lock().note_skip(reason) {
@@ -452,187 +496,118 @@ mod imp {
             data[slot] &= mask;
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use steganographer_core::carrier::CarrierExtractor;
+        use steganographer_core::packet::{
+            AlgorithmDescriptor, DecodeLimits, GenericPacket, PayloadKind, KERNEL_SPATIAL_LSB,
+            PLACEMENT_KEYED,
+        };
+
+        #[test]
+        fn stale_buffer_cannot_advance_reset_key_or_bits() {
+            gstreamer::init().unwrap();
+            for reset_bits in [false, true] {
+                let element = glib::Object::new::<super::super::StegoAudio>();
+                let imp = element.imp();
+                let limits = DecodeLimits::default();
+                let packet = |bits| {
+                    GenericPacket::new_untransformed(
+                        b"new generation".to_vec(),
+                        [3; 16],
+                        [4; 8],
+                        PayloadKind::Text,
+                        AlgorithmDescriptor::new(PLACEMENT_KEYED, 1, Vec::new()),
+                        AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![bits]),
+                        &limits,
+                    )
+                    .unwrap()
+                    .encode(&limits)
+                    .unwrap()
+                };
+                element.set_property("key-hex", encode_hex(&[1; 32]));
+                element.set_property("packet-hex", encode_hex(&packet(1)));
+                *imp.info.lock() = Some(
+                    AudioInfo::builder(AudioFormat::S16le, 8000, 1)
+                        .build()
+                        .unwrap(),
+                );
+                let stale = imp.stream.lock().clone();
+                let (key, bits) = if reset_bits {
+                    element.set_property("bits-per-unit", 2u32);
+                    element.set_property("packet-hex", encode_hex(&packet(2)));
+                    ([1; 32], 2)
+                } else {
+                    element.set_property("key-hex", encode_hex(&[2; 32]));
+                    ([2; 32], 1)
+                };
+                let mut old = gstreamer::Buffer::from_mut_slice(vec![0x40; 16384]);
+                imp.transform_snapshot(old.get_mut().unwrap(), stale)
+                    .unwrap();
+                let mut new = gstreamer::Buffer::from_mut_slice(vec![0x40; 16384]);
+                imp.transform_ip(new.get_mut().unwrap()).unwrap();
+                let map = new.map_readable().unwrap();
+                let report = KeyedAudioSpatialLsb::new(key)
+                    .extract_packet(map.as_ref(), &EmbeddingConfig::new(bits).unwrap(), &limits)
+                    .expect("first buffer of the reset generation uses its raw key");
+                assert_eq!(report.packet.body, b"new generation");
+            }
+        }
+
+        #[test]
+        fn stale_packet_completion_does_not_deliver_its_replacement() {
+            gstreamer::init().unwrap();
+            let element = glib::Object::new::<super::super::StegoAudio>();
+            let imp = element.imp();
+            let limits = DecodeLimits::default();
+            let packet = |body: &[u8]| {
+                GenericPacket::new_untransformed(
+                    body.to_vec(),
+                    [3; 16],
+                    [4; 8],
+                    PayloadKind::Text,
+                    AlgorithmDescriptor::new(
+                        steganographer_core::packet::PLACEMENT_SEQUENTIAL,
+                        1,
+                        Vec::new(),
+                    ),
+                    AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
+                    &limits,
+                )
+                .unwrap()
+                .encode(&limits)
+                .unwrap()
+            };
+            *imp.info.lock() = Some(
+                AudioInfo::builder(AudioFormat::S16le, 8000, 1)
+                    .build()
+                    .unwrap(),
+            );
+            element.set_property("clear-payload", true);
+            element.set_property("packet-hex", encode_hex(&packet(b"A")));
+            let stale = imp.stream.lock().clone();
+            element.set_property("packet-hex", encode_hex(&packet(b"B")));
+            let mut old = gstreamer::Buffer::from_mut_slice(vec![0x40; 16384]);
+            imp.transform_snapshot(old.get_mut().unwrap(), stale)
+                .unwrap();
+            let mut new = gstreamer::Buffer::from_mut_slice(vec![0x40; 16384]);
+            imp.transform_ip(new.get_mut().unwrap()).unwrap();
+            let map = new.map_readable().unwrap();
+            assert_eq!(
+                AudioSpatialLsb
+                    .extract_packet(map.as_ref(), &EmbeddingConfig::new(1).unwrap(), &limits)
+                    .unwrap()
+                    .packet
+                    .body,
+                b"B",
+            );
+        }
+    }
 }
 
 glib::wrapper! {
     pub struct StegoAudio(ObjectSubclass<imp::StegoAudio>)
         @extends BaseTransform, gstreamer::Element, gstreamer::Object;
-}
-
-/// Decode a hex string into exactly `out_len` bytes.
-fn decode_hex_fixed(s: &str, out_len: usize) -> Option<Vec<u8>> {
-    if s.len() != out_len * 2 || !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..out_len)
-        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
-        .collect()
-}
-
-/// Decode a hex string into a 32-byte key.
-fn decode_key(s: &str) -> Option<[u8; 32]> {
-    let bytes = decode_hex_fixed(s, 32)?;
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Some(key)
-}
-
-fn hex_encode(bytes: [u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_encode_slice(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use steganographer_core::carrier::{CarrierExtractor, EmbeddingConfig};
-    use steganographer_core::packet::{
-        AlgorithmDescriptor, DecodeLimits, GenericPacket, PayloadKind, KERNEL_SPATIAL_LSB,
-        PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
-    };
-
-    fn test_packet(payload: &[u8], keyed: bool) -> Vec<u8> {
-        let limits = DecodeLimits::default();
-        let placement = if keyed {
-            PLACEMENT_KEYED
-        } else {
-            PLACEMENT_SEQUENTIAL
-        };
-        let packet = GenericPacket::new_untransformed(
-            payload.to_vec(),
-            [7u8; 16],
-            [9u8; 8],
-            PayloadKind::Text,
-            AlgorithmDescriptor::new(placement, 1, Vec::new()),
-            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![1]),
-            &limits,
-        )
-        .unwrap();
-        packet.encode(&limits).unwrap()
-    }
-
-    #[test]
-    fn registers_element_type() {
-        gstreamer::init().unwrap();
-        let el = glib::Object::new::<StegoAudio>();
-        assert!(!el.name().is_empty());
-        let kv: String = el.property("key-hex");
-        assert!(kv.is_empty());
-        let ph: String = el.property("packet-hex");
-        assert!(ph.is_empty());
-        assert!(!el.property::<bool>("clear-payload"));
-        assert_eq!(el.property::<u32>("bits-per-unit"), 1);
-    }
-
-    #[test]
-    fn set_property_parses_key_and_clears_on_empty() {
-        gstreamer::init().unwrap();
-        let el = glib::Object::new::<StegoAudio>();
-        el.set_property("key-hex", hex_encode([9u8; 32]));
-        assert_eq!(el.property::<String>("key-hex"), hex_encode([9u8; 32]));
-        el.set_property("key-hex", String::new());
-        assert_eq!(el.property::<String>("key-hex"), "");
-    }
-
-    #[test]
-    fn sequential_round_trips_through_core_audio_lsb() {
-        gstreamer::init().unwrap();
-        let limits = DecodeLimits::default();
-        let packet_bytes = test_packet(b"stegoaudio roundtrip", false);
-
-        // The element's sequential embed path is the core audio kernel: the
-        // same wire format verifies through the core extractor.
-        let mut pcm = vec![0x10u8; 2 * 4096];
-        AudioSpatialLsb
-            .embed_packet(&mut pcm, &packet_bytes, &EmbeddingConfig::new(1).unwrap())
-            .unwrap();
-        let report = AudioSpatialLsb
-            .extract_packet(&pcm, &EmbeddingConfig::new(1).unwrap(), &limits)
-            .unwrap();
-        assert_eq!(report.packet.body, b"stegoaudio roundtrip".to_vec());
-    }
-
-    #[test]
-    fn keyed_round_trips_and_diverges_by_key() {
-        gstreamer::init().unwrap();
-        let limits = DecodeLimits::default();
-        let packet_bytes = test_packet(b"keyed audio", true);
-        let config = EmbeddingConfig::new(1).unwrap();
-
-        let mut carrier_a = vec![0x20u8; 2 * 8192];
-        KeyedAudioSpatialLsb::new([1u8; 32])
-            .embed_packet(&mut carrier_a, &packet_bytes, &config)
-            .unwrap();
-        let mut carrier_b = vec![0x20u8; 2 * 8192];
-        KeyedAudioSpatialLsb::new([2u8; 32])
-            .embed_packet(&mut carrier_b, &packet_bytes, &config)
-            .unwrap();
-
-        // Equal buffers, different embedding keys: the modified slot sets
-        // differ (keyed placement, not a fixed leading layout).
-        let changed: Vec<usize> = carrier_a
-            .iter()
-            .zip(&carrier_b)
-            .enumerate()
-            .filter(|(_, (a, b))| a != b)
-            .map(|(i, _)| i)
-            .collect();
-        assert!(
-            !changed.is_empty(),
-            "keyed embeddings must differ between keys"
-        );
-        // Both carriers embed the same keyed packet: each decodes under its
-        // own key and fails under the other's.
-        let report = KeyedAudioSpatialLsb::new([1u8; 32])
-            .extract_packet(&carrier_a, &config, &limits)
-            .unwrap();
-        assert_eq!(report.packet.body, b"keyed audio".to_vec());
-        assert!(
-            KeyedAudioSpatialLsb::new([2u8; 32])
-                .extract_packet(&carrier_a, &config, &limits)
-                .is_err(),
-            "wrong key must not decode a keyed audio carrier"
-        );
-    }
-
-    #[test]
-    fn keyed_buffers_diverge_by_frame_index() {
-        gstreamer::init().unwrap();
-        use steganographer_core::kdf::derive_frame_embedding_key;
-        let limits = DecodeLimits::default();
-        let packet_bytes = test_packet(b"frame-indexed audio", true);
-        let config = EmbeddingConfig::new(1).unwrap();
-
-        let embed_buffer = |index: u64| {
-            let mut pcm = vec![0x20u8; 2 * 8192];
-            KeyedAudioSpatialLsb::new(derive_frame_embedding_key(&[7u8; 32], index))
-                .embed_packet(&mut pcm, &packet_bytes, &config)
-                .unwrap();
-            pcm
-        };
-
-        let buf0 = embed_buffer(0);
-        let buf1 = embed_buffer(1);
-        assert_ne!(buf0, buf1, "equal buffers at different indices must differ");
-
-        for (index, buf) in [(0u64, &buf0), (1, &buf1)] {
-            let report = KeyedAudioSpatialLsb::new(derive_frame_embedding_key(&[7u8; 32], index))
-                .extract_packet(buf, &config, &limits)
-                .unwrap();
-            assert_eq!(report.packet.body, b"frame-indexed audio");
-        }
-        assert!(KeyedAudioSpatialLsb::new([7u8; 32])
-            .extract_packet(&buf1, &config, &limits)
-            .is_err());
-    }
-
-    #[test]
-    fn decode_key_rejects_bad_hex() {
-        assert!(decode_key(&"ab".repeat(32)).is_some());
-        assert!(decode_key("zz").is_none());
-        assert!(decode_key("ab").is_none());
-    }
 }

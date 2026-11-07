@@ -1,0 +1,4 @@
+# Documented 2026-07-22 incident: docs/key-rotation.md and docs/security.md.
+# The exposed identity is permanently denied by core revocation policy.
+# Exact historical commit/path/rule/line only; no value, path, or new-commit waiver.
+5dcb2e2669e135cd32f6d2615d279f1f0d8dbf35:keys/daf.key:raw-hex-private-key-file:1

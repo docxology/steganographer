@@ -7,7 +7,7 @@
 //! The number of LSBs used per byte is configurable (1–4).
 
 use crate::crypto::SignaturePayload;
-use crate::video::{VideoFormat, VideoFrame, VideoStegoModule};
+use crate::video::{VideoFrame, VideoStegoModule};
 
 /// LSB-based video steganography module.
 pub struct LsbVideo {
@@ -37,73 +37,37 @@ impl LsbVideo {
         Ok(Self { bits })
     }
 
-    /// Serialize payload to a bit vector, prefixed by a 32-bit length (in bits).
-    fn payload_to_bits(payload: &SignaturePayload) -> Vec<u8> {
-        let raw_bytes = payload.to_bytes();
-        let raw_bits: Vec<u8> = raw_bytes
-            .iter()
-            .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
-            .collect();
-
-        // Prepend 32-bit length prefix (number of payload bits)
-        let len = raw_bits.len() as u32;
-        let len_bits: Vec<u8> = (0..32).rev().map(|i| ((len >> i) & 1) as u8).collect();
-
-        let mut result = len_bits;
-        result.extend_from_slice(&raw_bits);
+    /// Fixed-size MSB-first stream: length prefix followed by the signature.
+    fn payload_to_bits(
+        payload: &SignaturePayload,
+    ) -> [u8; 32 + SignaturePayload::SERIALIZED_SIZE * 8] {
+        let bytes = payload.to_bytes();
+        let mut result = [0; 32 + SignaturePayload::SERIALIZED_SIZE * 8];
+        let length = (SignaturePayload::SERIALIZED_SIZE * 8) as u32;
+        for (i, bit) in result[..32].iter_mut().enumerate() {
+            *bit = ((length >> (31 - i)) & 1) as u8;
+        }
+        for (i, bit) in result[32..].iter_mut().enumerate() {
+            *bit = (bytes[i / 8] >> (7 - i % 8)) & 1;
+        }
         result
     }
 
-    /// Extract bits from pixel data, reading the 32-bit length prefix first.
-    fn bits_to_payload(data: &[u8], bits_per_byte: u8) -> anyhow::Result<Option<SignaturePayload>> {
-        // We need at least 32 bits for the length prefix
-        let min_bytes_for_prefix = 32usize.div_ceil(bits_per_byte as usize);
-        if data.len() < min_bytes_for_prefix {
-            return Ok(None);
-        }
+    /// Map logical color bytes to rows, never padding or BGRA alpha.
+    fn byte_offset(frame: &VideoFrame, logical: usize) -> usize {
+        let row_units = frame.width as usize * 3;
+        let row = logical / row_units;
+        let column = logical % row_units;
+        let bpp = frame
+            .format
+            .bytes_per_pixel()
+            .expect("validated packed format");
+        row * frame.stride as usize + (column / 3) * bpp + column % 3
+    }
 
-        // Extract all LSBs
-        let all_bits: Vec<u8> = data
-            .iter()
-            .flat_map(|byte| (0..bits_per_byte).rev().map(move |i| (byte >> i) & 1))
-            .collect();
-
-        if all_bits.len() < 32 {
-            return Ok(None);
-        }
-
-        // Read 32-bit length prefix
-        let mut payload_bit_count: u32 = 0;
-        for &bit in &all_bits[..32] {
-            payload_bit_count = (payload_bit_count << 1) | bit as u32;
-        }
-
-        let expected = SignaturePayload::SERIALIZED_SIZE * 8;
-        if payload_bit_count as usize != expected {
-            log::trace!(
-                "LSB video: length prefix {} != expected payload bits {}",
-                payload_bit_count,
-                expected
-            );
-            return Ok(None);
-        }
-
-        let total_needed = 32 + payload_bit_count as usize;
-        if all_bits.len() < total_needed {
-            return Ok(None);
-        }
-
-        // Reconstruct payload bytes from bits
-        let payload_bits = &all_bits[32..total_needed];
-        let mut payload_bytes = [0u8; SignaturePayload::SERIALIZED_SIZE];
-        for (i, byte) in payload_bytes.iter_mut().enumerate() {
-            let offset = i * 8;
-            for j in 0..8 {
-                *byte = (*byte << 1) | payload_bits[offset + j];
-            }
-        }
-
-        SignaturePayload::from_bytes(&payload_bytes).map(Some)
+    fn read_bit(frame: &VideoFrame, bit: usize, bits: u8) -> u8 {
+        let offset = Self::byte_offset(frame, bit / bits as usize);
+        (frame.data[offset] >> (bits as usize - 1 - bit % bits as usize)) & 1
     }
 }
 
@@ -118,46 +82,23 @@ impl VideoStegoModule for LsbVideo {
             None => return Ok(()),
         };
 
+        frame.validate_packed_layout()?;
         let bits = Self::payload_to_bits(sig);
         let total_bits = bits.len();
-        // FMT-002: the alpha channel of BGRA8 is never an embedding target.
-        // Core `VideoFrame` data is packed (`stride == width * bpp`), so
-        // alpha bytes are exactly every 4th byte; there is no row padding to
-        // exclude. RGB8 (and other) carriers are unchanged.
-        let alpha_last = frame.format == VideoFormat::Bgra8;
-        let eligible_bytes = if alpha_last {
-            frame.data.len() - frame.data.len() / 4
-        } else {
-            frame.data.len()
-        };
-        let capacity = eligible_bytes * self.bits as usize;
-
-        if total_bits > capacity {
-            anyhow::bail!(
-                "Not enough LSB capacity in frame: need {} bits, have {} ({} eligible bytes × {} bits)",
-                total_bits,
-                capacity,
-                eligible_bytes,
-                self.bits
-            );
-        }
-
-        log::debug!(
-            "LSB video embed: {} bits into {} bytes (frame {})",
-            total_bits,
-            frame.data.len(),
-            frame.frame_index
+        let eligible_bytes = (frame.width as usize)
+            .checked_mul(frame.height as usize)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| anyhow::anyhow!("LSB video capacity overflow"))?;
+        anyhow::ensure!(
+            eligible_bytes >= total_bits.div_ceil(self.bits as usize),
+            "Not enough LSB capacity in frame"
         );
 
         let mut bit_idx = 0usize;
         let mask = !((1u8 << self.bits) - 1); // e.g., bits=2 → mask = 0b11111100
-        for (idx, byte) in frame.data.iter_mut().enumerate() {
-            if bit_idx >= total_bits {
-                break;
-            }
-            if alpha_last && idx % 4 == 3 {
-                continue;
-            }
+        for logical in 0..total_bits.div_ceil(self.bits as usize) {
+            let offset = Self::byte_offset(frame, logical);
+            let byte = &mut frame.data[offset];
             let mut new_lsb: u8 = 0;
             for shift in (0..self.bits).rev() {
                 if bit_idx < total_bits {
@@ -173,25 +114,27 @@ impl VideoStegoModule for LsbVideo {
     }
 
     fn extract(&self, frame: &VideoFrame) -> anyhow::Result<Option<SignaturePayload>> {
-        log::debug!(
-            "LSB video extract: reading from {} bytes (frame {})",
-            frame.data.len(),
-            frame.frame_index
-        );
-        // FMT-002: mirror the embed side — skip BGRA8 alpha bytes so the bit
-        // stream stays aligned with what was written.
-        if frame.format == VideoFormat::Bgra8 {
-            let visible: Vec<u8> = frame
-                .data
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| idx % 4 != 3)
-                .map(|(_, b)| *b)
-                .collect();
-            Self::bits_to_payload(&visible, self.bits)
-        } else {
-            Self::bits_to_payload(frame.data, self.bits)
+        frame.validate_packed_layout()?;
+        let units = (frame.width as usize)
+            .checked_mul(frame.height as usize)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| anyhow::anyhow!("LSB video capacity overflow"))?;
+        if units < 32usize.div_ceil(self.bits as usize) {
+            return Ok(None);
         }
+        let mut length = 0u32;
+        for bit in 0..32 {
+            length = (length << 1) | Self::read_bit(frame, bit, self.bits) as u32;
+        }
+        let expected = SignaturePayload::SERIALIZED_SIZE * 8;
+        if length as usize != expected || units < (32 + expected).div_ceil(self.bits as usize) {
+            return Ok(None);
+        }
+        let mut payload = [0u8; SignaturePayload::SERIALIZED_SIZE];
+        for bit in 0..expected {
+            payload[bit / 8] = (payload[bit / 8] << 1) | Self::read_bit(frame, 32 + bit, self.bits);
+        }
+        SignaturePayload::from_bytes(&payload).map(Some)
     }
 }
 
@@ -200,6 +143,69 @@ mod tests {
     use super::*;
     use crate::crypto::Signer;
     use crate::video::VideoFormat;
+    #[test]
+    fn strided_rgb_and_bgra_survive_pixel_only_repacking() {
+        let payload = Signer::generate().sign_frame(7, b"layout", None);
+        for format in [VideoFormat::Rgb8, VideoFormat::Bgra8] {
+            for bits in 1..=4 {
+                let bpp = format.bytes_per_pixel().unwrap();
+                let row = 16 * bpp;
+                let stride = row + 5;
+                let mut data = vec![0xa7; stride * 32];
+                let mut kernel = LsbVideo::new(bits);
+                let mut frame = VideoFrame {
+                    width: 16,
+                    height: 32,
+                    stride: stride as u32,
+                    format,
+                    data: &mut data,
+                    frame_index: 0,
+                };
+                kernel.embed(&mut frame, Some(&payload)).unwrap();
+                let mut packed = Vec::new();
+                for row_data in data.chunks_exact(stride) {
+                    assert!(row_data[row..].iter().all(|byte| *byte == 0xa7));
+                    if bpp == 4 {
+                        assert!(row_data[..row]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| pixel[3] == 0xa7));
+                    }
+                    packed.extend_from_slice(&row_data[..row]);
+                }
+                let frame = VideoFrame {
+                    width: 16,
+                    height: 32,
+                    stride: row as u32,
+                    format,
+                    data: &mut packed,
+                    frame_index: 0,
+                };
+                assert_eq!(
+                    kernel.extract(&frame).unwrap().unwrap().to_bytes(),
+                    payload.to_bytes()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_layout_is_rejected_before_mutation() {
+        let payload = Signer::generate().sign_frame(0, b"layout", None);
+        let mut data = vec![0x55; 1536];
+        let before = data.clone();
+        let mut frame = VideoFrame {
+            width: 16,
+            height: 32,
+            stride: 47,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        assert!(LsbVideo::new(1).embed(&mut frame, Some(&payload)).is_err());
+        assert_eq!(data, before);
+    }
 
     fn make_test_frame(data: &mut [u8]) -> VideoFrame<'_> {
         VideoFrame {

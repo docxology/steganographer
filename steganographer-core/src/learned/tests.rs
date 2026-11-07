@@ -247,3 +247,111 @@ fn mlp_matches_or_beats_majority_on_corrupted_frames() {
         maj_wrong
     );
 }
+
+#[test]
+fn nondefault_redundancy_uses_raw_slots_before_pooling() {
+    let payload = 0xFFFF_FFFF_0000_0000;
+    for redundancy in [1, 16, 33, 64] {
+        let wm = LearnedWatermarker::with_config(LearnedConfig {
+            redundancy,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut data = vec![128; 640 * 480 * 3];
+        let mut frame = rgb_frame(640, 480, &mut data);
+        wm.embed(&mut frame, payload).unwrap();
+        assert_eq!(wm.majority_extract(&frame).unwrap().0, payload);
+        assert_eq!(wm.extract(&frame).unwrap().0, payload);
+        let responses = wm.slot_responses(&frame).unwrap();
+        assert_eq!(responses.len(), 64 * redundancy as usize);
+        for (slot, response) in responses.iter().enumerate() {
+            let bit = slot / redundancy as usize;
+            assert_eq!(*response > 0.0, ((payload >> (63 - bit)) & 1) == 1);
+        }
+        assert_eq!(wm.bit_features(&frame).unwrap().len(), 64 * MODEL_INPUT);
+    }
+}
+
+#[test]
+fn both_constructors_reject_invalid_config() {
+    let configs = [
+        LearnedConfig {
+            bits: 32,
+            ..Default::default()
+        },
+        LearnedConfig {
+            redundancy: 0,
+            ..Default::default()
+        },
+        LearnedConfig {
+            strength: 0.0,
+            ..Default::default()
+        },
+        LearnedConfig {
+            strength: -1.0,
+            ..Default::default()
+        },
+        LearnedConfig {
+            strength: f32::NAN,
+            ..Default::default()
+        },
+        LearnedConfig {
+            strength: f32::INFINITY,
+            ..Default::default()
+        },
+    ];
+    for config in configs {
+        assert!(LearnedWatermarker::with_config(config.clone()).is_err());
+        assert!(LearnedWatermarker::with_model(config, LearnedModel::zeroed()).is_err());
+    }
+}
+
+#[test]
+fn learned_invalid_layout_is_not_a_successful_noop() {
+    let wm = LearnedWatermarker::built_in().unwrap();
+    let mut data = vec![128; 640 * 480 * 3 - 1];
+    let mut frame = rgb_frame(640, 480, &mut data);
+    assert!(wm.embed(&mut frame, 42).is_err());
+    assert!(frame.data.iter().all(|&byte| byte == 128));
+    assert!(wm.extract(&frame).is_none());
+    assert!(wm.majority_extract(&frame).is_none());
+    assert!(wm.slot_responses(&frame).is_none());
+}
+
+#[test]
+fn learned_padded_bgra_preserves_non_green_bytes() {
+    let width = 640usize;
+    let height = 480usize;
+    let stride = width * 4 + 13;
+    let wm = LearnedWatermarker::with_config(LearnedConfig {
+        redundancy: 16,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut data = vec![91; stride * height];
+    for row in data.chunks_exact_mut(stride) {
+        for pixel in row[..width * 4].as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[19, 128, 231, 255]);
+        }
+    }
+    let mut frame = VideoFrame {
+        width: width as u32,
+        height: height as u32,
+        stride: stride as u32,
+        format: VideoFormat::Bgra8,
+        data: &mut data,
+        frame_index: 0,
+    };
+    let payload = 0xFFFF_FFFF_0000_0000;
+    wm.embed(&mut frame, payload).unwrap();
+    assert_eq!(wm.majority_extract(&frame).unwrap().0, payload);
+    assert_eq!(wm.extract(&frame).unwrap().0, payload);
+    for row in frame.data.chunks_exact(stride) {
+        for pixel in row[..width * 4].as_chunks::<4>().0 {
+            assert_eq!(pixel[0], 19);
+            assert_eq!(pixel[2], 231);
+            assert_eq!(pixel[3], 255);
+        }
+        assert!(row[width * 4..].iter().all(|&byte| byte == 91));
+    }
+}

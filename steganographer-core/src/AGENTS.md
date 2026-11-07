@@ -5,7 +5,7 @@
 ### lib.rs
 
 Entry point. Declares and re-exports: `packet`, `carrier`, `placement`, `video`,
-`audio`, `crypto`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
+`audio`, `crypto`, `revocation`, `config`, `lsb_video`, `lsb_audio`, `overlay`, `info_bar`,
 `signer_backend`, `metrics`, `dct_video`, `spread_spectrum`, `encryption`,
 `error_correction`, `multi_frame`, `kdf`, `password`, `transforms`, `adaptive`,
 `hash_chain`, `steganalysis`, `forensics` (with the `forensics::ooxml`
@@ -92,6 +92,13 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
 - `SignaturePayload` — 109 bytes: `magic(4) + version(1) + frame_index(8) + hash(32) + signature(64)`, with `from_bytes()` / `to_bytes()`, magic header validation
 - `Signer` — `generate()`, `from_bytes()`, `sign_frame()`, `signing_key_bytes()`, `verifying_key()`
 - `Verifier` — `new()`, `from_bytes()`, `verify()` — recomputes BLAKE3 hash, checks Ed25519 signature
+- `decode_hex`, `decode_hex_array`, `encode_hex` — strict ASCII hex; fixed-array key decoding avoids heap allocation
+- Raw signature mathematics does not imply signer authorization.
+
+### revocation.rs
+
+- `is_known_compromised_key`, `check_known_revocations`, `RevokedKey` — immutable documented-compromise policy for managed entry points
+- `RevocationList` — normalized, sorted/deduplicated JSON public-key registry; allocation-free lookup includes immutable policy even when explicit entries are empty
 
 ### signer_backend.rs
 

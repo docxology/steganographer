@@ -542,7 +542,7 @@ impl PacketEnvelope {
 
     pub fn encode(&self, limits: &DecodeLimits) -> Result<Vec<u8>, PacketError> {
         validate_envelope(self, limits)?;
-        let field_count = 9usize
+        let field_count = 7usize
             .checked_add(self.transforms.len())
             .and_then(|count| count.checked_add(self.extensions.len()))
             .and_then(|count| count.checked_add(self.unknown_fields.len()))
@@ -710,6 +710,26 @@ impl PacketEnvelope {
             }
             let value = &input[cursor..end];
             cursor = end;
+
+            let canonical_critical = match field_id {
+                FIELD_PACKET_ID
+                | FIELD_PAYLOAD_KIND
+                | FIELD_ORIGINAL_LENGTH
+                | FIELD_CONTENT_DIGEST
+                | FIELD_PLACEMENT
+                | FIELD_KERNEL
+                | FIELD_CREATED_VERSION => Some(true),
+                FIELD_MIME_TYPE | FIELD_FILENAME | FIELD_CREATED_AT | FIELD_PARENT_ID => {
+                    Some(false)
+                }
+                _ => None,
+            };
+            if canonical_critical.is_some_and(|expected| critical != expected) {
+                return Err(PacketError::InvalidField {
+                    field_id,
+                    reason: "noncanonical critical bit",
+                });
+            }
 
             match field_id {
                 FIELD_PACKET_ID => {
@@ -1051,6 +1071,35 @@ fn decode_text(value: &[u8], field_id: u16) -> Result<String, PacketError> {
         .map(str::to_owned)
         .map_err(|_| PacketError::InvalidUtf8 { field_id })
 }
+/// Validate an already encoded packet without copying its body.
+///
+/// Embedding is not a second decode-policy boundary: all lengths are bounded
+/// by the supplied encoded bytes, not the default extraction limits. Encoding
+/// and extraction remain responsible for their caller-selected resource policy.
+pub(crate) fn validate_encoded_packet(
+    input: &[u8],
+) -> Result<(Locator, PacketEnvelope), PacketError> {
+    let bound = input.len();
+    let limits = DecodeLimits {
+        max_envelope_len: bound,
+        max_body_len: bound,
+        max_packet_len: bound,
+        max_field_len: bound,
+        max_fields: bound,
+        max_transforms: bound,
+        max_extensions: bound,
+        max_filename_len: bound,
+        max_mime_len: bound,
+        max_original_len: usize::MAX,
+        max_nesting_depth: 0,
+        max_aggregate_nested_bytes: bound,
+    };
+    let locator = Locator::from_bytes(input, &limits)?;
+    let envelope = decode_packet_envelope(input, locator, &limits)?;
+    let body = &input[LOCATOR_SIZE + locator.envelope_len as usize..locator.packet_len()?];
+    validate_untransformed_body(&envelope, body)?;
+    Ok((locator, envelope))
+}
 
 /// Complete generic packet: public locator, canonical envelope, and encoded body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1122,30 +1171,24 @@ impl GenericPacket {
 
     pub fn decode(input: &[u8], limits: &DecodeLimits) -> Result<Self, PacketError> {
         let locator = Locator::from_bytes(input, limits)?;
-        let packet_len = locator.packet_len()?;
-        if input.len() < packet_len {
-            return Err(PacketError::Truncated {
-                needed: packet_len,
-                available: input.len(),
-            });
-        }
+        let envelope = decode_packet_envelope(input, locator, limits)?;
+        Self::decode_body(input, locator, envelope)
+    }
 
-        let envelope_start = LOCATOR_SIZE;
-        let envelope_end = envelope_start + locator.envelope_len as usize;
-        let body_end = envelope_end + locator.encoded_body_len as usize;
-        let envelope_bytes = &input[envelope_start..envelope_end];
-        if crc32c(envelope_bytes) != locator.envelope_crc32c {
-            return Err(PacketError::EnvelopeChecksum);
-        }
-        let envelope = PacketEnvelope::decode(envelope_bytes, limits)?;
-        validate_flag_transform_consistency(locator.flags, &envelope.transforms)?;
-        let body = input[envelope_end..body_end].to_vec();
-        validate_untransformed_body(&envelope, &body)?;
+    // Called only after the locator and complete envelope have been bounded.
+    fn decode_body(
+        input: &[u8],
+        locator: Locator,
+        envelope: PacketEnvelope,
+    ) -> Result<Self, PacketError> {
+        let envelope_end = LOCATOR_SIZE + locator.envelope_len as usize;
+        let body = &input[envelope_end..locator.packet_len()?];
+        validate_untransformed_body(&envelope, body)?;
 
         Ok(Self {
             locator,
             envelope,
-            body,
+            body: body.to_vec(),
         })
     }
 
@@ -1162,34 +1205,39 @@ impl GenericPacket {
     /// Every expansion is bounded by [`check_nesting`]: chain depth against
     /// [`DecodeLimits::max_nesting_depth`] and the running aggregate byte count
     /// of every packet in the chain (root included) against
-    /// [`DecodeLimits::max_aggregate_nested_bytes`], checked from the child's
-    /// locator *before* its body is decoded. A packet identifier that reappears
-    /// in the chain (self-nesting or a parent-id loop) is rejected as a cycle.
+    /// [`DecodeLimits::max_aggregate_nested_bytes`], checked from the root's
+    /// locator before its envelope or body is decoded. Children first undergo
+    /// bounded envelope preflight to establish parent linkage, then the same
+    /// limits are checked before decoding their bodies. Linked children must
+    /// occupy the entire carrying logical payload. A repeated packet identifier
+    /// (self-nesting or a parent-id loop) is rejected as a cycle.
     ///
     /// Each level's transforms are reversed with `decrypt_key` / `password`
-    /// (see [`crate::transforms::reverse_with_password`]); the innermost level's
-    /// logical payload is the returned `payload`.
+    /// (see [`crate::transforms::reverse_with_password`]) and its recovered
+    /// logical digest is verified before looking for a child. The innermost
+    /// level's logical payload is the returned `payload`.
     pub fn decode_nested(
         input: &[u8],
         limits: &DecodeLimits,
         decrypt_key: Option<&EncryptionKey>,
         password: Option<&[u8]>,
     ) -> Result<NestedDecode, PacketError> {
+        let locator = Locator::from_bytes(input, limits)?;
+        let mut aggregate =
+            u64::try_from(locator.packet_len()?).map_err(|_| PacketError::LengthOverflow)?;
+        let mut depth = 1usize;
+        check_nesting(depth, aggregate, limits)?;
+        let envelope = decode_packet_envelope(input, locator, limits)?;
+        let mut packet = Self::decode_body(input, locator, envelope)?;
         let mut chain = Vec::new();
         let mut seen_ids: Vec<[u8; 16]> = Vec::new();
-        let mut aggregate = 0usize;
-        let mut depth = 1usize;
-        let mut packet = GenericPacket::decode(input, limits)?;
 
         loop {
-            let packet_len = packet.encoded_len()?;
-            check_nesting(depth, (aggregate + packet_len) as u64, limits)?;
             let packet_id = packet.envelope.packet_id;
             if seen_ids.contains(&packet_id) {
                 return Err(PacketError::NestingCycle { depth });
             }
             seen_ids.push(packet_id);
-            aggregate += packet_len;
             chain.push(NestedLevel {
                 depth,
                 packet_id,
@@ -1210,18 +1258,18 @@ impl GenericPacket {
                 &packet.envelope.transforms,
                 packet.envelope.original_len,
             )?;
+            if !packet.envelope.content_digest.verify(&payload) {
+                return Err(PacketError::DigestMismatch);
+            }
 
             if !looks_like_packet(&payload) {
                 return Ok(NestedDecode { chain, payload });
             }
-            // Cheap preflight from the child's fixed locator, before any
-            // variable-size child allocation: bounds the chain even when every
-            // level is individually within the per-packet ceilings.
+            // Establish opt-in linkage from bounded framing and metadata,
+            // without allocating a child body or charging an expansion yet.
             let child_locator = Locator::from_bytes(&payload, limits)?;
-            let child_len = child_locator.packet_len()?;
-            check_nesting(depth + 1, (aggregate + child_len) as u64, limits)?;
-            let child = GenericPacket::decode(&payload, limits)?;
-            match child.envelope.parent_id {
+            let child_envelope = decode_packet_envelope(&payload, child_locator, limits)?;
+            match child_envelope.parent_id {
                 Some(parent) if parent == packet_id => {}
                 Some(_) => {
                     return Err(PacketError::InvalidField {
@@ -1234,8 +1282,21 @@ impl GenericPacket {
                 // chain is the terminal logical payload.
                 None => return Ok(NestedDecode { chain, payload }),
             }
-            packet = child;
-            depth += 1;
+            let child_len = child_locator.packet_len()?;
+            if child_len != payload.len() {
+                return Err(PacketError::InvalidField {
+                    field_id: FIELD_PARENT_ID,
+                    reason: "linked nested packet must occupy the entire logical payload",
+                });
+            }
+            let child_depth = depth.checked_add(1).ok_or(PacketError::LengthOverflow)?;
+            let child_aggregate = aggregate
+                .checked_add(u64::try_from(child_len).map_err(|_| PacketError::LengthOverflow)?)
+                .ok_or(PacketError::LengthOverflow)?;
+            check_nesting(child_depth, child_aggregate, limits)?;
+            packet = Self::decode_body(&payload, child_locator, child_envelope)?;
+            depth = child_depth;
+            aggregate = child_aggregate;
         }
     }
 
@@ -1266,6 +1327,30 @@ pub struct NestedDecode {
     pub payload: Vec<u8>,
 }
 
+// Framing-only preflight: validate bounded metadata without copying a body or
+// executing transforms. Nested decoding uses this to establish child linkage.
+fn decode_packet_envelope(
+    input: &[u8],
+    locator: Locator,
+    limits: &DecodeLimits,
+) -> Result<PacketEnvelope, PacketError> {
+    let packet_len = locator.packet_len()?;
+    if input.len() < packet_len {
+        return Err(PacketError::Truncated {
+            needed: packet_len,
+            available: input.len(),
+        });
+    }
+    let envelope_end = LOCATOR_SIZE + locator.envelope_len as usize;
+    let envelope_bytes = &input[LOCATOR_SIZE..envelope_end];
+    if crc32c(envelope_bytes) != locator.envelope_crc32c {
+        return Err(PacketError::EnvelopeChecksum);
+    }
+    let envelope = PacketEnvelope::decode(envelope_bytes, limits)?;
+    validate_flag_transform_consistency(locator.flags, &envelope.transforms)?;
+    Ok(envelope)
+}
+
 /// Cheap gate before treating a logical payload as a nested packet.
 fn looks_like_packet(bytes: &[u8]) -> bool {
     bytes.len() >= LOCATOR_SIZE && bytes[..4] == PACKET_MAGIC
@@ -1283,44 +1368,31 @@ fn validate_untransformed_body(envelope: &PacketEnvelope, body: &[u8]) -> Result
     Ok(())
 }
 
-/// Locator flags must mirror the recorded transform descriptors exactly:
-/// `FLAG_ENCRYPTED` ⇔ an AEAD transform is present, `FLAG_PAYLOAD_SIGNED` ⇔
-/// a payload-signature transform is present. Either mismatch is a protocol
-/// violation — it would let a decoder skip or misapply a transform.
+/// Locator transform flags must mirror compression, encryption, ECC and
+/// payload-signature descriptors exactly. Framing validation does not execute
+/// transforms or interpret their independently versioned parameter layouts.
 fn validate_flag_transform_consistency(
     flags: u16,
     transforms: &[TransformDescriptor],
 ) -> Result<(), PacketError> {
-    use crate::transforms::{TRANSFORM_AEAD_CHACHA20_POLY1305, TRANSFORM_PAYLOAD_SIGN_ED25519};
+    use crate::transforms::{
+        TRANSFORM_AEAD_CHACHA20_POLY1305, TRANSFORM_COMPRESS_DEFLATE, TRANSFORM_ECC_REED_SOLOMON,
+        TRANSFORM_PAYLOAD_SIGN_ED25519,
+    };
 
-    let has_aead = transforms
-        .iter()
-        .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305);
-    let has_sign = transforms
-        .iter()
-        .any(|t| t.algorithm == TRANSFORM_PAYLOAD_SIGN_ED25519);
-
-    if flags & FLAG_ENCRYPTED != 0 && !has_aead {
-        return Err(PacketError::MissingTransformForFlag {
-            flag: FLAG_ENCRYPTED,
-        });
-    }
-    if has_aead && flags & FLAG_ENCRYPTED == 0 {
-        return Err(PacketError::MissingFlagForTransform {
-            algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
-            flag: FLAG_ENCRYPTED,
-        });
-    }
-    if flags & FLAG_PAYLOAD_SIGNED != 0 && !has_sign {
-        return Err(PacketError::MissingTransformForFlag {
-            flag: FLAG_PAYLOAD_SIGNED,
-        });
-    }
-    if has_sign && flags & FLAG_PAYLOAD_SIGNED == 0 {
-        return Err(PacketError::MissingFlagForTransform {
-            algorithm: TRANSFORM_PAYLOAD_SIGN_ED25519,
-            flag: FLAG_PAYLOAD_SIGNED,
-        });
+    for (flag, algorithm) in [
+        (FLAG_ENCRYPTED, TRANSFORM_AEAD_CHACHA20_POLY1305),
+        (FLAG_PAYLOAD_SIGNED, TRANSFORM_PAYLOAD_SIGN_ED25519),
+        (FLAG_COMPRESSED, TRANSFORM_COMPRESS_DEFLATE),
+        (FLAG_ERROR_CORRECTED, TRANSFORM_ECC_REED_SOLOMON),
+    ] {
+        let has_transform = transforms.iter().any(|t| t.algorithm == algorithm);
+        if flags & flag != 0 && !has_transform {
+            return Err(PacketError::MissingTransformForFlag { flag });
+        }
+        if has_transform && flags & flag == 0 {
+            return Err(PacketError::MissingFlagForTransform { algorithm, flag });
+        }
     }
     Ok(())
 }
@@ -1448,6 +1520,30 @@ mod tests {
         .unwrap()
     }
 
+    fn refresh_locator(packet: &mut GenericPacket) {
+        let envelope = packet.envelope.encode(&DecodeLimits::default()).unwrap();
+        packet.locator.envelope_len = envelope.len() as u32;
+        packet.locator.envelope_crc32c = crc32c(&envelope);
+        packet.locator.encoded_body_len = packet.body.len() as u64;
+    }
+
+    fn transform_packet(mut packet: GenericPacket, compress: bool, ecc: usize) -> GenericPacket {
+        let context = TransformContext {
+            packet_id: &packet.envelope.packet_id,
+            payload_kind: packet.envelope.payload_kind as u16,
+            original_len: packet.envelope.original_len,
+        };
+        let (body, transforms, flags) =
+            crate::transforms::apply(&packet.body, &context, None, compress, None, ecc, 239)
+                .unwrap();
+        assert!(!transforms.is_empty());
+        packet.body = body;
+        packet.envelope.transforms = transforms;
+        packet.locator.flags = flags;
+        refresh_locator(&mut packet);
+        packet
+    }
+
     #[test]
     fn crc32c_matches_standard_vector() {
         assert_eq!(crc32c(b"123456789"), 0xE306_9283);
@@ -1482,6 +1578,176 @@ mod tests {
         let decoded = GenericPacket::decode(&bytes, &DecodeLimits::default()).unwrap();
         assert_eq!(decoded, packet);
         assert_eq!(decoded.encode(&DecodeLimits::default()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn minimal_packet_field_limit_is_exactly_seven() {
+        let packet = packet(b"seven fields");
+        let limits = DecodeLimits {
+            max_fields: 7,
+            ..DecodeLimits::default()
+        };
+        let bytes = packet.encode(&limits).unwrap();
+        let decoded = GenericPacket::decode(&bytes, &limits).unwrap();
+        assert_eq!(decoded.encode(&limits).unwrap(), bytes);
+        let too_few = DecodeLimits {
+            max_fields: 6,
+            ..limits
+        };
+        for result in [
+            packet.encode(&too_few).map(|_| ()),
+            GenericPacket::decode(&bytes, &too_few).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(PacketError::LimitExceeded {
+                    what: "envelope field count",
+                    actual: 7,
+                    maximum: 6,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn field_limit_counts_optional_and_repeated_fields() {
+        let mut envelope = packet(b"metadata").envelope;
+        envelope.mime_type = Some("text/plain".into());
+        envelope.filename = Some("payload.txt".into());
+        envelope.created_at_unix = Some(1);
+        envelope.parent_id = Some([1; 16]);
+        envelope.transforms = vec![
+            TransformDescriptor {
+                algorithm: 3,
+                version: 1,
+                critical: false,
+                parameters: Vec::new(),
+            };
+            2
+        ];
+        envelope.unknown_fields = vec![
+            ExtensionField {
+                id: 9,
+                value: vec![],
+            },
+            ExtensionField {
+                id: 20,
+                value: vec![],
+            },
+        ];
+        envelope.extensions = vec![
+            ExtensionField {
+                id: 128,
+                value: vec![]
+            };
+            2
+        ];
+        let limits = DecodeLimits {
+            max_fields: 17,
+            ..DecodeLimits::default()
+        };
+        let bytes = envelope.encode(&limits).unwrap();
+        assert_eq!(PacketEnvelope::decode(&bytes, &limits).unwrap(), envelope);
+        let too_few = DecodeLimits {
+            max_fields: 16,
+            ..limits
+        };
+        for result in [
+            envelope.encode(&too_few).map(|_| ()),
+            PacketEnvelope::decode(&bytes, &too_few).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(PacketError::LimitExceeded {
+                    what: "envelope field count",
+                    actual: 17,
+                    maximum: 16,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn known_singletons_reject_noncanonical_critical_bits() {
+        let limits = DecodeLimits::default();
+        let mut packet = packet(b"critical bits");
+        packet.envelope.mime_type = Some("text/plain".into());
+        packet.envelope.filename = Some("payload.txt".into());
+        packet.envelope.created_at_unix = Some(1);
+        packet.envelope.parent_id = Some([1; 16]);
+        refresh_locator(&mut packet);
+        let bytes = packet.encode(&limits).unwrap();
+        let envelope_end = LOCATOR_SIZE + packet.locator.envelope_len as usize;
+        let mut cursor = LOCATOR_SIZE;
+        while cursor < envelope_end {
+            let field_id = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) & FIELD_ID_MASK;
+            let length =
+                u32::from_be_bytes(bytes[cursor + 2..cursor + 6].try_into().unwrap()) as usize;
+            let mut altered = bytes.clone();
+            altered[cursor] ^= (FIELD_CRITICAL >> 8) as u8;
+            let crc = crc32c(&altered[LOCATOR_SIZE..envelope_end]);
+            altered[20..24].copy_from_slice(&crc.to_be_bytes());
+            assert_eq!(
+                GenericPacket::decode(&altered, &limits).unwrap_err(),
+                PacketError::InvalidField {
+                    field_id,
+                    reason: "noncanonical critical bit",
+                }
+            );
+            cursor += TLV_HEADER_SIZE + length;
+        }
+    }
+
+    #[test]
+    fn framing_preserves_future_transform_versions_and_criticality() {
+        let limits = DecodeLimits::default();
+        let mut packet = packet(b"framing only");
+        packet.envelope.transforms.push(TransformDescriptor {
+            algorithm: crate::transforms::TRANSFORM_COMPRESS_DEFLATE,
+            version: 255,
+            critical: false,
+            parameters: vec![42],
+        });
+        packet.locator.flags = FLAG_COMPRESSED;
+        refresh_locator(&mut packet);
+        let bytes = packet.encode(&limits).unwrap();
+        let decoded = GenericPacket::decode(&bytes, &limits).unwrap();
+        assert_eq!(decoded.encode(&limits).unwrap(), bytes);
+    }
+
+    #[test]
+    fn compression_and_ecc_flags_require_matching_descriptors() {
+        let limits = DecodeLimits::default();
+        for flag in [FLAG_COMPRESSED, FLAG_ERROR_CORRECTED] {
+            let mut packet = packet(b"plain payload");
+            let mut bytes = packet.encode(&limits).unwrap();
+            packet.locator.flags = flag;
+            bytes[6..8].copy_from_slice(&flag.to_be_bytes());
+            assert_eq!(
+                packet.encode(&limits).unwrap_err(),
+                PacketError::MissingTransformForFlag { flag }
+            );
+            assert_eq!(
+                GenericPacket::decode(&bytes, &limits).unwrap_err(),
+                PacketError::MissingTransformForFlag { flag }
+            );
+        }
+        for (compress, ecc) in [(true, 0), (false, 16)] {
+            let mut packet = transform_packet(packet(&[b'x'; 512]), compress, ecc);
+            let mut bytes = packet.encode(&limits).unwrap();
+            let flag = packet.locator.flags;
+            let algorithm = packet.envelope.transforms[0].algorithm;
+            packet.locator.flags = 0;
+            bytes[6..8].copy_from_slice(&0u16.to_be_bytes());
+            assert_eq!(
+                packet.encode(&limits).unwrap_err(),
+                PacketError::MissingFlagForTransform { algorithm, flag }
+            );
+            assert_eq!(
+                GenericPacket::decode(&bytes, &limits).unwrap_err(),
+                PacketError::MissingFlagForTransform { algorithm, flag }
+            );
+        }
     }
 
     #[test]
@@ -1998,6 +2264,166 @@ mod tests {
     }
 
     #[test]
+    fn nested_transformed_leaf_digest_is_verified() {
+        let limits = DecodeLimits::default();
+        for (compress, ecc) in [(true, 0), (false, 16)] {
+            let mut packet = transform_packet(packet(&[b'x'; 512]), compress, ecc);
+            let good = packet.encode(&limits).unwrap();
+            assert_eq!(
+                GenericPacket::decode_nested(&good, &limits, None, None)
+                    .unwrap()
+                    .payload,
+                vec![b'x'; 512]
+            );
+            packet.envelope.content_digest.bytes[0] ^= 1;
+            refresh_locator(&mut packet);
+            let bad = packet.encode(&limits).unwrap();
+            // Framing alone must not execute the logical transforms.
+            assert!(GenericPacket::decode(&bad, &limits).is_ok());
+            assert_eq!(
+                GenericPacket::decode_nested(&bad, &limits, None, None).unwrap_err(),
+                PacketError::DigestMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn nested_transformed_intermediate_digest_precedes_child_expansion() {
+        let limits = DecodeLimits::default();
+        let mut leaf = packet(&[b'x'; 512]);
+        leaf.envelope.packet_id = [3; 16];
+        leaf.envelope.parent_id = Some([2; 16]);
+        refresh_locator(&mut leaf);
+        for (compress, ecc) in [(true, 0), (false, 16)] {
+            let mut middle = packet(&leaf.encode(&limits).unwrap());
+            middle.envelope.packet_id = [2; 16];
+            middle.envelope.parent_id = Some([1; 16]);
+            let mut middle = transform_packet(middle, compress, ecc);
+            let mut root = packet(&middle.encode(&limits).unwrap());
+            root.envelope.packet_id = [1; 16];
+            refresh_locator(&mut root);
+            let good = root.encode(&limits).unwrap();
+            let decoded = GenericPacket::decode_nested(&good, &limits, None, None).unwrap();
+            assert_eq!(decoded.chain.len(), 3);
+            assert_eq!(decoded.payload, vec![b'x'; 512]);
+
+            middle.envelope.content_digest.bytes[0] ^= 1;
+            refresh_locator(&mut middle);
+            let mut root = packet(&middle.encode(&limits).unwrap());
+            root.envelope.packet_id = [1; 16];
+            refresh_locator(&mut root);
+            let tight = DecodeLimits {
+                max_nesting_depth: 2,
+                ..limits
+            };
+            assert_eq!(
+                GenericPacket::decode_nested(&root.encode(&limits).unwrap(), &tight, None, None)
+                    .unwrap_err(),
+                PacketError::DigestMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn root_nesting_limits_precede_body_validation() {
+        let mut bytes = packet(b"root body")
+            .encode(&DecodeLimits::default())
+            .unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        let no_depth = DecodeLimits {
+            max_nesting_depth: 0,
+            ..DecodeLimits::default()
+        };
+        assert_eq!(
+            GenericPacket::decode_nested(&bytes, &no_depth, None, None).unwrap_err(),
+            PacketError::NestingDepthExceeded {
+                depth: 1,
+                maximum: 0
+            }
+        );
+        let no_bytes = DecodeLimits {
+            max_aggregate_nested_bytes: bytes.len() - 1,
+            ..DecodeLimits::default()
+        };
+        assert_eq!(
+            GenericPacket::decode_nested(&bytes, &no_bytes, None, None).unwrap_err(),
+            PacketError::LimitExceeded {
+                what: "aggregate nested bytes",
+                actual: bytes.len(),
+                maximum: bytes.len() - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn linked_child_limits_precede_body_validation_and_allow_exact_budget() {
+        let limits = DecodeLimits::default();
+        let bytes = build_nested_chain(&[[1; 16], [2; 16]], b"leaf");
+        let root = GenericPacket::decode(&bytes, &limits).unwrap();
+        let aggregate = bytes.len() + root.body.len();
+        let exact = DecodeLimits {
+            max_nesting_depth: 2,
+            max_aggregate_nested_bytes: aggregate,
+            ..limits
+        };
+        assert_eq!(
+            GenericPacket::decode_nested(&bytes, &exact, None, None)
+                .unwrap()
+                .payload,
+            b"leaf"
+        );
+        let mut child = root.body;
+        *child.last_mut().unwrap() ^= 1;
+        let mut root = packet(&child);
+        root.envelope.packet_id = [1; 16];
+        refresh_locator(&mut root);
+        let bad_child = root.encode(&limits).unwrap();
+        let tight = DecodeLimits {
+            max_aggregate_nested_bytes: aggregate - 1,
+            ..exact
+        };
+        assert_eq!(
+            GenericPacket::decode_nested(&bad_child, &tight, None, None).unwrap_err(),
+            PacketError::LimitExceeded {
+                what: "aggregate nested bytes",
+                actual: aggregate,
+                maximum: aggregate - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn linked_nested_child_rejects_suffix_without_changing_prefix_decode() {
+        let limits = DecodeLimits::default();
+        for parent in [None, Some([1; 16])] {
+            let mut child = packet(b"leaf");
+            child.envelope.packet_id = [2; 16];
+            child.envelope.parent_id = parent;
+            refresh_locator(&mut child);
+            let mut payload = child.encode(&limits).unwrap();
+            payload.extend_from_slice(b"sentinel suffix");
+            assert_eq!(GenericPacket::decode(&payload, &limits).unwrap(), child);
+            let mut root = packet(&payload);
+            root.envelope.packet_id = [1; 16];
+            refresh_locator(&mut root);
+            let bytes = root.encode(&limits).unwrap();
+            if parent.is_none() {
+                let nested = GenericPacket::decode_nested(&bytes, &limits, None, None).unwrap();
+                assert_eq!(nested.chain.len(), 1);
+                assert_eq!(nested.payload, payload);
+            } else {
+                assert!(matches!(
+                    GenericPacket::decode_nested(&bytes, &limits, None, None),
+                    Err(PacketError::InvalidField {
+                        field_id: FIELD_PARENT_ID,
+                        ..
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn packet_shaped_payload_without_parent_chain_is_terminal() {
         // Opt-in semantics: a packet whose payload is a valid packet with no
         // parent chaining stays a terminal logical payload (chain length 1).
@@ -2024,6 +2450,11 @@ mod tests {
         )
         .unwrap();
         let root_bytes = root.encode(&limits).unwrap();
+        let limits = DecodeLimits {
+            max_nesting_depth: 1,
+            max_aggregate_nested_bytes: root_bytes.len(),
+            ..limits
+        };
         let nested = GenericPacket::decode_nested(&root_bytes, &limits, None, None).unwrap();
         assert_eq!(nested.chain.len(), 1);
         assert_eq!(nested.payload, inner_bytes);

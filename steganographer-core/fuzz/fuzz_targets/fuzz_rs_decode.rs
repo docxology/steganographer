@@ -1,7 +1,7 @@
 #![no_main]
 
-use steganographer_core::error_correction;
 use libfuzzer_sys::fuzz_target;
+use steganographer_core::error_correction;
 
 // Fuzz Reed-Solomon decode: must never panic or run unboundedly on adversarial input.
 // This is a direct regression test for the DoS finding (unbounded brute-force loop).

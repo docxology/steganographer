@@ -14,6 +14,7 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519, Ethereu
 | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, codecs, limits/errors, `FIELD_PARENT_ID` nesting, `GenericPacket::decode_nested` (bounded chain decode) | `PacketCodec` | 2069 |
 | `src/carrier.rs` | `CarrierDescriptor`, `EmbeddingConfig`, reports, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels | `CarrierEmbedder`, `CarrierExtractor` | 1625 |
 | `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 600 |
+| `src/revocation.rs` | `RevocationList`, `RevokedKey`, `is_known_compromised_key`, `check_known_revocations` | — | 167 |
 | `src/signer_backend.rs` | `SignerBackend`, `Ed25519Backend`, `Ed25519Verifier`, `MlDsaBackend`, `MlDsaVerifier`, `HybridBackend`, `HybridVerifier`, `EthereumBackend`*, `EthereumVerifier`* | `SignerBackend` | 1020 |
 | `src/metrics.rs` | `StegoMetrics` | — | 332 |
 | `src/config.rs` | `Config`, `GlobalConfig`, `VideoConfig`, `AudioConfig`, `PayloadConfig`, `LsbSignatureConfig`, `OverlayConfig`, `InfoBarConfig`, `LimitsConfig` (`[limits]`), `ProfileConfig` (`[profiles.<name>]`), etc. | — | 856 |
@@ -57,5 +58,9 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519, Ethereu
 
 ## Test Coverage
 
-381 unit tests (inline) + 125 integration tests (80 in `integration_tests.rs` + 37 in `ots_integration_tests.rs` + 6 in `golden_vectors.rs` + 2 in `calibration.rs`) = **506 total**
+Inline unit tests and real integration suites cover packet/carrier boundaries,
+crypto, revocation, signal processing, forensics, OpenTimestamps and immutable
+golden vectors. The canonical observed workspace totals live in
+[`../AGENTS.md`](../AGENTS.md); run `cargo test -p steganographer-core --locked`
+for this crate's current breakdown.
 

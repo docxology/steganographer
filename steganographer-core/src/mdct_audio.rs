@@ -1,29 +1,10 @@
-//! MDCT (Modified Discrete Cosine Transform) audio steganography.
+//! Short-block cosine-projection audio watermarking (legacy `MdctAudio` name).
 //!
-//! This module embeds data in the frequency domain of audio using the MDCT,
-//! which is the transform used by MP3 and AAC compression. This makes it
-//! resistant to lossy audio compression, just as DCT embedding is resistant
-//! to JPEG for video.
-//!
-//! ## Algorithm
-//!
-//! 1. Process audio in blocks of 2N samples (N=8, so 16 samples per block).
-//! 2. Apply the MDCT to get N frequency-domain coefficients.
-//! 3. Modify a mid-frequency coefficient to embed a bit:
-//!    - Quantize the coefficient to `quant_step` boundaries.
-//!    - If bit=1, move to the upper half of the quantization cell.
-//!    - If bit=0, move to the lower half.
-//! 4. Apply the IMDCT to reconstruct the time-domain block.
-//! 5. Extraction: apply MDCT, read the coefficient, determine bit from
-//!    quantization cell position.
-//!
-//! ## Advantages
-//!
-//! - **Compression resistant**: Since data is in the MDCT domain (same as
-//!   MP3/AAC), lossy compression preserves it better than time-domain LSB.
-//! - **Less detectable**: Frequency-domain modifications are less perceptible
-//!   than LSB changes at the same capacity.
-//! - **Tunable**: Coefficient index and quantization step are configurable.
+//! This is a non-overlapping 16-sample cosine projection, not the windowed,
+//! shifted MDCT/TDAC used by MP3 or AAC. No codec resilience is guaranteed.
+//! One coefficient carries a quantization-cell bit per block; only its delta
+//! is projected back onto the original samples. Embedding checks the actual
+//! rounded/clipped samples before any mutation and rejects unsupported covers.
 
 use crate::audio::{AudioBuffer, AudioStegoModule};
 use crate::crypto::SignaturePayload;
@@ -34,13 +15,18 @@ const MDCT_N: usize = 8;
 /// Input block size (2N samples per MDCT block).
 const BLOCK_SIZE: usize = 2 * MDCT_N; // 16
 
-/// Precompute the MDCT cosine basis value.
-///
-/// MDCT: X[k] = Σ_{n=0}^{2N-1} x[n] * cos(π/N * (n + 1/2) * (k + 1/2))
+/// Fixed unshifted cosine-projection basis; intentionally not a codec MDCT.
 fn mdct_basis(n: usize, k: usize) -> f64 {
-    let pi_over_n = std::f64::consts::PI / MDCT_N as f64;
-    let angle = pi_over_n * (n as f64 + 0.5) * (k as f64 + 0.5);
-    angle.cos()
+    static BASIS: std::sync::LazyLock<[[f64; MDCT_N]; BLOCK_SIZE]> =
+        std::sync::LazyLock::new(|| {
+            std::array::from_fn(|n| {
+                std::array::from_fn(|k| {
+                    (std::f64::consts::PI / MDCT_N as f64 * (n as f64 + 0.5) * (k as f64 + 0.5))
+                        .cos()
+                })
+            })
+        });
+    BASIS[n][k]
 }
 
 /// Apply the forward MDCT to a block of 2N samples, producing N coefficients.
@@ -74,10 +60,8 @@ fn imdct(input: &[f64; MDCT_N]) -> [f64; BLOCK_SIZE] {
     output
 }
 
-/// MDCT-domain audio steganography module.
-///
-/// Embeds payload data into mid-frequency MDCT coefficients of 16-sample
-/// audio blocks for compression-resistant steganography.
+/// Quantization watermark in independent short-block cosine projections.
+/// The legacy type name does not imply codec-MDCT compatibility.
 pub struct MdctAudio {
     /// Which MDCT coefficient to modify (0-based, 0 to N-1).
     /// Mid-frequency (default: 3) offers good robustness/inaudibility tradeoff.
@@ -98,6 +82,9 @@ impl MdctAudio {
     /// # Arguments
     /// * `coef_index` — Which MDCT coefficient to modify (0 to 7).
     /// * `quant_step` — Quantization step for bit embedding (8–32 recommended).
+    ///
+    /// Embedding rejects steps below 8 and any carrier whose rounded/clipped
+    /// reconstruction loses a bit. Such errors leave all samples unchanged.
     pub fn new(coef_index: usize, quant_step: i32) -> Self {
         assert!(
             coef_index < MDCT_N,
@@ -183,6 +170,11 @@ impl AudioStegoModule for MdctAudio {
             None => return Ok(()),
         };
 
+        buf.validate()?;
+        anyhow::ensure!(
+            self.quant_step >= 8.0,
+            "audio quantization step must be at least 8"
+        );
         let samples = &mut *buf.samples;
         let bits = Self::payload_to_bits(sig);
         let num_blocks = Self::capacity_bits(samples.len());
@@ -205,10 +197,9 @@ impl AudioStegoModule for MdctAudio {
             buf.frame_index
         );
 
-        // Process each 16-sample block
-        let (blocks, _remainder) = samples.as_chunks_mut::<BLOCK_SIZE>();
-        let block_count = blocks.len().min(bits.len());
-        for (block_idx, chunk) in blocks[..block_count].iter_mut().enumerate() {
+        let mut staged = [[0i16; BLOCK_SIZE]; 32 + SignaturePayload::SERIALIZED_SIZE * 8];
+        let (blocks, _remainder) = samples.as_chunks::<BLOCK_SIZE>();
+        for (block_idx, chunk) in blocks[..bits.len()].iter().enumerate() {
             // Convert i16 samples to f64
             let mut input: [f64; BLOCK_SIZE] = [0.0; BLOCK_SIZE];
             for (i, &s) in chunk.iter().enumerate() {
@@ -234,8 +225,28 @@ impl AudioStegoModule for MdctAudio {
             for (i, d) in delta.iter().enumerate() {
                 let new_val = input[i] + d;
                 let clamped = new_val.round().clamp(i16::MIN as f64, i16::MAX as f64);
-                chunk[i] = clamped as i16;
+                staged[block_idx][i] = clamped as i16;
             }
+            let restored = staged[block_idx].map(f64::from);
+            let actual: f64 = restored
+                .iter()
+                .enumerate()
+                .map(|(n, sample)| sample * mdct_basis(n, self.coef_index))
+                .sum();
+            anyhow::ensure!(
+                Self::extract_bit(actual, self.quant_step) == bits[block_idx],
+                "audio bit {} cannot survive integer reconstruction",
+                block_idx
+            );
+        }
+
+        for (chunk, restored) in samples
+            .as_chunks_mut::<BLOCK_SIZE>()
+            .0
+            .iter_mut()
+            .zip(&staged[..bits.len()])
+        {
+            chunk.copy_from_slice(restored);
         }
 
         log::debug!("MDCT audio embed complete");
@@ -243,6 +254,7 @@ impl AudioStegoModule for MdctAudio {
     }
 
     fn extract(&self, buf: &AudioBuffer) -> anyhow::Result<Option<SignaturePayload>> {
+        buf.validate()?;
         let samples = &*buf.samples;
         let num_blocks = Self::capacity_bits(samples.len());
 
@@ -251,60 +263,29 @@ impl AudioStegoModule for MdctAudio {
             return Ok(None);
         }
 
-        // Extract bits from each block
-        let mut all_bits: Vec<u8> = Vec::with_capacity(num_blocks);
-
         let (blocks, _remainder) = samples.as_chunks::<BLOCK_SIZE>();
-        for chunk in blocks.iter() {
-            // Convert i16 samples to f64
-            let mut input: [f64; BLOCK_SIZE] = [0.0; BLOCK_SIZE];
-            for (i, &s) in chunk.iter().enumerate() {
-                input[i] = s as f64;
-            }
-
-            // Apply forward MDCT
-            let coefs = mdct(&input);
-
-            // Extract bit from the selected coefficient
-            let bit = Self::extract_bit(coefs[self.coef_index], self.quant_step);
-            all_bits.push(bit);
+        let read_bit = |index: usize| {
+            let coef: f64 = blocks[index]
+                .iter()
+                .enumerate()
+                .map(|(n, &sample)| sample as f64 * mdct_basis(n, self.coef_index))
+                .sum();
+            Self::extract_bit(coef, self.quant_step)
+        };
+        let mut payload_bit_count = 0usize;
+        for index in 0..32 {
+            payload_bit_count = (payload_bit_count << 1) | read_bit(index) as usize;
         }
-
-        // Read 32-bit length prefix
-        if all_bits.len() < 32 {
-            return Ok(None);
-        }
-
-        let mut payload_bit_count: u32 = 0;
-        for &bit in &all_bits[..32] {
-            payload_bit_count = (payload_bit_count << 1) | bit as u32;
-        }
-
         let expected = SignaturePayload::SERIALIZED_SIZE * 8;
-        if payload_bit_count as usize != expected {
-            log::trace!(
-                "MDCT audio: length prefix {} != expected payload bits {}",
-                payload_bit_count,
-                expected
-            );
+        if payload_bit_count != expected || num_blocks < 32 + expected {
             return Ok(None);
         }
-
-        let total_bits = 32 + payload_bit_count as usize;
-        if all_bits.len() < total_bits {
-            return Ok(None);
-        }
-
-        // Reconstruct payload bytes
-        let payload_bits = &all_bits[32..total_bits];
         let mut payload_bytes = [0u8; SignaturePayload::SERIALIZED_SIZE];
         for (i, byte) in payload_bytes.iter_mut().enumerate() {
-            let offset = i * 8;
             for j in 0..8 {
-                *byte = (*byte << 1) | payload_bits[offset + j];
+                *byte = (*byte << 1) | read_bit(32 + i * 8 + j);
             }
         }
-
         SignaturePayload::from_bytes(&payload_bytes).map(Some)
     }
 }
@@ -527,5 +508,19 @@ mod tests {
             assert!(extracted.is_some());
             assert_eq!(extracted.unwrap().frame_index, 99);
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_contract_tests {
+    use super::*;
+
+    #[test]
+    fn impulse_matches_unshifted_projection_not_codec_mdct() {
+        let mut input = [0.0; BLOCK_SIZE];
+        input[0] = 1.0;
+        let coefficient = mdct(&input)[0];
+        assert_eq!(coefficient, (std::f64::consts::PI / 32.0).cos());
+        assert!((coefficient - (9.0 * std::f64::consts::PI / 32.0).cos()).abs() > 0.3);
     }
 }

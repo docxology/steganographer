@@ -30,33 +30,34 @@ use ws_handler::{EncodedAudioChunk, EncodedFrame};
 
 /// Live-updatable configuration from the dashboard UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LiveConfig {
     /// Overlay opacity (0.0–1.0).
     #[serde(default = "default_opacity")]
     pub opacity: f64,
     /// LSB bits for embedding (1–4).
-    #[serde(default = "default_lsb_bits", rename = "lsbBits")]
+    #[serde(default = "default_lsb_bits")]
     pub lsb_bits: u8,
     /// Signing backend name.
-    #[serde(default = "default_backend", rename = "signingBackend")]
+    #[serde(default = "default_backend")]
     pub signing_backend: String,
     /// Overlay text string.
-    #[serde(default = "default_overlay_text", rename = "overlayText")]
+    #[serde(default = "default_overlay_text")]
     pub overlay_text: String,
     /// Sign rate in milliseconds.
-    #[serde(default = "default_sign_rate", rename = "signRateMs")]
+    #[serde(default = "default_sign_rate")]
     pub sign_rate_ms: u32,
     /// QR overlay scale (5–100% of video width).
-    #[serde(default = "default_qr_scale", rename = "qrScale")]
+    #[serde(default = "default_qr_scale")]
     pub qr_scale: u32,
     /// Video resolution string (e.g. "640x480").
     #[serde(default = "default_resolution")]
     pub resolution: String,
     /// Steganography type: "lsb", "spread_spectrum", "dct".
-    #[serde(default = "default_stego_type", rename = "stegoType")]
+    #[serde(default = "default_stego_type")]
     pub stego_type: String,
     /// Hash algorithm: "blake3", "sha256", "sha3-256".
-    #[serde(default = "default_hash_algo", rename = "hashAlgorithm")]
+    #[serde(default = "default_hash_algo")]
     pub hash_algorithm: String,
     /// Enable payload encryption.
     #[serde(default, rename = "encrypt")]
@@ -196,6 +197,8 @@ pub struct DashboardState {
     pub ots_config: OtsConfig,
     /// OTS client, present only when OTS is enabled in the config.
     pub ots_client: Option<Arc<OTSClient>>,
+    /// Last actual OTS operation outcome, including its digest and pending state.
+    pub ots_outcome: Mutex<Option<serde_json::Value>>,
     /// Session-wide signing keypair, generated once at startup.
     /// Both video and audio WebSocket encode handlers sign with this key and
     /// the decode handlers verify against its public half, so a frame signed
@@ -280,14 +283,17 @@ static DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Create the Axum router for the dashboard.
-pub fn create_router(state: Arc<DashboardState>) -> Router {
+/// Create the Axum router, rejecting a known compromised signing identity.
+pub fn create_router(state: Arc<DashboardState>) -> anyhow::Result<Router> {
+    steganographer_core::revocation::check_known_revocations(
+        state.signer.verifying_key().as_bytes(),
+    )?;
     // Restrict CORS to localhost only — no permissive cross-origin access
     let cors = CorsLayer::new()
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([axum::http::header::CONTENT_TYPE]);
 
-    Router::new()
+    Ok(Router::new()
         .route("/", get(serve_index))
         .route("/style.css", get(serve_css))
         .route("/app.js", get(serve_js))
@@ -314,7 +320,7 @@ pub fn create_router(state: Arc<DashboardState>) -> Router {
         .route("/ots/stamp", axum::routing::post(ots_stamp))
         .route("/ots/verify", axum::routing::post(ots_verify))
         .layer(cors)
-        .with_state(state)
+        .with_state(state))
 }
 
 /// `POST /api/webrtc/offer` gate: enforces the hardened contract before
@@ -325,9 +331,9 @@ async fn api_webrtc_offer_gate(
     headers: axum::http::HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    if !check_auth(&headers, &state.auth_token) {
+    if let Some(status) = mutation_denial(&headers, &state.auth_token) {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            status,
             serde_json::json!({"status": "error", "message": "Unauthorized"}).to_string(),
         )
             .into_response();
@@ -373,7 +379,7 @@ fn is_well_formed_offer_sdp(sdp: &str) -> bool {
 
 /// Check the Authorization header against the configured auth token.
 /// Returns true if auth is disabled (no token set) or the token matches.
-fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) -> bool {
+pub(crate) fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) -> bool {
     let Some(ref token) = expected_token else {
         return true; // Auth disabled in local-only mode
     };
@@ -388,14 +394,56 @@ fn check_auth(headers: &axum::http::HeaderMap, expected_token: &Option<String>) 
     false
 }
 
+fn mutation_denial(
+    headers: &axum::http::HeaderMap,
+    token: &Option<String>,
+) -> Option<axum::http::StatusCode> {
+    if !check_auth(headers, token) {
+        return Some(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    if token.is_none()
+        && !ws_handler::origin_allowed(
+            headers.get(axum::http::header::ORIGIN),
+            headers.get(axum::http::header::HOST),
+        )
+    {
+        return Some(axum::http::StatusCode::FORBIDDEN);
+    }
+    None
+}
+
 /// Validate client-supplied live config before it reaches panicking
 /// constructors (`LsbVideo::new`/`LsbAudio::new` panic outside 1..=4) or
 /// pathological values (opacity out of range, zero sign rate busy-loop).
 /// Returns a user-facing error message on the first violation.
 pub fn validate_live_config(cfg: &LiveConfig) -> Result<(), String> {
+    if cfg.signing_backend != "ed25519"
+        || cfg.stego_type != "lsb"
+        || cfg.hash_algorithm != "blake3"
+        || cfg.encrypt
+        || cfg.ecc
+    {
+        return Err(
+            "dashboard supports only Ed25519, BLAKE3 and LSB without encryption or ECC".into(),
+        );
+    }
+    #[cfg(not(feature = "webrtc"))]
+    if cfg.transport == Transport::Webrtc {
+        return Err("WebRTC is unavailable in this build".into());
+    }
+    if cfg.overlay_text.len() > 4096 || !(5..=100).contains(&cfg.qr_scale) {
+        return Err("overlay_text exceeds 4096 bytes or qr_scale is outside 5-100".into());
+    }
+    let dimensions = cfg
+        .resolution
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)));
+    if !dimensions.is_some_and(|(w, h)| w > 0 && h > 0 && w <= 4096 && h <= 4096) {
+        return Err("resolution must be WIDTHxHEIGHT with dimensions 1-4096".into());
+    }
     if !(1..=4).contains(&cfg.lsb_bits) {
         return Err(format!(
-            "lsbBits must be between 1 and 4, got {}",
+            "lsb_bits must be between 1 and 4, got {}",
             cfg.lsb_bits
         ));
     }
@@ -407,7 +455,7 @@ pub fn validate_live_config(cfg: &LiveConfig) -> Result<(), String> {
     }
     if cfg.sign_rate_ms < 50 {
         return Err(format!(
-            "signRateMs must be at least 50 ms to avoid a busy loop, got {}",
+            "sign_rate_ms must be at least 50 ms to avoid a busy loop, got {}",
             cfg.sign_rate_ms
         ));
     }
@@ -421,7 +469,24 @@ pub fn validate_live_config(cfg: &LiveConfig) -> Result<(), String> {
 /// * `host` — Bind address. Use "127.0.0.1" for local-only (default/recommended).
 ///   Use "0.0.0.0" only on trusted networks with auth enabled.
 pub async fn start_server(state: Arc<DashboardState>, port: u16, host: &str) -> anyhow::Result<()> {
-    let app = create_router(state);
+    {
+        let config = state.live_config.lock().unwrap_or_else(|e| e.into_inner());
+        validate_live_config(&config).map_err(anyhow::Error::msg)?;
+    }
+    anyhow::ensure!(
+        state.signing_backend == "ed25519",
+        "dashboard supports only Ed25519 signing"
+    );
+    anyhow::ensure!(
+        state.signer.hash_algorithm().name() == "blake3",
+        "dashboard supports only BLAKE3 signing hashes"
+    );
+    #[cfg(not(feature = "webrtc"))]
+    anyhow::ensure!(
+        state.transport != TransportPolicy::WebRtc,
+        "WebRTC is unavailable in this build"
+    );
+    let app = create_router(state)?;
     let addr = format!("{}:{}", host, port);
     log::info!(
         "Dashboard starting at http://localhost:{} (bound to {})",
@@ -540,14 +605,18 @@ async fn api_config_get(State(state): State<Arc<DashboardState>>) -> String {
         Transport::Webrtc => "webrtc",
     };
     serde_json::json!({
-        "signing_backend": live.signing_backend,
-        "identity": state.identity,
+        "signing_backend": "ed25519",
+        "identity": steganographer_core::crypto::encode_hex(&state.signer.verifying_key().to_bytes()),
+        "public_key": steganographer_core::crypto::encode_hex(&state.signer.verifying_key().to_bytes()),
         "width": state.width,
         "height": state.height,
         "opacity": live.opacity,
         "lsb_bits": live.lsb_bits,
         "overlay_text": live.overlay_text,
         "sign_rate_ms": live.sign_rate_ms,
+        "qr_scale": live.qr_scale,
+        "resolution": live.resolution,
+        "default_transport": state.transport.as_str(),
         "stego_type": live.stego_type,
         "hash_algorithm": live.hash_algorithm,
         "encrypt": live.encrypt,
@@ -563,9 +632,9 @@ async fn api_config_post(
     headers: axum::http::HeaderMap,
     Json(new_cfg): Json<LiveConfig>,
 ) -> impl axum::response::IntoResponse {
-    if !check_auth(&headers, &state.auth_token) {
+    if let Some(status) = mutation_denial(&headers, &state.auth_token) {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            status,
             serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
         );
     }
@@ -603,8 +672,8 @@ async fn api_session(State(state): State<Arc<DashboardState>>) -> String {
     let metrics = state.metrics.to_json();
     serde_json::json!({
         "uptime_secs": uptime.as_secs_f64(),
-        "backend": state.signing_backend,
-        "identity": state.identity,
+        "backend": "ed25519",
+        "identity": steganographer_core::crypto::encode_hex(&state.signer.verifying_key().to_bytes()),
         "resolution": format!("{}x{}", state.width, state.height),
         "config": cfg,
         "metrics": serde_json::from_str::<serde_json::Value>(&metrics).unwrap_or_default(),
@@ -627,9 +696,9 @@ async fn api_metrics_reset(
     State(state): State<Arc<DashboardState>>,
     headers: axum::http::HeaderMap,
 ) -> impl axum::response::IntoResponse {
-    if !check_auth(&headers, &state.auth_token) {
+    if let Some(status) = mutation_denial(&headers, &state.auth_token) {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            status,
             serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
         );
     }
@@ -643,27 +712,62 @@ async fn api_metrics_reset(
 
 // ─── OpenTimestamps endpoints ──────────────────────────────────────────────
 
-/// GET /ots/status — return the current OTS configuration and readiness.
-async fn ots_status(State(state): State<Arc<DashboardState>>) -> String {
-    let body = ots_handler::status_handler(&state.ots_config, state.ots_client.as_deref());
-    // If OTS is disabled, respond with HTTP 200 so the UI shows "disabled"
-    // gracefully rather than an error. The JSON body carries the real status.
-    body
+fn record_ots_error(state: &DashboardState, digest: &[u8; 32], error: &str) {
+    let mut slot = state.ots_outcome.lock().unwrap_or_else(|e| e.into_inner());
+    let outcome = slot.get_or_insert_with(|| serde_json::json!({
+        "digest": steganographer_core::crypto::encode_hex(digest), "pending":null, "verified":null,
+    }));
+    // A failed/rate-limited attempt must not erase a previously saved receipt.
+    // Nor does it turn a network error into a cryptographic negative verdict.
+    outcome["last_error"] = serde_json::json!({
+        "digest":steganographer_core::crypto::encode_hex(digest), "message":error,
+    });
 }
 
-/// POST /ots/stamp — stamp the current Merkle root (or request body) with OTS.
-///
-/// Accepts an optional binary body. If the body is empty, a placeholder
-/// Merkle root derived from the session start time is stamped so the
-/// endpoint is always usable from the dashboard's "Stamp Now" button.
+/// GET /ots/status — return the current OTS configuration and readiness.
+async fn ots_status(State(state): State<Arc<DashboardState>>) -> String {
+    let mut body: serde_json::Value = serde_json::from_str(&ots_handler::status_handler(
+        &state.ots_config,
+        state.ots_client.as_deref(),
+    ))
+    .expect("OTS handler returns JSON");
+    let digest = ws_handler::latest_media_digest(&state);
+    body["has_media"] = serde_json::json!(digest.is_some());
+    body["media_digest"] =
+        serde_json::json!(digest.map(|d| steganographer_core::crypto::encode_hex(&d)));
+    if digest.is_none() {
+        body["can_stamp"] = serde_json::json!(false);
+    }
+    let outcome = state
+        .ots_outcome
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let matching = outcome
+        .as_ref()
+        .filter(|outcome| outcome["digest"] == body["media_digest"]);
+    body["pending"] = matching
+        .and_then(|v| v.get("pending"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    body["verified"] = matching
+        .and_then(|v| v.get("verified"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    body["proof"] = serde_json::json!(outcome);
+    body.to_string()
+}
+
+/// POST /ots/stamp — stamp the SHA-256 of the latest delivered signed artifact.
+/// An empty body selects current media; caller-provided surrogate data is rejected.
 async fn ots_stamp(
     State(state): State<Arc<DashboardState>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, String) {
-    if !check_auth(&headers, &state.auth_token) {
+    if let Some(status) = mutation_denial(&headers, &state.auth_token) {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            status,
             serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
         );
     }
@@ -679,27 +783,28 @@ async fn ots_stamp(
         );
     };
 
-    // Use the request body if provided, otherwise derive a deterministic
-    // digest from the session start so the endpoint is always callable.
-    let data: Vec<u8> = if body.is_empty() {
-        state
-            .session_start
-            .elapsed()
-            .as_secs()
-            .to_be_bytes()
-            .to_vec()
-    } else {
-        body.to_vec()
+    if !body.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({"status":"error", "message":"stamp selects latest signed media; body must be empty"}).to_string());
+    }
+    let Some(digest) = ws_handler::latest_media_digest(&state) else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            serde_json::json!({"status":"error", "message":"no signed media available"})
+                .to_string(),
+        );
     };
-
-    match ots_handler::stamp_handler(client, &data).await {
+    match ots_handler::handle_stamp_digest(client, &digest).await {
         Ok(json) => {
             state.metrics.record_ots_proof();
+            *state.ots_outcome.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(serde_json::from_str(&json).expect("OTS handler returns JSON"));
             (axum::http::StatusCode::OK, json)
         }
         Err(err) => {
             let (status, body) = ots_handler::error_to_http(&err);
             log::warn!("OTS stamp failed: {err}");
+            record_ots_error(&state, &digest, &err.to_string());
             (
                 axum::http::StatusCode::from_u16(status)
                     .unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
@@ -715,9 +820,9 @@ async fn ots_verify(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, String) {
-    if !check_auth(&headers, &state.auth_token) {
+    if let Some(status) = mutation_denial(&headers, &state.auth_token) {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            status,
             serde_json::json!({ "status": "error", "message": "Unauthorized" }).to_string(),
         );
     }
@@ -739,20 +844,43 @@ async fn ots_verify(
             serde_json::json!({ "status": "error", "message": "empty proof body" }).to_string(),
         );
     }
+    if body.len() > 64 * 1024 {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({"status":"error", "message":"proof body exceeds 64 KiB"})
+                .to_string(),
+        );
+    }
 
-    match ots_handler::verify_handler(client, &body).await {
+    let digest = headers
+        .get("x-expected-digest")
+        .and_then(|value| value.to_str().ok())
+        .filter(|hex| hex.len() == 64)
+        .and_then(|hex| steganographer_core::crypto::decode_hex(hex).ok())
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok());
+    let Some(digest) = digest else {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({"status":"error", "message":"X-Expected-Digest must contain the expected SHA-256 in hex"}).to_string());
+    };
+    match ots_handler::verify_handler(client, &body, &digest).await {
         Ok(json) => {
-            // Record the verification outcome in metrics for the WS stream.
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
-                let verified = v.get("verified").and_then(|x| x.as_bool()).unwrap_or(false);
-                let ts = v.get("timestamp").and_then(|x| x.as_u64());
-                state.metrics.record_ots_verification(verified, ts);
+            let mut outcome: serde_json::Value =
+                serde_json::from_str(&json).expect("OTS handler returns JSON");
+            outcome["digest"] = serde_json::json!(steganographer_core::crypto::encode_hex(&digest));
+            if outcome["pending"] != true {
+                if let Some(verified) = outcome["verified"].as_bool() {
+                    state
+                        .metrics
+                        .record_ots_verification(verified, outcome["timestamp"].as_u64());
+                }
             }
+            *state.ots_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
             (axum::http::StatusCode::OK, json)
         }
         Err(err) => {
             let (status, body_str) = ots_handler::error_to_http(&err);
             log::warn!("OTS verify failed: {err}");
+            record_ots_error(&state, &digest, &err.to_string());
             (
                 axum::http::StatusCode::from_u16(status)
                     .unwrap_or(axum::http::StatusCode::BAD_GATEWAY),

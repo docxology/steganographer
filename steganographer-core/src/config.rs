@@ -193,7 +193,7 @@ pub struct VideoConfig {
     pub stego: VideoStegoConfig,
 }
 
-/// Video pipeline parameters: resolution, framerate, overlay intensity.
+/// Video geometry and interface-specific preview/payload parameters.
 #[derive(Debug, Deserialize, Clone)]
 pub struct VideoPipelineConfig {
     /// Frame width in pixels (default: 640)
@@ -202,7 +202,7 @@ pub struct VideoPipelineConfig {
     pub height: Option<u32>,
     /// Target framerate in fps (default: 30)
     pub framerate: Option<u32>,
-    /// Overlay opacity / steganographic intensity 0.0–1.0 (default: 1.0)
+    /// Preview opacity; native signed video supports only 1.0.
     pub opacity: Option<f64>,
     /// Payload configuration
     #[serde(default)]
@@ -214,15 +214,15 @@ pub struct VideoPipelineConfig {
 pub struct PayloadConfig {
     /// Payload type: "signature" (default) or "custom"
     pub r#type: Option<String>,
-    /// Payload size in bytes (default: 109 for v2 format)
+    /// Payload size in bytes (109 for signature format v4).
     pub size: Option<u32>,
-    /// Signing backend: "ed25519" (default) or "ethereum"
+    /// Pipeline signing backend: "ed25519" (default).
     pub signing_backend: Option<String>,
     /// Enable payload encryption (ChaCha20-Poly1305)
     #[serde(default)]
     pub encrypt: Option<bool>,
-    /// Encryption key (hex-encoded 32 bytes). If omitted with encrypt=true,
-    /// a random key is generated (not recoverable).
+    /// Encryption key (hex-encoded 32 bytes). Live native encryption is
+    /// unsupported; offline encoding must preserve generated keys explicitly.
     #[serde(default)]
     pub encryption_key: Option<String>,
     /// Path to a file containing the encryption key (hex, 64 chars).
@@ -243,7 +243,7 @@ impl PayloadConfig {
     }
     /// Multi-frame spread count (default: 1 = no spreading).
     pub fn spread_count(&self) -> u32 {
-        self.multi_frame_spread.unwrap_or(1).max(1)
+        self.multi_frame_spread.unwrap_or(1)
     }
 }
 
@@ -274,16 +274,16 @@ pub struct AudioConfig {
     pub stego: AudioStegoConfig,
 }
 
-/// An input or output endpoint (device, file, network, etc).
+/// An input or output endpoint (test, device, file or network).
 #[derive(Debug, Deserialize, Clone)]
 pub struct EndpointConfig {
-    /// Endpoint type: "device", "file", "network"
+    /// Endpoint type: "test", "device", "file", "network".
     pub r#type: String,
     /// Backend identifier (e.g. "v4l2", "avfoundation", "pulseaudio")
     pub backend: Option<String>,
     /// Device name or path
     pub device: Option<String>,
-    /// File path (for file-based endpoints)
+    /// File path or input network URI. Network output requires an explicit sink.
     pub path: Option<String>,
 }
 
@@ -378,7 +378,30 @@ impl Config {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        Self::from_toml(&contents)
+        let config = Self::from_toml(&contents)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load a validated config, allowing only the absent implicit default.
+    /// Callers must normalize explicitly supplied paths before calling this.
+    pub fn load_optional(path: &str) -> anyhow::Result<Self> {
+        match Self::from_file(path) {
+            Ok(config) => Ok(config),
+            Err(error)
+                if path == "config/example.toml"
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    && std::fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                let config = Self::from_toml("[global]")?;
+                config.validate()?;
+                Ok(config)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Get the resolved OTS configuration, or a disabled default if the
@@ -392,11 +415,66 @@ impl Config {
         self.ots.as_ref().is_some_and(|o| o.is_enabled())
     }
 
-    /// Validate the optional `[limits]` and `[profiles]` tables.
-    ///
-    /// Kept out of [`Config::from_toml`] so parse-time behavior is unchanged
-    /// for existing configs; `config check` and profile resolution call it.
+    /// Validate operational algorithms, embedding strengths and resource ceilings.
     pub fn validate(&self) -> anyhow::Result<()> {
+        #[cfg(feature = "ots")]
+        if let Some(ots) = &self.ots {
+            ots.validate()
+                .map_err(|error| anyhow::anyhow!("[ots]: {error}"))?;
+        }
+        if let Some(hash) = &self.global.hash_algorithm {
+            if !matches!(
+                hash.to_ascii_lowercase().as_str(),
+                "blake3" | "sha256" | "sha-256" | "sha3" | "sha-3" | "sha3-256"
+            ) {
+                anyhow::bail!("unsupported hash algorithm '{hash}'");
+            }
+        }
+        for (section, lsb) in [
+            (
+                "video",
+                self.video
+                    .as_ref()
+                    .and_then(|v| v.stego.lsb_signature.as_ref()),
+            ),
+            (
+                "audio",
+                self.audio
+                    .as_ref()
+                    .and_then(|a| a.stego.lsb_signature.as_ref()),
+            ),
+        ] {
+            if let Some(lsb) = lsb {
+                if !(1..=4).contains(&lsb.bits) {
+                    anyhow::bail!("{section}.stego.lsb_signature.bits must be in 1..=4");
+                }
+            }
+        }
+        if let Some(payload) = self
+            .video
+            .as_ref()
+            .and_then(|v| v.pipeline.as_ref())
+            .and_then(|p| p.payload.as_ref())
+        {
+            if !(1..=8).contains(&payload.spread_count()) {
+                anyhow::bail!("multi_frame_spread must be in 1..=8");
+            }
+            if let Some(algorithm) = &payload.error_correction {
+                if !matches!(
+                    algorithm.to_ascii_lowercase().as_str(),
+                    "none" | "reed_solomon"
+                ) {
+                    anyhow::bail!("unsupported error correction algorithm '{algorithm}'");
+                }
+            }
+            if let Some(backend) = &payload.signing_backend {
+                if !backend.eq_ignore_ascii_case("ed25519") {
+                    anyhow::bail!(
+                        "unsupported pipeline signing backend '{backend}': expected ed25519"
+                    );
+                }
+            }
+        }
         if let Some(limits) = &self.limits {
             limits
                 .validate()
@@ -473,7 +551,7 @@ impl LsbSignatureConfig {
             anyhow::bail!("No key or key_file specified for LSB signature config");
         };
 
-        let bytes = hex_decode(&hex_str)?;
+        let bytes = crate::crypto::decode_hex(&hex_str)?;
         if bytes.len() != 32 {
             anyhow::bail!(
                 "LSB key must be exactly 32 bytes (64 hex chars), got {} bytes",
@@ -484,20 +562,6 @@ impl LsbSignatureConfig {
         arr.copy_from_slice(&bytes);
         Ok(arr)
     }
-}
-
-/// Simple hex decoder (no external dep needed).
-fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        anyhow::bail!("Hex string must have even length");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| anyhow::anyhow!("Invalid hex at position {}: {}", i, e))
-        })
-        .collect()
 }
 
 /// Resolve a key from either an inline hex string or a file path.
@@ -515,7 +579,7 @@ pub fn resolve_key(inline_hex: Option<&str>, key_file: Option<&str>) -> anyhow::
         anyhow::bail!("No key or key_file specified");
     };
 
-    let bytes = hex_decode(&hex_str)?;
+    let bytes = crate::crypto::decode_hex(&hex_str)?;
     if bytes.len() != 32 {
         anyhow::bail!(
             "Key must be exactly 32 bytes (64 hex chars), got {} bytes",
@@ -852,5 +916,56 @@ detectors = ["totally_bogus"]
         let error = cfg.validate().unwrap_err().to_string();
         assert!(error.contains("profiles.bad"));
         assert!(error.contains("unknown scan detector"));
+    }
+    #[test]
+    fn operational_validation_rejects_invalid_algorithms_strengths_and_spread() {
+        for hash in ["md5", "", "blake2"] {
+            let config = Config::from_toml(&format!("[global]\nhash_algorithm='{hash}'")).unwrap();
+            assert!(config.validate().is_err());
+        }
+        for bits in [0, 5, 255] {
+            let mut config = Config::from_toml("[global]").unwrap();
+            config.audio = Some(AudioConfig {
+                input: EndpointConfig {
+                    r#type: "file".into(),
+                    backend: None,
+                    device: None,
+                    path: None,
+                },
+                output: EndpointConfig {
+                    r#type: "file".into(),
+                    backend: None,
+                    device: None,
+                    path: None,
+                },
+                stego: AudioStegoConfig {
+                    pipeline: vec!["lsb_signature".into()],
+                    lsb_signature: Some(LsbSignatureConfig {
+                        bits,
+                        key: None,
+                        key_file: None,
+                    }),
+                },
+            });
+            assert!(config.validate().is_err());
+        }
+        for spread in [0, 9, 255, 256, 257] {
+            let config = Config::from_toml(&format!(
+                "[global]\n[video.input]\ntype='file'\n[video.output]\ntype='file'\n[video.stego]\npipeline=[]\n[video.pipeline.payload]\nmulti_frame_spread={spread}"
+            )).unwrap();
+            assert!(config.validate().is_err(), "spread={spread}");
+        }
+    }
+
+    #[test]
+    fn unicode_key_sources_return_errors() {
+        assert!(resolve_key(Some("€0"), None).is_err());
+        assert!(LsbSignatureConfig {
+            bits: 1,
+            key: Some("€0".into()),
+            key_file: None
+        }
+        .key_bytes()
+        .is_err());
     }
 }

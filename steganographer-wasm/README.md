@@ -12,44 +12,55 @@ buffers — no network, no filesystem. (Plan spec 04, WASM-001.)
 | RGB carrier | `capacity_rgb`, `embed_rgb`, `extract_rgb` | `carrier::SpatialLsb` (byte units, stride 1) |
 | WAV/PCM carrier | `capacity_pcm_s16le`, `embed_pcm_s16le`, `extract_pcm_s16le` | `carrier::AudioSpatialLsb` (S16LE sample units, stride 2) |
 | Forensics | `forensic_scan`, `text_analyze_bytes`, `text_analyze_text` | `forensics` + `wasm_inspector` + `unicode_text` |
-| Decode limits | `decode_limits_default`, `decode_limits_from_json` | `packet::DecodeLimits` |
+| Decode limits | `decode_limits_default`; Rust-only `decode_limits_from_json` | `packet::DecodeLimits` |
 
-Report-returning functions produce JSON strings. Byte arrays map to JS
-`Uint8Array` on the wasm side; `embed_*` returns
-`{"carrier": [...], "report": {...}}` (the modified carrier plus the embed
-report), `extract_*`/`packet_decode` return the packet's public metadata plus
-its body, and `forensic_scan` returns the structural/statistical verdict with
-appended Unicode/text findings.
+Report-returning functions produce JSON strings. Byte arrays map to JavaScript
+`Uint8Array`; `embed_*` returns the modified carrier plus an embed report.
+`extract_*` / `packet_decode` return public metadata and body bytes.
 
-Decode limits may be passed as a partial JSON override of
-`decode_limits_default()` (e.g. `{"max_envelope_len": 1024}`); unknown fields
-and negative values are rejected so typos fail loudly.
+Packet reports use **`steganographer.packet-report.v2`**. All `u64` fields,
+including `original_len` and optional timestamps, are exact decimal strings.
+Handle them with `BigInt` when needed, not lossy JavaScript `Number` conversion.
+Original JS numbers are validated before narrowing; invalid strengths, payload
+kinds, fractions, NaN/infinities and wraparound values are rejected.
 
-> Vectors are **alpha-provisional** (QUA-003): the wire formats may change
-> before the first stable release, so persisted artifacts must be re-verified
-> against each build.
+Decode limits accept partial JSON overrides of `decode_limits_default()`.
+Unknown fields, invalid types and out-of-range values fail. Raised body limits
+are supported through the actual generated bindings, not only native Rust calls.
+Generic STG3 v1 [frozen vectors](../steganographer-core/testdata/packets/) remain
+stable; stricter validation intentionally rejects malformed/inconsistent packets.
 
-## Building
+## Building and checking
 
-The crate always compiles natively (the wasm-bindgen exports are cfg-gated to
-`wasm32`), which is what the native integration tests use:
-
-```sh
-cargo test -p steganographer-wasm
-```
-
-Target verification for the browser build:
+Rust 1.91+; the package compiles natively for boundary/integration tests:
+Run these commands from the workspace root.
 
 ```sh
-cargo check --target wasm32-unknown-unknown -p steganographer-wasm
+cargo test -p steganographer-wasm --locked
+rustup target add wasm32-unknown-unknown
+cargo build -p steganographer-wasm --release --target wasm32-unknown-unknown --locked
 ```
 
-`wasm-pack`/`wasm-bindgen` bundling (`--target web`) is future packaging work;
-the `cdylib` target is what those tools consume.
+Install the `wasm-bindgen-cli` version matching `wasm-bindgen` in Cargo.lock
+(0.2.126 for this release), then generate the actual JavaScript interfaces:
 
-## Dependency notes
+```sh
+wasm-bindgen --target nodejs --out-dir target/wasm-node --out-name steganographer_wasm \
+  target/wasm32-unknown-unknown/release/steganographer_wasm.wasm
+node steganographer-wasm/tests/bindings.cjs \"$PWD/target/wasm-node/steganographer_wasm.js\"
+wasm-bindgen --target web --out-dir target/wasm-web --out-name steganographer_wasm \
+  target/wasm32-unknown-unknown/release/steganographer_wasm.wasm
+```
 
-- `steganographer-core` is used with `default-features = false`: no `ots`
-  (HTTP client), no `ethereum` — the wasm surface is pure computation.
-- `getrandom` with the `js` feature is declared for `wasm32` because `rand`
-  0.8 inside core needs a browser/Node entropy source there.
+Serve web output over HTTP(S), import the ES module, and await its default
+initializer before calling exports. Node and web glue are separate targets;
+native tests do not prove JavaScript coercion or module-loading behavior.
+
+## Dependency boundaries
+
+- Core uses `default-features = false`: no GStreamer, network OTS client,
+  Ethereum signing or filesystem surface is exposed.
+- wasm32-only `getrandom` feature dependencies provide browser/Node entropy
+  for the rand 0.8 and newer crypto stacks; they are not unused direct calls.
+- This facade does not turn dashboard previews into authenticated recordings.
+  Dashboard archives have a separate signed-media/manifest contract.

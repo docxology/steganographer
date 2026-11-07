@@ -1,6 +1,6 @@
 [package]
 name = "steganographer-gst"
-description = "GStreamer integration: AppSrc/AppSink helpers and plugin skeletons for steganographer"
+description = "GStreamer media bridges and generic packet watermarking elements for steganographer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,10 @@ gstreamer = { version = "0.23", features = ["v1_22"] }
 gstreamer-base = { version = "0.23", features = ["v1_22"] }
 gstreamer-video = { version = "0.23", features = ["v1_22"] }
 gstreamer-audio = { version = "0.23", features = ["v1_22"] }
-gstreamer-app = "0.23"
+gstreamer-app = { version = "0.23", features = ["v1_22"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

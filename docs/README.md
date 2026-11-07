@@ -2,11 +2,11 @@
 
 Comprehensive documentation for the steganographer toolkit — a Rust workspace for real-time steganographic watermarking of video and audio streams with cryptographic authentication.
 
-## Dashboard Preview
+## Current Evidence Boundary
 
-![Dashboard with QR overlay and verification data](images/dashboard-qr-overlay.png)
+The dashboard returns lossless signed PNG snapshots and signed PCM WAV chunks in bounded recording archives. Its verification panel is **server-reported**; downloaded entries need independent verification with a trusted, separately pinned public key. These are sampled artifacts, not continuous capture.
 
-*Live dashboard showing webcam feed with QR data matrix overlay (left) and real-time verification data with config controls (right).*
+Dashboard signed visual overlays/QR, MetaMask and Ethereum modes are unavailable. Preview opacity is display-only. Core library backend availability does not imply dashboard or legacy-media support.
 
 ## Table of Contents
 
@@ -16,13 +16,13 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | ---------- | ------------- |
 | [Steganography Theory](steganography-theory.md) | Deep dive into information hiding: history, information-theoretic security, spatial/frequency domain techniques, steganalysis, and modern advances |
 | [Cryptography](cryptography.md) | BLAKE3 hashing, Ed25519/Ethereum signing, payload format, Kerckhoffs' principle, and post-quantum considerations |
-| [Algorithms](algorithms.md) | LSB video/audio steganography, text overlay, info bar, QR data matrix, embedding protocols, capacity math |
+| [Algorithms](algorithms.md) | LSB, keyed residue/QIM SS, checked DCT reconstruction, learned-model limits, capacity and forensic availability |
 
 ### Core Concepts
 
 | Document | Description |
 | --- | --- |
-| [Architecture](architecture.md) | System design, five-crate structure, data flow, threading models, dashboard websocket + WebRTC transport architecture |
+| [Architecture](architecture.md) | Five-crate structure, actual delivered-media verification, runtime identity, native ownership, transport/auth and archive trust boundaries |
 | [Security](security.md) | Security model, threat analysis, steganalysis resistance, dashboard security, and hardening guidelines |
 | [Threat Model](threat-model.md) | Adversary model, 10 threat categories (T1–T10), security boundaries, use-case scenarios, and residual risk analysis |
 
@@ -40,7 +40,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | --- | --- |
 | [GStreamer Integration](gstreamer.md) | Pipeline architecture, AppSink/AppSrc, config-driven pipeline construction |
 | [Platform Guide](platforms.md) | Linux v4l2, macOS AVFoundation, virtual devices, audio routing, Docker |
-| [OTS Integration](ots-integration.md) | OpenTimestamps attestation: stamping, verification, and configuration |
+| [OTS Integration](ots-integration.md) | Exact-file SHA-256 commitments, standard detached proofs, pending status and trusted-provider verification limits |
 
 ### Development
 
@@ -52,6 +52,7 @@ Comprehensive documentation for the steganographer toolkit — a Rust workspace 
 | [Compatibility](compatibility.md) | Compatibility & deprecation policy: SemVer semantics, wire-format rules, golden-vector stability, MSRV, and platform matrix |
 | [Steganography Platform Plan](plans/steganography-platform/README.md) | Composable v0.6.x–v1.0 program for generic packets, carriers, formats, forensics, documents, CLI/WASM, validation, and migration |
 | [FAQ](faq.md) | 30+ Q&As on concepts, build, usage, crypto, dashboard, and configuration |
+| [Key Rotation](key-rotation.md) | Historical compromise record, independent trust pinning and current revocation/exit policy |
 
 ## Quick Links
 
@@ -70,7 +71,7 @@ block-beta
     columns 3
     CLI["steganographer-cli\nClap CLI · Config · Logs · Menu"]:3
     GST["steganographer-gst\nGStreamer · AppSink · AppSrc"]:1
-    DASH["steganographer-dashboard\nAxum GUI · WebSocket · WebRTC · QR Overlay"]:1
+    DASH["steganographer-dashboard\nAxum GUI · WebSocket · optional WebRTC"]:1
     WASM["steganographer-wasm\nBrowser-local · wasm-bindgen · wasm32"]:1
     space:1
     space:1
@@ -85,28 +86,27 @@ block-beta
 
 | Feature | Description |
 | --------- | ------------- |
-| **Live Feed** | Zero-latency webcam via `requestAnimationFrame` |
-| **QR Overlay** | Data matrix encoding frame index, BLAKE3 hash, timestamp, backend |
-| **Opacity Slider** | Controls QR overlay visibility (0.0–1.0) |
-| **Verification Data** | Right panel shows status banner, hash, latency, scrolling log |
-| **Config Controls** | LSB bits, sign backend, overlay text, sign rate — all live |
-| **MetaMask** | Connect Ethereum wallet for secp256k1 signing |
-| **Stego Info** | Capacity, utilization, payload size — recalculated in real time |
-| **Audio Tab** | Microphone capture, waveform/spectrum visualization, audio LSB signing |
-| **Docs Tab** | Browse all 19 project docs in-dashboard, rendered client-side with marked.js |
-| **Dynamic LSB** | Encode/decode handlers stay in sync when LSB slider changes (1–4 bits) |
-| **Signature Preview** | Decoded payload shows first 16 bytes of Ed25519/secp256k1 signature |
-| **Record & Save** | Record signed video (WebM) or audio (WAV) with embedded integrity data |
-| **Tooltips** | Detailed mouseover explanations on every control for all experience levels |
+| **Live Feed** | Browser capture sampled at the configured signing cadence with request backpressure |
+| **Signed Media** | Actual post-embed PNG / PCM verified by the server using its real runtime Ed25519 identity |
+| **Preview Opacity** | Display-only; never alters the signed carrier or exported bytes |
+| **Verification Data** | Server-reported status matched by artifact index and cache revision |
+| **Config Controls** | Supported LSB depth, sampling cadence and capture settings; unsupported crypto/kernel modes reject |
+| **Audio Tab** | Microphone visualization, signed returned PCM and chunk-level server verification |
+| **Docs Tab** | Sanitized Markdown rendering with safe text fallback if rendering dependencies fail |
+| **Transport Policy** | Query > saved > server default; only auto mode falls back from WebRTC |
+| **Record & Save** | Bounded ZIP of sampled signed PNGs or PCM WAV chunks plus extraction manifest, not continuous WebM/microphone capture |
+| **Independent Verification** | Separate CLI verification of downloaded entries with trusted public key and manifest parameters, not performed by the GUI |
 
-## Test Summary
+## Validation and Useful Sections
 
-```text
-steganographer-core:          537 tests (unit + integration + doc-tests: packet/carrier incl. PCM S16 LSB, keyed + interleaved placement, crypto, LSB, overlay, config, audio, metrics, signing incl. real ML-DSA, encryption, ECC, KDF, password KDF incl. Argon2id, transforms incl. TRANSFORM_KDF_ARGON2ID, multi-frame, spread-spectrum, DCT, MDCT, adaptive, hash-chain, steganalysis, forensics incl. detector registry, OOXML/PDF container analysis, Unicode text detectors, nested decode, OTS, golden vectors, detector calibration)
-steganographer-cli:            75 tests (unit + integration: media descriptors/I/O, canonical carrier binding, verify validation/revocation, legacy/generic round trips, exit-code contract, config incl. limits/profiles, key files, encryption, Argon2id password path, ECC, DCT, image/WAV policy, analysis, password derivation, generic packet transforms, keyed placement, WAV generic packet vertical slice, exact info report, forensic scan incl. Unicode + container findings, extract command)
-steganographer-dashboard:      60 tests (52 tests + 8 doc-tests: LiveConfig incl. transport, DashboardState, router, API, auth, WS origin/token gates, WebRTC signaling, real verification, config validation)
-steganographer-gst:           24 tests (plugin, stegovideo/stegoaudio elements, pad-template gates, stride-safe embedding, clear-payload, multi-channel audio, doctest)
-steganographer-wasm:           9 tests (packet encode/decode, RGB/PCM carriers, forensic scan, decode-limit overrides)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:                        705 tests, 0 failures
-```
+Final release test counts are maintained by the integration owner in root [`AGENTS.md`](../AGENTS.md); this index does not duplicate them.
+
+- [Implemented SS mapping and compatibility](algorithms.md#spread-spectrum-steganography)
+- [DCT reconstruction and codec limits](algorithms.md#reconstruction-and-codec-limits)
+- [Learned evaluation scope](algorithms.md#evaluation-scope)
+- [Statistical availability and bounded forensic completeness](algorithms.md#statistical-availability-and-forensic-completeness)
+- [Dashboard signed-media data flow](architecture.md#dashboard-signed-media-pipeline)
+- [UI/archive trust boundaries](architecture.md#ui-archives-and-independent-verification)
+- [Authentication and transport policy](architecture.md#dashboard-authentication-and-transport-policy)
+- [Recording and independently verifying downloads](faq.md#can-i-record-and-save-the-signed-videoaudio)
+- [Theory versus implemented QIM](steganography-theory.md#spread-spectrum-theory-and-implemented-qim)

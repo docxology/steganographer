@@ -122,11 +122,7 @@ impl Default for LearnedConfig {
     }
 }
 
-/// Precomputed DCT basis value: `cos(pi (2k+1) n / 16)` with DC normalization.
-fn cos_basis(n: usize, k: usize) -> f64 {
-    let factor = if n == 0 { 1.0 / 2.0_f64.sqrt() } else { 1.0 };
-    factor * (std::f64::consts::PI * (2.0 * k as f64 + 1.0) * n as f64 / 16.0).cos()
-}
+use crate::dct_video::cos_basis;
 
 /// Forward 2D DCT of an 8×8 block (row-major), mirroring `dct_video.rs`.
 fn dct_2d(block: &[u8; 64]) -> [f64; 64] {
@@ -413,12 +409,7 @@ impl LearnedWatermarker {
     ///
     /// `bits` must be 64 (the model decodes a `u64` payload).
     pub fn with_config(config: LearnedConfig) -> anyhow::Result<Self> {
-        if config.bits != 64 {
-            anyhow::bail!(
-                "learned watermarker supports a 64-bit payload, got {}",
-                config.bits
-            );
-        }
+        Self::validate_config(&config)?;
         let raw = include_bytes!("weights.bin");
         let model = parse_weights(raw)?;
         Ok(Self { config, model })
@@ -436,8 +427,19 @@ impl LearnedWatermarker {
 
     /// Build a watermarker from an explicit model (training/tools path;
     /// the committed-weights path is [`Self::built_in`]).
-    pub fn with_model(config: LearnedConfig, model: LearnedModel) -> Self {
-        Self { config, model }
+    pub fn with_model(config: LearnedConfig, model: LearnedModel) -> anyhow::Result<Self> {
+        Self::validate_config(&config)?;
+        Ok(Self { config, model })
+    }
+
+    fn validate_config(config: &LearnedConfig) -> anyhow::Result<()> {
+        anyhow::ensure!(config.bits == 64, "learned watermarker requires 64 bits");
+        anyhow::ensure!(config.redundancy > 0, "learned redundancy must be nonzero");
+        anyhow::ensure!(
+            config.strength.is_finite() && config.strength > 0.0,
+            "learned strength must be finite and positive"
+        );
+        Ok(())
     }
 
     /// Number of slots required for one embedding (bits × redundancy).
@@ -451,13 +453,7 @@ impl LearnedWatermarker {
     /// of the scheduled blocks. Deterministic: the same frame bytes and
     /// payload always produce identical output bytes.
     pub fn embed(&self, frame: &mut VideoFrame, payload: u64) -> anyhow::Result<()> {
-        let bpp = match frame.format {
-            VideoFormat::Rgb8 => 3usize,
-            VideoFormat::Bgra8 => 4usize,
-            VideoFormat::Yuv420 => {
-                anyhow::bail!("learned watermarker does not support YUV420 planar format");
-            }
-        };
+        let bpp = frame.validate_packed_layout()?;
         let (blocks_x, blocks_y) = block_grid(frame.width, frame.height);
         let slots = self.slot_count();
         if blocks_x * blocks_y < slots {
@@ -512,12 +508,13 @@ impl LearnedWatermarker {
             VideoFormat::Bgra8 => 4usize,
             VideoFormat::Yuv420 => return None,
         };
+        frame.validate_packed_layout().ok()?;
         let (blocks_x, blocks_y) = block_grid(frame.width, frame.height);
         if blocks_x * blocks_y < self.slot_count() {
             return None;
         }
         let (features, _) = self.best_alignment_features(frame, bpp, blocks_x, blocks_y);
-        Some(self.decode(&features))
+        Some(self.decode(&pool_features(&features, self.config.redundancy as usize)))
     }
 
     /// Majority-vote baseline decode: each bit is the majority sign of its
@@ -528,6 +525,7 @@ impl LearnedWatermarker {
             VideoFormat::Bgra8 => 4usize,
             VideoFormat::Yuv420 => return None,
         };
+        frame.validate_packed_layout().ok()?;
         let (blocks_x, blocks_y) = block_grid(frame.width, frame.height);
         if blocks_x * blocks_y < self.slot_count() {
             return None;
@@ -556,6 +554,7 @@ impl LearnedWatermarker {
             VideoFormat::Bgra8 => 4usize,
             VideoFormat::Yuv420 => return None,
         };
+        frame.validate_packed_layout().ok()?;
         let (blocks_x, blocks_y) = block_grid(frame.width, frame.height);
         if blocks_x * blocks_y < self.slot_count() {
             return None;
@@ -574,12 +573,13 @@ impl LearnedWatermarker {
             VideoFormat::Bgra8 => 4usize,
             VideoFormat::Yuv420 => return None,
         };
+        frame.validate_packed_layout().ok()?;
         let (blocks_x, blocks_y) = block_grid(frame.width, frame.height);
         if blocks_x * blocks_y < self.slot_count() {
             return None;
         }
         let (features, _) = self.best_alignment_features(frame, bpp, blocks_x, blocks_y);
-        Some(features)
+        Some(pool_features(&features, self.config.redundancy as usize))
     }
 
     /// Try each block-aligned shift hypothesis (multiples of 8 up to 16 px,
@@ -668,8 +668,7 @@ fn block_dct_cache(
 
 /// Build the raw per-slot feature vector for one shift hypothesis from a
 /// precomputed block-DCT cache: per slot
-/// `[response, response / rms, mean|coef|, max|coef|]`, pooled across slots
-/// to the fixed 128-input model width.
+/// `[response, response / rms, mean|coef|, max|coef|]`. Pool only for the MLP.
 fn features_from_cache(
     cache: &[[f32; 64]],
     blocks_x: usize,
@@ -691,8 +690,8 @@ fn features_from_cache(
             // new[(x, y)] = orig[(x+dx, y+dy)] moves content left/up, so the
             // scheduled block's content now sits at (bx - dx/8, by - dy/8)
             // modulo the block grid.
-            let sx = (bx + blocks_x - dx / BLOCK) % blocks_x;
-            let sy = (by + blocks_y - dy / BLOCK) % blocks_y;
+            let sx = (bx + blocks_x - (dx / BLOCK) % blocks_x) % blocks_x;
+            let sy = (by + blocks_y - (dy / BLOCK) % blocks_y) % blocks_y;
             let coeffs = &cache[sy * blocks_x + sx];
             let mut resp = 0.0f32;
             let mut energy = 0.0f32;
@@ -712,11 +711,11 @@ fn features_from_cache(
             raw.push(max_abs);
         }
     }
-    pool_features(&raw, r)
+    raw
 }
 
 /// Pool `64 × r × 4` raw per-slot features into the fixed
-/// `64 × 128` model input: when `r < 32` pad slots with zeros; when
+/// `64 × 128` model input: when `r < 32` repeat slots; when
 /// `r > 32` average adjacent slots; when `r = 32` pass through.
 fn pool_features(raw: &[f32], redundancy: usize) -> Vec<f32> {
     let target = 32;

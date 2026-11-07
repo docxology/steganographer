@@ -141,9 +141,8 @@ impl HashChain {
 
     /// Build and return the Merkle root for the current (possibly partial) segment.
     ///
-    /// This does NOT clear the segment — it computes a root over whatever
-    /// frames have been added since the last completed segment. If the segment
-    /// is full, it returns the already-computed root.
+    /// This finalizes and clears a partial segment. If no segment is in
+    /// progress, it returns the most recently finalized root.
     pub fn build_root(&mut self) -> Option<MerkleRoot> {
         if !self.segment_hashes.is_empty() {
             self.finalize_segment();
@@ -171,18 +170,28 @@ impl HashChain {
     /// Recomputes the hash chain and Merkle tree from the given frames
     /// and compares the root hash to the provided root.
     ///
-    /// # Arguments
-    /// * `frames` — Slice of `(frame_index, data)` tuples.
-    /// * `root` — The expected Merkle root.
-    ///
-    /// Returns `true` if the recomputed root matches.
-    pub fn verify_chain(frames: &[(u64, &[u8])], root: &MerkleRoot) -> bool {
-        if frames.is_empty() {
+    /// `root` and `previous_hash` must come from trusted segment context.
+    /// Use the zero predecessor only for segment zero. Segment ordinals are
+    /// caller context, not part of the legacy leaf hashing domain.
+    pub fn verify_chain(
+        root: &MerkleRoot,
+        frames: &[(u64, &[u8])],
+        previous_hash: FrameHash,
+    ) -> bool {
+        if frames.is_empty()
+            || frames.len() != root.segment.frame_count
+            || frames[0].0 != root.segment.start_frame
+            || (root.segment.segment_index == 0) != (previous_hash == [0; 32])
+            || u64::try_from(root.segment.segment_index)
+                .map_or(true, |i| i > root.segment.start_frame)
+            || frames
+                .windows(2)
+                .any(|pair| pair[0].0.checked_add(1) != Some(pair[1].0))
+        {
             return false;
         }
-
-        let mut prev_hash: FrameHash = [0u8; 32];
-        let mut segment_hashes: Vec<FrameHash> = Vec::new();
+        let mut prev_hash = previous_hash;
+        let mut segment_hashes = Vec::with_capacity(frames.len());
 
         for &(frame_index, data) in frames {
             let mut hasher = Hasher::new();
@@ -345,7 +354,7 @@ mod tests {
         // Verify with the same data
         let frame_refs: Vec<(u64, &[u8])> =
             frames.iter().map(|(i, d)| (*i, d.as_slice())).collect();
-        assert!(HashChain::verify_chain(&frame_refs, &root));
+        assert!(HashChain::verify_chain(&root, &frame_refs, [0; 32]));
     }
 
     #[test]
@@ -367,7 +376,7 @@ mod tests {
         tampered[1].1[0] ^= 0xFF;
         let frame_refs: Vec<(u64, &[u8])> =
             tampered.iter().map(|(i, d)| (*i, d.as_slice())).collect();
-        assert!(!HashChain::verify_chain(&frame_refs, &root));
+        assert!(!HashChain::verify_chain(&root, &frame_refs, [0; 32]));
     }
 
     #[test]
@@ -381,7 +390,7 @@ mod tests {
         let frames: Vec<(u64, Vec<u8>)> = vec![(0, dummy_data(10))];
         let frame_refs: Vec<(u64, &[u8])> =
             frames.iter().map(|(i, d)| (*i, d.as_slice())).collect();
-        assert!(!HashChain::verify_chain(&frame_refs, &root));
+        assert!(!HashChain::verify_chain(&root, &frame_refs, [0; 32]));
     }
 
     #[test]
@@ -396,7 +405,7 @@ mod tests {
             last_frame_hash: [0u8; 32],
         };
         let empty: Vec<(u64, &[u8])> = vec![];
-        assert!(!HashChain::verify_chain(&empty, &root));
+        assert!(!HashChain::verify_chain(&root, &empty, [0; 32]));
     }
 
     #[test]
@@ -481,5 +490,58 @@ mod tests {
         hasher.update(&h1);
         hasher.update(&dummy_data(30));
         assert_eq!(*hasher.finalize().as_bytes(), h2);
+        let later = chain.build_root().unwrap();
+        assert!(HashChain::verify_chain(
+            &later,
+            &[(2, dummy_data(30).as_slice())],
+            h1
+        ));
+        assert!(!HashChain::verify_chain(
+            &later,
+            &[(2, dummy_data(30).as_slice())],
+            [0; 32]
+        ));
+        let mut wrong_start = later.clone();
+        wrong_start.segment.start_frame = 3;
+        assert!(!HashChain::verify_chain(
+            &wrong_start,
+            &[(2, dummy_data(30).as_slice())],
+            h1
+        ));
+    }
+
+    #[test]
+    fn verify_later_segment_requires_trusted_predecessor_and_order() {
+        let mut chain = HashChain::with_segment_size(2);
+        chain.add_frame(0, b"a");
+        chain.add_frame(1, b"b");
+        let predecessor = chain.completed_segments()[0].last_frame_hash;
+        chain.add_frame(2, b"c");
+        chain.add_frame(3, b"d");
+        let root = &chain.completed_segments()[1];
+        let frames = [(2, b"c".as_slice()), (3, b"d".as_slice())];
+        assert!(HashChain::verify_chain(root, &frames, predecessor));
+        assert!(!HashChain::verify_chain(root, &frames, [1; 32]));
+        assert!(!HashChain::verify_chain(
+            root,
+            &[frames[1], frames[0]],
+            predecessor
+        ));
+        assert!(!HashChain::verify_chain(
+            root,
+            &[(2, b"c".as_slice()), (2, b"d".as_slice())],
+            predecessor
+        ));
+        let mut mislabeled = root.clone();
+        mislabeled.segment.segment_index = 0;
+        assert!(!HashChain::verify_chain(&mislabeled, &frames, predecessor));
+        let mut skipped = HashChain::with_segment_size(2);
+        skipped.add_frame(0, b"a");
+        skipped.add_frame(2, b"b");
+        assert!(!HashChain::verify_chain(
+            &skipped.build_root().unwrap(),
+            &[(0, b"a".as_slice()), (2, b"b".as_slice())],
+            [0; 32]
+        ));
     }
 }

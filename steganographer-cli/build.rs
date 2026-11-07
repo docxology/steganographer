@@ -1,67 +1,58 @@
-//! Build script for steganographer-cli.
-//!
-//! Generates shell completions and man pages at build time.
+//! Generate completions and manuals from the binary's actual command schema.
 
+use clap::CommandFactory;
 use clap_complete::{generate_to, Shell};
 
-fn main() {
-    let out_dir = std::env::var("OUT_DIR").unwrap_or_else(|_| ".".to_string());
-    let completions_dir = std::path::Path::new(&out_dir).join("completions");
-    let man_dir = std::path::Path::new(&out_dir).join("man");
-    std::fs::create_dir_all(&completions_dir).ok();
-    std::fs::create_dir_all(&man_dir).ok();
+#[allow(dead_code)]
+#[path = "src/cli.rs"]
+mod cli;
 
-    // Define a minimal command for completions and man page generation
-    let mut cmd = clap::Command::new("steganographer")
-        .about("Real-time steganographic watermarking for video and audio streams")
-        .version("0.2.0")
-        .arg(
-            clap::Arg::new("config")
-                .long("config")
-                .short('c')
-                .help("Path to configuration file (TOML)"),
-        )
-        .arg(
-            clap::Arg::new("log-level")
-                .long("log-level")
-                .short('l')
-                .help("Log verbosity level"),
-        )
-        .arg(
-            clap::Arg::new("quiet")
-                .long("quiet")
-                .short('q')
-                .help("Suppress all output except final result"),
-        )
-        .subcommand(clap::Command::new("encode").about("Encode steganographic data into a file"))
-        .subcommand(
-            clap::Command::new("verify").about("Verify steganographic signatures in a media file"),
-        )
-        .subcommand(clap::Command::new("keygen").about("Generate a new Ed25519 signing key pair"))
-        .subcommand(
-            clap::Command::new("info").about("Report steganographic capacity of a media file"),
-        )
-        .subcommand(
-            clap::Command::new("analyze").about("Analyze a file for steganographic artifacts"),
-        )
-        .subcommand(clap::Command::new("derive").about("Derive keys from a master secret"))
-        .subcommand(clap::Command::new("dashboard").about("Launch the web dashboard"))
-        .subcommand(clap::Command::new("video").about("Run live video pipeline"))
-        .subcommand(clap::Command::new("audio").about("Run live audio pipeline"))
-        .subcommand(clap::Command::new("config").about("Validate a TOML configuration file"));
+fn generate_manuals(cmd: clap::Command, out_dir: &std::path::Path) -> std::io::Result<()> {
+    for subcommand in cmd.get_subcommands().filter(|s| !s.is_hide_set()).cloned() {
+        generate_manuals(subcommand, out_dir)?;
+    }
+    let title = cmd
+        .get_display_name()
+        .unwrap_or_else(|| cmd.get_name())
+        .to_ascii_uppercase();
+    clap_mangen::Man::new(cmd)
+        .title(title)
+        // Omit the optional revision date rather than freezing a release date
+        // into every future build. The source identifies the actual version.
+        .date("")
+        .source(format!("Steganographer {}", env!("CARGO_PKG_VERSION")))
+        .manual("Steganographer Manual")
+        .generate_to(out_dir)?;
+    Ok(())
+}
 
-    // Generate shell completions
-    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Elvish] {
-        generate_to(shell, &mut cmd, "steganographer", &completions_dir).ok();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
+    );
+    let completions_dir = out_dir.join("completions");
+    let man_dir = out_dir.join("man");
+    for dir in [&completions_dir, &man_dir] {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+        std::fs::create_dir_all(dir)?;
     }
 
-    // Generate man page
-    let man = clap_mangen::Man::new(cmd.clone());
-    let mut buffer: Vec<u8> = Vec::new();
-    if man.render_title(&mut buffer).is_ok() && man.render(&mut buffer).is_ok() {
-        let man_path = man_dir.join("steganographer.1");
-        std::fs::write(&man_path, &buffer).ok();
+    let mut cmd = cli::Cli::command();
+    for shell in [
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Fish,
+        Shell::Elvish,
+        Shell::PowerShell,
+    ] {
+        generate_to(shell, &mut cmd, "steganographer", &completions_dir)?;
     }
+    let mut manual_command = cli::Cli::command().disable_help_subcommand(true);
+    manual_command.build();
+    generate_manuals(manual_command, &man_dir)?;
 
-    println!("cargo:rerun-if-changed=src/main.rs");
+    println!("cargo:rerun-if-changed=src/cli.rs");
+    Ok(())
 }

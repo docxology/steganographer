@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 use steganographer_dashboard::{validate_live_config, DashboardState, LiveConfig};
 
+static FRAME_TEST_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ─── LiveConfig Tests ─────────────────────────────────────────────────
 
 #[test]
@@ -50,9 +52,9 @@ fn test_live_config_from_json_with_defaults() {
 }
 
 #[test]
-fn test_live_config_camel_case_field_names() {
-    let json = r#"{"opacity":0.8,"lsbBits":2,"signingBackend":"ethereum","overlayText":"TOP SECRET","signRateMs":250}"#;
-    let cfg: LiveConfig = serde_json::from_str(json).expect("camelCase parse");
+fn test_live_config_snake_case_field_names() {
+    let json = r#"{"opacity":0.8,"lsb_bits":2,"signing_backend":"ethereum","overlay_text":"TOP SECRET","sign_rate_ms":250}"#;
+    let cfg: LiveConfig = serde_json::from_str(json).expect("snake_case parse");
     assert!((cfg.opacity - 0.8).abs() < f64::EPSILON);
     assert_eq!(cfg.lsb_bits, 2);
     assert_eq!(cfg.signing_backend, "ethereum");
@@ -62,7 +64,7 @@ fn test_live_config_camel_case_field_names() {
 
 #[test]
 fn test_live_config_boundary_values() {
-    let json = r#"{"opacity":0.0,"lsbBits":4,"signRateMs":200}"#;
+    let json = r#"{"opacity":0.0,"lsb_bits":4,"sign_rate_ms":200}"#;
     let cfg: LiveConfig = serde_json::from_str(json).expect("parse");
     assert!((cfg.opacity - 0.0).abs() < f64::EPSILON);
     assert_eq!(cfg.lsb_bits, 4);
@@ -87,6 +89,7 @@ fn test_dashboard_state_construction() {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        ots_outcome: Mutex::new(None),
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
         transport: steganographer_dashboard::TransportPolicy::Auto,
@@ -140,36 +143,6 @@ fn test_live_config_full_json_roundtrip() {
     assert_eq!(restored.sign_rate_ms, original.sign_rate_ms);
 }
 
-// ─── Router Tests ─────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_router_creation() {
-    let state = Arc::new(DashboardState {
-        metrics: Arc::new(steganographer_core::StegoMetrics::new()),
-        signing_backend: "ed25519".into(),
-        identity: "test_identity".into(),
-        width: 640,
-        height: 480,
-        last_encoded_frame: Mutex::new(None),
-        last_encoded_audio: Mutex::new(None),
-        live_config: Mutex::new(LiveConfig::default()),
-        session_start: std::time::Instant::now(),
-        auth_token: None,
-        ots_config: steganographer_core::OtsConfig::default(),
-        ots_client: None,
-        signer: steganographer_core::Signer::generate(),
-        audio_key: [7u8; 32],
-        transport: steganographer_dashboard::TransportPolicy::Auto,
-        #[cfg(feature = "webrtc")]
-        webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
-        #[cfg(feature = "webrtc")]
-        ice_servers: Vec::new(),
-        #[cfg(feature = "webrtc")]
-        media_publishers: Mutex::new(std::collections::HashMap::new()),
-    });
-    let _router = steganographer_dashboard::create_router(state);
-}
-
 // ─── Session Start Tests ──────────────────────────────────────────────
 
 #[test]
@@ -188,6 +161,7 @@ fn test_dashboard_state_session_start() {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        ots_outcome: Mutex::new(None),
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
         transport: steganographer_dashboard::TransportPolicy::Auto,
@@ -236,8 +210,8 @@ fn test_live_config_qr_scale_resolution_roundtrip() {
 }
 
 #[test]
-fn test_live_config_camel_case_qr_scale() {
-    let json = r#"{"opacity":1.0,"lsbBits":1,"signingBackend":"ed25519","overlayText":"X","signRateMs":1000,"qrScale":50,"resolution":"1280x720"}"#;
+fn test_live_config_snake_case_qr_scale() {
+    let json = r#"{"opacity":1.0,"lsb_bits":1,"signing_backend":"ed25519","overlay_text":"X","sign_rate_ms":1000,"qr_scale":50,"resolution":"1280x720"}"#;
     let cfg: LiveConfig = serde_json::from_str(json).expect("parse");
     assert_eq!(cfg.qr_scale, 50);
     assert_eq!(cfg.resolution, "1280x720");
@@ -264,6 +238,7 @@ fn test_app_with_token(auth_token: Option<String>) -> (axum::Router, Arc<Dashboa
         auth_token,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        ots_outcome: Mutex::new(None),
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
         transport: steganographer_dashboard::TransportPolicy::Auto,
@@ -274,7 +249,7 @@ fn test_app_with_token(auth_token: Option<String>) -> (axum::Router, Arc<Dashboa
         #[cfg(feature = "webrtc")]
         media_publishers: Mutex::new(std::collections::HashMap::new()),
     });
-    let router = steganographer_dashboard::create_router(state.clone());
+    let router = steganographer_dashboard::create_router(state.clone()).unwrap();
     (router, state)
 }
 
@@ -288,7 +263,7 @@ async fn body_to_string(body: axum::body::Body) -> String {
 #[tokio::test]
 async fn test_api_session_response_structure() {
     use tower::ServiceExt;
-    let (app, _state) = test_app();
+    let (app, state) = test_app();
     let req = axum::http::Request::builder()
         .uri("/api/session")
         .body(axum::body::Body::empty())
@@ -299,7 +274,10 @@ async fn test_api_session_response_structure() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
     assert!(json.get("uptime_secs").is_some(), "missing uptime_secs");
     assert_eq!(json["backend"], "ed25519");
-    assert_eq!(json["identity"], "test_identity_abc123");
+    assert_eq!(
+        json["identity"],
+        steganographer_core::crypto::encode_hex(&state.signer.verifying_key().to_bytes())
+    );
     assert_eq!(json["resolution"], "640x480");
     assert!(json.get("config").is_some(), "missing config");
     assert!(json.get("metrics").is_some(), "missing metrics");
@@ -308,7 +286,7 @@ async fn test_api_session_response_structure() {
 #[tokio::test]
 async fn test_api_config_get_returns_json() {
     use tower::ServiceExt;
-    let (app, _state) = test_app();
+    let (app, state) = test_app();
     let req = axum::http::Request::builder()
         .uri("/api/config")
         .body(axum::body::Body::empty())
@@ -318,7 +296,10 @@ async fn test_api_config_get_returns_json() {
     let body = body_to_string(resp.into_body()).await;
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
     assert_eq!(json["signing_backend"], "ed25519");
-    assert_eq!(json["identity"], "test_identity_abc123");
+    assert_eq!(
+        json["identity"],
+        steganographer_core::crypto::encode_hex(&state.signer.verifying_key().to_bytes())
+    );
     assert_eq!(json["width"], 640);
     assert_eq!(json["height"], 480);
     assert_eq!(json["lsb_bits"], 1);
@@ -330,11 +311,11 @@ async fn test_api_config_post_updates_config() {
     let (app, state) = test_app();
     let new_cfg = serde_json::json!({
         "opacity": 0.5,
-        "lsbBits": 3,
-        "signingBackend": "ethereum",
-        "overlayText": "UPDATED",
-        "signRateMs": 500,
-        "qrScale": 30,
+        "lsb_bits": 3,
+        "signing_backend": "ed25519",
+        "overlay_text": "UPDATED",
+        "sign_rate_ms": 500,
+        "qr_scale": 30,
         "resolution": "1920x1080"
     });
     let req = axum::http::Request::builder()
@@ -351,7 +332,7 @@ async fn test_api_config_post_updates_config() {
     // Verify state was actually updated
     let cfg = state.live_config.lock().unwrap();
     assert_eq!(cfg.lsb_bits, 3);
-    assert_eq!(cfg.signing_backend, "ethereum");
+    assert_eq!(cfg.signing_backend, "ed25519");
     assert_eq!(cfg.overlay_text, "UPDATED");
     assert_eq!(cfg.sign_rate_ms, 500);
     assert_eq!(cfg.qr_scale, 30);
@@ -530,11 +511,11 @@ fn bearer(token: &str) -> String {
 fn config_body(lsb_bits: u8) -> String {
     serde_json::json!({
         "opacity": 0.5,
-        "lsbBits": lsb_bits,
-        "signingBackend": "ed25519",
-        "overlayText": "X",
-        "signRateMs": 1000,
-        "qrScale": 10,
+        "lsb_bits": lsb_bits,
+        "signing_backend": "ed25519",
+        "overlay_text": "X",
+        "sign_rate_ms": 1000,
+        "qr_scale": 10,
         "resolution": "640x480"
     })
     .to_string()
@@ -593,7 +574,7 @@ fn test_config_validation_rejects_bad_lsb_bits() {
     for lsb_bits in [0u8, 5, 255] {
         cfg.lsb_bits = lsb_bits;
         let err = validate_live_config(&cfg).unwrap_err();
-        assert!(err.contains("lsbBits"), "error names lsbBits: {err}");
+        assert!(err.contains("lsb_bits"), "error names lsb_bits: {err}");
     }
 }
 
@@ -616,7 +597,10 @@ fn test_config_validation_rejects_low_sign_rate() {
     for rate in [0u32, 10, 49] {
         cfg.sign_rate_ms = rate;
         let err = validate_live_config(&cfg).unwrap_err();
-        assert!(err.contains("signRateMs"), "error names signRateMs: {err}");
+        assert!(
+            err.contains("sign_rate_ms"),
+            "error names sign_rate_ms: {err}"
+        );
     }
 }
 
@@ -627,7 +611,7 @@ async fn test_api_config_post_rejects_lsb_bits_5() {
     let (app, _state) = test_app();
     let (status, body) = post_config(app, config_body(5), None).await;
     assert_eq!(status, 400);
-    assert!(body.contains("lsbBits"), "message names the field: {body}");
+    assert!(body.contains("lsb_bits"), "message names the field: {body}");
 }
 
 #[tokio::test]
@@ -635,19 +619,19 @@ async fn test_api_config_post_rejects_bad_opacity_and_rate() {
     for (field, body) in [
         (
             "opacity",
-            r#"{"opacity": 1.5, "lsbBits": 1, "signRateMs": 1000}"#,
+            r#"{"opacity": 1.5, "lsb_bits": 1, "sign_rate_ms": 1000}"#,
         ),
         (
             "opacity",
-            r#"{"opacity": -0.1, "lsbBits": 1, "signRateMs": 1000}"#,
+            r#"{"opacity": -0.1, "lsb_bits": 1, "sign_rate_ms": 1000}"#,
         ),
         (
-            "signRateMs",
-            r#"{"opacity": 0.5, "lsbBits": 1, "signRateMs": 10}"#,
+            "sign_rate_ms",
+            r#"{"opacity": 0.5, "lsb_bits": 1, "sign_rate_ms": 10}"#,
         ),
         (
-            "signRateMs",
-            r#"{"opacity": 0.5, "lsbBits": 1, "signRateMs": 0}"#,
+            "sign_rate_ms",
+            r#"{"opacity": 0.5, "lsb_bits": 1, "sign_rate_ms": 0}"#,
         ),
     ] {
         let (app, _state) = test_app();
@@ -781,9 +765,10 @@ async fn test_ots_verify_empty_body_400() {
         session_start: std::time::Instant::now(),
         auth_token: Some(TEST_TOKEN.into()),
         ots_config: steganographer_core::OtsConfig::default(),
-        ots_client: Some(Arc::new(steganographer_core::OTSClient::new(
-            steganographer_core::OTSMethod::Bitcoin,
-        ))),
+        ots_client: Some(Arc::new(
+            steganographer_core::OTSClient::new(steganographer_core::OTSMethod::Bitcoin).unwrap(),
+        )),
+        ots_outcome: Mutex::new(None),
         signer: steganographer_core::Signer::generate(),
         audio_key: [7u8; 32],
         transport: steganographer_dashboard::TransportPolicy::Auto,
@@ -794,7 +779,7 @@ async fn test_ots_verify_empty_body_400() {
         #[cfg(feature = "webrtc")]
         media_publishers: Mutex::new(std::collections::HashMap::new()),
     });
-    let app = steganographer_dashboard::create_router(state.clone());
+    let app = steganographer_dashboard::create_router(state.clone()).unwrap();
     let req = axum::http::Request::builder()
         .method("POST")
         .uri("/ots/verify")
@@ -1058,6 +1043,7 @@ fn test_jpeg(width: u32, height: u32) -> Vec<u8> {
 /// `state.signer`, the same key the verify worker checks against).
 #[tokio::test]
 async fn test_datachannel_encode_frame_verifies() {
+    let _gate = FRAME_TEST_GATE.lock().await;
     let (_app, state) = test_app();
 
     let jpeg = test_jpeg(320, 240);
@@ -1076,10 +1062,331 @@ async fn test_datachannel_encode_frame_verifies() {
 
     // The decode poll the pump serves must report a verified payload.
     let mut decode = steganographer_dashboard::ws_handler::DecodeSession::new();
-    let poll = steganographer_dashboard::ws_handler::process_decode_poll(&state, &mut decode);
+    let poll = steganographer_dashboard::ws_handler::process_decode_poll(&state, &mut decode).await;
     assert_eq!(poll["type"], "decoded_frame");
     assert_eq!(poll["verified"], true, "data-channel frame must verify ok");
     assert_eq!(poll["verified_stale"], false);
     assert_eq!(poll["payload"]["payload_found"], true);
     assert!(poll["payload"]["hash"].as_str().is_some());
+}
+
+/// Verify only the returned PNG and public response metadata, with no cache/reference.
+fn verify_returned_png(reply: &serde_json::Value, png: &[u8]) -> bool {
+    use steganographer_core::{Verifier, VideoFormat, VideoFrame, VideoStegoModule};
+    let key: [u8; 32] =
+        steganographer_core::crypto::decode_hex(reply["public_key"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .unwrap()
+        .to_rgb8();
+    let (width, height) = image.dimensions();
+    let mut data = image.into_raw();
+    let bits = reply["lsb_bits"].as_u64().unwrap() as u8;
+    let index = reply["frame_index"].as_u64().unwrap();
+    let payload = steganographer_core::lsb_video::LsbVideo::new(bits)
+        .extract(&VideoFrame {
+            width,
+            height,
+            stride: width * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: index,
+        })
+        .unwrap()
+        .unwrap();
+    let canonical = steganographer_core::carrier_binding::canonicalize(
+        &data,
+        "lsb_video",
+        bits,
+        width,
+        height,
+        steganographer_core::SignaturePayload::SERIALIZED_SIZE,
+    )
+    .unwrap();
+    payload.frame_index == index
+        && Verifier::from_bytes(&key)
+            .unwrap()
+            .verify(&payload, &canonical, None)
+}
+
+#[tokio::test]
+async fn delivered_png_verifies_independently_and_binds_high_bits_and_frame_settings() {
+    use steganographer_dashboard::ws_handler::{
+        base64_decode, process_decode_poll, process_encode_frame, DecodeSession, EncodeSession,
+    };
+    let (_, state) = test_app();
+    state.live_config.lock().unwrap().lsb_bits = 2;
+    let _gate = FRAME_TEST_GATE.lock().await;
+    let mut session = EncodeSession::new();
+    let reply = process_encode_frame(&state, &mut session, &test_jpeg(128, 128)).unwrap();
+    assert_eq!(reply["image_mime"], "image/png");
+    let png = base64_decode(reply["frame"].as_str().unwrap()).unwrap();
+    assert!(verify_returned_png(&reply, &png));
+    let mut image = image::load_from_memory(&png).unwrap().to_rgb8();
+    image.as_mut()[8192] ^= 0x40;
+    let mut tampered = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut tampered, image::ImageFormat::Png)
+        .unwrap();
+    assert!(!verify_returned_png(&reply, &tampered.into_inner()));
+    state.live_config.lock().unwrap().lsb_bits = 4;
+    let poll = process_decode_poll(&state, &mut DecodeSession::new()).await;
+    assert_eq!(
+        poll["lsb_bits"], 2,
+        "metadata belongs to stored carrier, not current config"
+    );
+    assert_eq!(
+        poll["frame"], reply["frame"],
+        "poll delivers the exact same lossless artifact"
+    );
+    assert_eq!(poll["cache_revision"], reply["cache_revision"]);
+    assert!(verify_returned_png(&poll, &png));
+    let revision = poll["cache_revision"].as_u64().unwrap();
+    let replacement =
+        process_encode_frame(&state, &mut EncodeSession::new(), &test_jpeg(128, 128)).unwrap();
+    assert_eq!(replacement["frame_index"], 0);
+    let poll = process_decode_poll(&state, &mut DecodeSession::new()).await;
+    assert!(poll["cache_revision"].as_u64().unwrap() > revision);
+}
+
+#[test]
+fn unsupported_security_choices_are_rejected_not_decoratively_stored() {
+    for (field, value) in [
+        ("signing_backend", serde_json::json!("ethereum")),
+        ("signing_backend", serde_json::json!("metamask")),
+        ("hash_algorithm", serde_json::json!("sha256")),
+        ("stego_type", serde_json::json!("dct")),
+        ("stego_type", serde_json::json!("spread_spectrum")),
+        ("encrypt", serde_json::json!(true)),
+        ("ecc", serde_json::json!(true)),
+    ] {
+        let mut json = serde_json::to_value(LiveConfig::default()).unwrap();
+        json[field] = value;
+        assert!(
+            validate_live_config(&serde_json::from_value(json).unwrap()).is_err(),
+            "{field}"
+        );
+    }
+    assert!(
+        serde_json::from_str::<LiveConfig>(r#"{"lsbBits":4}"#).is_err(),
+        "unknown names cannot silently reset config"
+    );
+}
+
+#[tokio::test]
+async fn tokenless_foreign_origin_cannot_reset_metrics_or_stamp() {
+    use tower::ServiceExt;
+    let (app, state) = test_app();
+    state.metrics.record_frame();
+    for path in ["/api/metrics/reset", "/ots/stamp", "/ots/verify"] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("host", "127.0.0.1:8080")
+                    .header("origin", "https://foreign.example")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+    }
+    assert_eq!(state.metrics.frames_processed(), 1);
+}
+
+#[tokio::test]
+async fn ice_capabilities_require_bearer_and_publish_real_server_default() {
+    use tower::ServiceExt;
+    let (app, _) = test_app_with_token(Some(TEST_TOKEN.into()));
+    for token in [None, Some("Bearer wrong"), Some("Bearer sekret")] {
+        let mut request = axum::http::Request::builder().uri("/api/webrtc/config");
+        if let Some(token) = token {
+            request = request.header("authorization", token);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        if token == Some("Bearer sekret") {
+            assert_eq!(response.status(), 200);
+            let json: serde_json::Value =
+                serde_json::from_str(&body_to_string(response.into_body()).await).unwrap();
+            assert_eq!(json["default_transport"], "auto");
+        } else {
+            assert_eq!(response.status(), 401);
+        }
+    }
+}
+
+#[tokio::test]
+async fn common_encoder_rejects_oversized_dimensions_and_malformed_input() {
+    use steganographer_dashboard::ws_handler::{process_encode_frame, EncodeSession};
+    let (_, state) = test_app();
+    let _gate = FRAME_TEST_GATE.lock().await;
+    assert!(
+        process_encode_frame(&state, &mut EncodeSession::new(), &test_jpeg(4097, 16)).is_none()
+    );
+    assert!(process_encode_frame(&state, &mut EncodeSession::new(), b"invalid").is_none());
+    assert!(state.last_encoded_frame.lock().unwrap().is_none());
+}
+
+/// A real calendar protocol receipt is pending, never a fabricated verified response.
+#[tokio::test]
+async fn stamp_commits_exact_delivered_png_and_enforces_pending_digest_and_interval() {
+    use steganographer_dashboard::ws_handler::{
+        base64_decode, process_encode_frame, EncodeSession,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
+    let _gate = FRAME_TEST_GATE.lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let calendar_url = url.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let calendar = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let digest = loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0 && request.len() + count <= 8192);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(offset) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&request[..offset]).unwrap();
+                assert!(headers.starts_with("POST /digest HTTP/1.1\r\n"));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                assert_eq!(length, 32);
+                if request.len() >= offset + 4 + length {
+                    break request[offset + 4..offset + 4 + length].to_vec();
+                }
+            }
+        };
+        // Standard pending attestation tag and URL, with short canonical varints.
+        let mut tree = vec![0, 0x83, 0xdf, 0xe3, 0x0d, 0x2e, 0xf9, 0x0c, 0x8e];
+        tree.push((calendar_url.len() + 1) as u8);
+        tree.push(calendar_url.len() as u8);
+        tree.extend_from_slice(calendar_url.as_bytes());
+        let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.opentimestamps.v1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",tree.len());
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&tree).await.unwrap();
+        sender.send(digest).unwrap();
+    });
+    let directory = std::env::temp_dir().join(format!(
+        "steganographer-dashboard-ots-{:032x}",
+        rand::random::<u128>()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let (app, state) = test_app();
+    drop(app);
+    let mut state = Arc::try_unwrap(state).ok().unwrap();
+    state.ots_config = steganographer_core::OtsConfig {
+        enabled: true,
+        server_url: url,
+        interval_secs: 300,
+        timeout_secs: 2,
+        proof_dir: directory.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    state.ots_client = Some(Arc::new(
+        steganographer_core::OTSClient::from_config(&state.ots_config).unwrap(),
+    ));
+    let state = Arc::new(state);
+    let app = steganographer_dashboard::create_router(state.clone()).unwrap();
+    let post = || {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/ots/stamp")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    let no_media = app.clone().oneshot(post()).await.unwrap();
+    assert_eq!(no_media.status(), 409);
+    let encoded =
+        process_encode_frame(&state, &mut EncodeSession::new(), &test_jpeg(128, 128)).unwrap();
+    let png = base64_decode(encoded["frame"].as_str().unwrap()).unwrap();
+    let expected = steganographer_core::OTSClient::compute_sha256_digest(&png);
+    let response = app.clone().oneshot(post()).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let receipt: serde_json::Value =
+        serde_json::from_str(&body_to_string(response.into_body()).await).unwrap();
+    assert_eq!(receipt["pending"], true);
+    assert_eq!(receipt["verified"], false);
+    assert_eq!(
+        receipt["digest"],
+        steganographer_core::crypto::encode_hex(&expected)
+    );
+    let submitted = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        submitted, expected,
+        "calendar must not receive the raw media digest"
+    );
+    let proof = tokio::fs::read(receipt["proof_path"].as_str().unwrap())
+        .await
+        .unwrap();
+    let magic = b"\0OpenTimestamps\0\0Proof\0\xbf\x89\xe2\xe8\x84\xe8\x92\x94";
+    let operations = magic.len() + 2 + 32;
+    assert!(proof.len() >= operations + 35 && proof.starts_with(magic));
+    assert_eq!(&proof[magic.len()..magic.len() + 2], &[1, 8]);
+    assert_eq!(&proof[magic.len() + 2..operations], &expected);
+    assert_eq!(&proof[operations..operations + 2], &[0xf0, 32]);
+    assert_eq!(proof[operations + 34], 0x08);
+    let mut blinded_input = expected.to_vec();
+    blinded_input.extend_from_slice(&proof[operations + 2..operations + 34]);
+    assert_eq!(
+        submitted,
+        steganographer_core::OTSClient::compute_sha256_digest(&blinded_input)
+    );
+    calendar.await.unwrap();
+    let status_request = || {
+        axum::http::Request::builder()
+            .uri("/ots/status")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    let status: serde_json::Value = serde_json::from_str(
+        &body_to_string(
+            app.clone()
+                .oneshot(status_request())
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(status["can_stamp"], false);
+    assert_eq!(status["pending"], true);
+    assert_eq!(status["verified"], false);
+    assert_eq!(status["media_digest"], receipt["digest"]);
+    assert_eq!(app.clone().oneshot(post()).await.unwrap().status(), 429);
+    let missing = axum::http::Request::builder()
+        .method("POST")
+        .uri("/ots/verify")
+        .body(axum::body::Body::from(proof.clone()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(missing).await.unwrap().status(), 400);
+    let mismatch = axum::http::Request::builder()
+        .method("POST")
+        .uri("/ots/verify")
+        .header("x-expected-digest", "00".repeat(32))
+        .body(axum::body::Body::from(proof))
+        .unwrap();
+    assert_eq!(app.oneshot(mismatch).await.unwrap().status(), 422);
+    std::fs::remove_dir_all(directory).unwrap();
 }

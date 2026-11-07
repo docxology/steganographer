@@ -1,6 +1,8 @@
 //! `steganographer video` subcommand — live video pipeline.
 
+use anyhow::Context;
 use steganographer_core::config::Config;
+use steganographer_core::crypto::encode_hex;
 
 pub fn run(
     config_path: &str,
@@ -12,16 +14,77 @@ pub fn run(
     let cfg = Config::from_file(config_path)?;
     log::info!("Running video pipeline");
 
-    // Initialize GStreamer
-    steganographer_gst::init()?;
-
     // Determine source/sink from config or CLI overrides
     let video_cfg = cfg
         .video
         .ok_or_else(|| anyhow::anyhow!("No [video] section in config"))?;
+    validate_live_pipeline(video_cfg.pipeline.as_ref())?;
+    anyhow::ensure!(
+        max_frames.is_none_or(|limit| limit > 0),
+        "--max-frames must be positive"
+    );
+    let managed_file = sink.is_none() && video_cfg.output.r#type == "file";
+    anyhow::ensure!(
+        !managed_file
+            || max_frames.is_some()
+            || (source.is_none() && video_cfg.input.r#type == "file"),
+        "file capture from a live or explicit source requires --max-frames"
+    );
+    let signing_kernel = match video_cfg.stego.pipeline.as_slice() {
+        [step] if step == "lsb_signature" => Some(steganographer_gst::SigningKernel::Lsb {
+            bits: video_cfg
+                .stego
+                .lsb_signature
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("LSB signing requires [lsb_signature]"))?
+                .bits,
+        }),
+        [step] if step == "dct" => Some(steganographer_gst::SigningKernel::Dct),
+        [step] if step == "spread_spectrum" => anyhow::bail!(
+            "Native signed spread-spectrum is unsupported; use the offline scalar carrier workflow"
+        ),
+        steps
+            if steps.iter().any(|step| {
+                matches!(step.as_str(), "lsb_signature" | "dct" | "spread_spectrum")
+            }) =>
+        {
+            anyhow::bail!("Signed video requires exactly one kernel; overlays and multi-kernel signing are unsupported");
+        }
+        _ => None,
+    };
+    if signing_key.is_some() && signing_kernel.is_none() {
+        anyhow::bail!("--signing-key requires a signing kernel");
+    }
 
-    let source_str = source.unwrap_or_else(|| build_source_pipeline(&video_cfg.input));
-    let sink_str = sink.unwrap_or_else(|| build_sink_pipeline(&video_cfg.output));
+    let source_str = match source {
+        Some(source) => source,
+        None => build_source_pipeline(&video_cfg.input, video_cfg.pipeline.as_ref())?,
+    };
+    let output_file = if managed_file {
+        let path = video_cfg
+            .output
+            .path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .context("video file output requires path")?;
+        let path = std::path::Path::new(path);
+        anyhow::ensure!(
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mkv")),
+            "signed video file output requires lossless RGB Matroska (.mkv)"
+        );
+        Some((path, crate::media_io::output_temp(path, false)?))
+    } else {
+        None
+    };
+    let sink_str = match sink {
+        Some(sink) => sink,
+        None => build_sink_pipeline(
+            &video_cfg.output,
+            output_file.as_ref().map(|(_, file)| file.path()),
+        )?,
+    };
 
     // Build the steganography module chain
     let stego_modules = build_video_stego_chain(&video_cfg.stego)?;
@@ -34,28 +97,11 @@ pub fn run(
 
     let hash_algo =
         steganographer_core::crypto::HashAlgorithm::parse(cfg.global.hash_algorithm_name());
-    let signer = if video_cfg.stego.lsb_signature.is_some()
-        || video_cfg
-            .stego
-            .pipeline
-            .iter()
-            .any(|s| s == "spread_spectrum" || s == "dct")
-    {
+    let signer = if signing_kernel.is_some() {
         let s = if let Some(ref key_path) = signing_key {
-            // Load persistent signing key from file
-            let key_hex = std::fs::read_to_string(key_path)?;
-            let key_bytes = hex_decode(key_hex.trim())?;
-            if key_bytes.len() != 32 {
-                anyhow::bail!(
-                    "Signing key must be 32 bytes (64 hex chars), got {}",
-                    key_bytes.len()
-                );
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&key_bytes);
-            let sk = ed25519_dalek::SigningKey::from_bytes(&arr);
+            let key = crate::key_policy::load_signing_key(std::path::Path::new(key_path))?;
             log::info!("Using persistent signing key from: {}", key_path);
-            steganographer_core::crypto::Signer::with_hash_algorithm(sk, hash_algo)
+            steganographer_core::crypto::Signer::with_hash_algorithm(key, hash_algo)
         } else {
             // Generate ephemeral keypair
             let s = steganographer_core::crypto::Signer::with_hash_algorithm(
@@ -72,21 +118,24 @@ pub fn run(
 
     if let Some(ref s) = signer {
         let pub_key = s.verifying_key();
-        let pub_hex = hex_encode(&pub_key.to_bytes());
+        let pub_hex = encode_hex(&pub_key.to_bytes());
         // Print to stderr unconditionally so --quiet doesn't hide the public key.
         // The stream is unverifiable without it.
-        eprintln!("Generated signing key. Public key (hex): {}", pub_hex);
+        eprintln!("Signing public key (hex): {}", pub_hex);
     }
 
     // Run the pipeline with a composite stego that applies all modules
     let filter_config = steganographer_gst::video_filter::VideoFilterConfig {
         source_pipeline: source_str,
         sink_pipeline: sink_str,
+        signing_kernel,
     };
 
     let composite = Box::new(CompositeVideoStego {
         modules: stego_modules,
     });
+
+    steganographer_gst::init()?;
 
     steganographer_gst::video_filter::run_video_filter(
         &filter_config,
@@ -94,7 +143,62 @@ pub fn run(
         signer.as_ref(),
         max_frames,
     )?;
+    if let Some((path, file)) = output_file {
+        crate::media_io::publish_output(file, path, false)?;
+    }
 
+    Ok(())
+}
+
+fn validate_live_pipeline(
+    pipeline: Option<&steganographer_core::config::VideoPipelineConfig>,
+) -> anyhow::Result<()> {
+    let Some(pipeline) = pipeline else {
+        return Ok(());
+    };
+    for dimension in [
+        pipeline.width_or_default(),
+        pipeline.height_or_default(),
+        pipeline.framerate_or_default(),
+    ] {
+        anyhow::ensure!(
+            dimension > 0 && dimension <= i32::MAX as u32,
+            "video dimensions/framerate must be positive GStreamer integers"
+        );
+    }
+    anyhow::ensure!(
+        pipeline.opacity_or_default() == 1.0,
+        "native video opacity is unsupported; use 1.0 (dashboard preview opacity is display-only)"
+    );
+    if let Some(payload) = &pipeline.payload {
+        anyhow::ensure!(
+            payload
+                .r#type
+                .as_deref()
+                .is_none_or(|kind| kind == "signature"),
+            "native video requires a signature payload"
+        );
+        anyhow::ensure!(
+            payload.size.is_none_or(|size| size as usize
+                == steganographer_core::crypto::SignaturePayload::SERIALIZED_SIZE),
+            "native video requires the fixed 109-byte signature payload"
+        );
+        anyhow::ensure!(
+            !payload.encrypt_enabled(),
+            "live payload encryption is unsupported; use offline encode"
+        );
+        anyhow::ensure!(
+            payload
+                .error_correction
+                .as_deref()
+                .is_none_or(|algorithm| algorithm.eq_ignore_ascii_case("none")),
+            "live error correction is unsupported; use offline encode"
+        );
+        anyhow::ensure!(
+            payload.spread_count() == 1,
+            "live signature spreading is unsupported; use offline RGB LSB encode"
+        );
+    }
     Ok(())
 }
 
@@ -129,30 +233,70 @@ impl steganographer_core::video::VideoStegoModule for CompositeVideoStego {
     }
 }
 
-fn build_source_pipeline(endpoint: &steganographer_core::config::EndpointConfig) -> String {
-    match endpoint.backend.as_deref() {
-        Some("v4l2") => {
-            let device = endpoint.device.as_deref().unwrap_or("/dev/video0");
-            format!(
-                "v4l2src device={} ! videoconvert ! video/x-raw,format=RGB",
-                device
-            )
+fn build_source_pipeline(
+    endpoint: &steganographer_core::config::EndpointConfig,
+    pipeline: Option<&steganographer_core::config::VideoPipelineConfig>,
+) -> anyhow::Result<String> {
+    let source = match endpoint.r#type.as_str() {
+        "test" => "videotestsrc".to_string(),
+        "file" => {
+            let path = endpoint.path.as_deref().filter(|path| !path.is_empty()).context("video file input requires path")?;
+            format!("filesrc location={} ! decodebin", steganographer_gst::quote_location(path)?)
         }
-        Some("avfoundation") => "avfvideosrc ! videoconvert ! video/x-raw,format=RGB".to_string(),
-        _ => {
-            // Default: test source
-            "videotestsrc ! videoconvert ! video/x-raw,format=RGB,width=640,height=480".to_string()
+        "network" => {
+            let uri = endpoint.path.as_deref().filter(|uri| !uri.is_empty()).context("video network input requires a URI in path")?;
+            format!("uridecodebin uri={}", steganographer_gst::quote_location(uri)?)
         }
-    }
+        "device" => match endpoint.backend.as_deref() {
+            Some("v4l2") => format!("v4l2src device={}", steganographer_gst::quote_location(endpoint.device.as_deref().unwrap_or("/dev/video0"))?),
+            Some("avfoundation") => match endpoint.device.as_deref() {
+                Some(device) => {
+                    let index: i32 = device.parse().context("avfoundation device must be a numeric device index")?;
+                    anyhow::ensure!(index >= -1, "avfoundation device index must be -1 or greater");
+                    format!("avfvideosrc device-index={index}")
+                }
+                None => "avfvideosrc".to_string(),
+            },
+            _ => anyhow::bail!("video device input requires backend v4l2 or avfoundation; use type='test' for synthetic video"),
+        },
+        _ => anyhow::bail!("unsupported video input type"),
+    };
+    let width = pipeline.map_or(640, |config| config.width_or_default());
+    let height = pipeline.map_or(480, |config| config.height_or_default());
+    let framerate = pipeline.map_or(30, |config| config.framerate_or_default());
+    Ok(format!("{source} ! videoconvert ! videoscale ! video/x-raw,format=RGB,width={width},height={height},framerate={framerate}/1"))
 }
 
-fn build_sink_pipeline(endpoint: &steganographer_core::config::EndpointConfig) -> String {
-    match endpoint.backend.as_deref() {
-        Some("v4l2loopback") => {
-            let device = endpoint.device.as_deref().unwrap_or("/dev/video42");
-            format!("videoconvert ! v4l2sink device={}", device)
+fn build_sink_pipeline(
+    endpoint: &steganographer_core::config::EndpointConfig,
+    file_path: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    match endpoint.r#type.as_str() {
+        "test" => Ok("fakesink sync=false".to_string()),
+        "file" => {
+            let path = file_path
+                .context("file output requires an atomic temporary file")?
+                .to_str()
+                .context("non-UTF-8 temporary path")?;
+            Ok(format!(
+                "matroskamux ! filesink location={}",
+                steganographer_gst::quote_location(path)?
+            ))
         }
-        _ => "videoconvert ! autovideosink".to_string(),
+        "device" => match endpoint.backend.as_deref() {
+            Some("v4l2loopback") => Ok(format!(
+                "v4l2sink device={}",
+                steganographer_gst::quote_location(
+                    endpoint.device.as_deref().unwrap_or("/dev/video42")
+                )?
+            )),
+            None if endpoint.device.is_none() => Ok("autovideosink".to_string()),
+            _ => anyhow::bail!(
+                "unsupported video output backend/device; use an explicit --sink pipeline"
+            ),
+        },
+        "network" => anyhow::bail!("network output requires an explicit lossless --sink pipeline"),
+        _ => anyhow::bail!("unsupported video output type"),
     }
 }
 
@@ -172,17 +316,6 @@ fn build_video_stego_chain(
                 let lsb = steganographer_core::lsb_video::LsbVideo::try_new(lsb_cfg.bits)?;
                 modules.push(Box::new(lsb));
                 log::info!("Added LSB video module ({} bits)", lsb_cfg.bits);
-            }
-            "spread_spectrum" => {
-                let lsb_cfg = stego_cfg.lsb_signature.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Pipeline includes 'spread_spectrum' but no [lsb_signature] config for key"
-                    )
-                })?;
-                let key = lsb_cfg.key_bytes()?;
-                let ss = steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key(key);
-                modules.push(Box::new(ss));
-                log::info!("Added spread-spectrum video module");
             }
             "dct" => {
                 let dct = steganographer_core::dct_video::DctVideo::default();
@@ -208,50 +341,25 @@ fn build_video_stego_chain(
                 log::info!("Added text overlay module");
             }
             "info_bar" => {
-                let label = stego_cfg
-                    .overlay
+                let config = stego_cfg
+                    .info_bar
                     .as_ref()
-                    .and_then(|o| o.text.clone())
-                    .unwrap_or_else(|| "STEGANOGRAPHER".to_string());
-                let bar = steganographer_core::info_bar::InfoBar::new(label);
+                    .context("info_bar requires [video.stego.info_bar]")?;
+                anyhow::ensure!(!config.show_barcode() && !config.show_qr(), "visible-only info_bar requires show_barcode=false and show_qr=false; cryptographic renderers need a supplied payload");
+                let bar = steganographer_core::info_bar::InfoBar::new(
+                    config.label_or_default().to_string(),
+                )
+                .with_barcode(false)
+                .with_qr(false)
+                .with_timestamp(config.show_timestamp());
                 modules.push(Box::new(bar));
-                log::info!("Added info bar module (timestamp, barcode, QR)");
+                log::info!("Added visible info bar module");
             }
             other => {
-                log::warn!("Unknown stego pipeline step: '{}', skipping", other);
+                anyhow::bail!("Unknown stego pipeline step: '{}'", other);
             }
         }
     }
 
-    // Always add the info bar at the end (exoteric overlay)
-    // unless it was already explicitly added in the pipeline config
-    if !stego_cfg.pipeline.iter().any(|s| s == "info_bar") {
-        let label = stego_cfg
-            .overlay
-            .as_ref()
-            .and_then(|o| o.text.clone())
-            .unwrap_or_else(|| "STEGANOGRAPHER".to_string());
-        let bar = steganographer_core::info_bar::InfoBar::new(label);
-        modules.push(Box::new(bar));
-        log::info!("Auto-added info bar module (exoteric overlay)");
-    }
-
     Ok(modules)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        anyhow::bail!("Hex string must have even length");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| anyhow::anyhow!("Invalid hex at position {}: {}", i, e))
-        })
-        .collect()
 }

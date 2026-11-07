@@ -1,7 +1,7 @@
 #![no_main]
 
-use steganographer_core::crypto::SignaturePayload;
 use libfuzzer_sys::fuzz_target;
+use steganographer_core::crypto::SignaturePayload;
 
 // Fuzz SignaturePayload::from_bytes: must never panic on arbitrary 109-byte input.
 fuzz_target!(|data: &[u8]| {

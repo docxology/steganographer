@@ -1,9 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use steganographer_core::carrier::{
-    KeyedInterleavedSpatialLsb, KeyedSpatialLsb, SpatialLsb,
-};
+use steganographer_core::carrier::{KeyedInterleavedSpatialLsb, KeyedSpatialLsb, SpatialLsb};
 use steganographer_core::packet::LOCATOR_SIZE;
 use steganographer_core::{CarrierExtractor, DecodeLimits, EmbeddingConfig};
 
@@ -23,12 +21,11 @@ fuzz_target!(|data: &[u8]| {
         ..DecodeLimits::default()
     };
 
-    // A key derived from the fuzz input exercises the keyed schedules; the
-    // all-zero key (empty input) is a valid key too.
+    // Independent control bytes let immutable keyed carriers reach successful
+    // extraction instead of requiring a key/carrier fixed point.
+    let (key_bytes, carrier) = data.split_at(data.len().min(32));
     let mut key = [0u8; 32];
-    for (index, byte) in data.iter().cycle().take(32).enumerate() {
-        key[index] = *byte;
-    }
+    key[..key_bytes.len()].copy_from_slice(key_bytes);
 
     // Arbitrary carrier bytes at every supported bits-per-unit strength:
     // no spatial-LSB extractor may ever panic. This pins the regression where
@@ -39,8 +36,8 @@ fuzz_target!(|data: &[u8]| {
             Ok(config) => config,
             Err(_) => continue,
         };
-        let _ = SpatialLsb.extract_packet(data, &config, &limits);
-        let _ = KeyedSpatialLsb::new(key).extract_packet(data, &config, &limits);
-        let _ = KeyedInterleavedSpatialLsb::new(key).extract_packet(data, &config, &limits);
+        let _ = SpatialLsb.extract_packet(carrier, &config, &limits);
+        let _ = KeyedSpatialLsb::new(key).extract_packet(carrier, &config, &limits);
+        let _ = KeyedInterleavedSpatialLsb::new(key).extract_packet(carrier, &config, &limits);
     }
 });

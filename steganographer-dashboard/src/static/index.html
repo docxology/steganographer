@@ -20,20 +20,15 @@
                 <span class="icon">🔏</span>
                 Steganographer
             </h1>
-            <span class="version-badge" id="version-badge">v0.1.0</span>
+            <span class="version-badge" id="version-badge">version pending</span>
         </div>
         <div class="header-center">
             <div class="backend-selector" id="backend-selector">
                 <label for="signing-backend">Signing:</label>
-                <select id="signing-backend">
+                <select id="signing-backend" disabled aria-label="Actual signing algorithm">
                     <option value="ed25519" selected>Ed25519</option>
-                    <option value="ethereum">Ethereum (secp256k1)</option>
                 </select>
             </div>
-            <button class="metamask-btn" id="metamask-btn" title="Connect MetaMask wallet for Ethereum signing">
-                <span class="metamask-icon">🦊</span>
-                <span class="metamask-label" id="metamask-label">Connect MetaMask</span>
-            </button>
             <div class="identity-display" id="identity-display">
                 <span class="identity-label">Identity:</span>
                 <code id="identity-value">connecting...</code>
@@ -46,6 +41,7 @@
             </button>
             <div class="connection-status" id="connection-status">
                 <span class="status-dot disconnected" id="status-dot"></span>
+                <span>Video:</span>
                 <span id="status-text">Disconnected</span>
             </div>
         </div>
@@ -82,12 +78,11 @@
                 <span class="pipeline-arrow">→</span>
                 <span class="pipeline-step">📦 LSB Embed</span>
                 <span class="pipeline-arrow">→</span>
-                <span class="pipeline-step">📊 QR Overlay</span>
-                <span class="help-icon">?<span class="help-tooltip"><strong>Encode Pipeline</strong><br>
-                        Each video frame is: (1) hashed with BLAKE3, (2) cryptographically signed with
-                        Ed25519 or secp256k1, (3) the signature payload is embedded into the least
-                        significant bits of the pixel data, and (4) a QR data matrix overlay is
-                        rendered on top for visual verification.</span></span>
+                <span class="pipeline-step">🖼 Lossless PNG</span>
+                <span class="help-icon">?<span class="help-tooltip"><strong>Signed snapshots</strong><br>
+                        The server signs the canonical LSB carrier with Ed25519 and returns an exact PNG.
+                        The canvas shows that returned carrier, not raw capture. Record saves sampled PNGs
+                        plus extraction metadata; it is not continuous video.</span></span>
             </div>
             <div class="canvas-container" id="encode-canvas-container">
                 <video id="webcam-video" autoplay muted></video>
@@ -109,17 +104,12 @@
                 <select id="camera-select" class="camera-select" aria-label="Select camera device">
                     <option value="">Default Camera</option>
                 </select>
-            </div>
-            <!-- WebRTC H.264 media preview (enhancement view; shown only
-                 when the server publishes the RTP video track) -->
-            <div class="media-preview-container hidden" id="media-preview-container">
-                <span class="media-preview-label">📡 Media preview (H.264 RTP)</span>
-                <video id="media-preview" autoplay playsinline muted class="media-preview"></video>
+                <button class="start-camera-btn" id="stop-camera-btn" disabled>■ Stop Camera</button>
             </div>
             <div class="panel-stats" id="encode-stats">
                 <div class="stat" id="stat-frames"
-                    title="Total number of video frames cryptographically signed since session start">
-                    <span class="stat-label">Signed</span>
+                    title="Server aggregate processed media counter; may include audio chunks">
+                    <span class="stat-label">Processed (all media)</span>
                     <span class="stat-value" id="val-frames">0</span>
                 </div>
                 <div class="stat" id="stat-fps"
@@ -128,13 +118,13 @@
                     <span class="stat-value" id="val-fps">0.0</span>
                 </div>
                 <div class="stat" id="stat-sign-latency"
-                    title="Time in microseconds to compute BLAKE3 hash + Ed25519/Ethereum signature per frame">
+                    title="Server average BLAKE3 plus Ed25519 signing latency across media">
                     <span class="stat-label">Sign μs</span>
                     <span class="stat-value" id="val-sign-latency">0.0</span>
                 </div>
                 <div class="stat stat-record" id="stat-record-video">
                     <button class="record-btn" id="record-video-btn"
-                        title="Record steganographically signed video to a file. Each frame contains embedded integrity data.">
+                        title="Save exact signed PNG snapshots and extraction manifest in a stored ZIP (64 MiB / 300 frames maximum). Not continuous video.">
                         <span class="record-dot"></span>
                         <span id="record-video-label">Record</span> <kbd class="kbd-hint">R</kbd>
                     </button>
@@ -171,7 +161,7 @@
                         The decode side: (1) extracts the LSB-embedded payload from the received
                         frame, (2) deserializes the frame index, BLAKE3 hash, and cryptographic
                         signature, then (3) verifies the signature against the known public key.
-                        A green ✅ means the frame is authentic and untampered.</span></span>
+                        A green result is server-reported verification, not independent proof of the downloaded archive.</span></span>
             </div>
             <div class="verify-data-container" id="verify-data-container">
                 <!-- Waiting state -->
@@ -217,17 +207,15 @@
                 <!-- ═══ LIVE CONFIG CONTROLS ═══ -->
                 <div class="config-section-header">⚙ Steganography Config</div>
                 <div class="config-controls">
-                    <!-- Overlay Opacity -->
+                    <!-- Preview opacity -->
                     <div class="config-row">
-                        <span class="config-label">Overlay Opacity
-                            <span class="help-icon">?<span class="help-tooltip">Controls how visible the QR watermark
-                                    overlay is on the video. 0% = invisible (data still embedded in LSB), 100% = fully
-                                    visible. The cryptographic signature is always embedded regardless of overlay
-                                    visibility.</span></span>
+                        <span class="config-label">Preview Opacity
+                            <span class="help-icon">?<span class="help-tooltip">Display-only opacity of the signed PNG preview.
+                                    Stored PNG bytes remain unchanged. This is not a watermark or signature setting.</span></span>
                         </span>
                         <div class="config-control">
                             <input type="range" class="config-slider" id="cfg-opacity" min="0" max="100" value="100"
-                                step="5" aria-label="Overlay Opacity">
+                                step="5" aria-label="Preview Opacity">
                             <span class="config-slider-value" id="cfg-opacity-val">1.0</span>
                         </div>
                     </div>
@@ -255,15 +243,12 @@
                     <!-- Signing Backend -->
                     <div class="config-row">
                         <span class="config-label">Sign Backend
-                            <span class="help-icon">?<span class="help-tooltip"><strong>Ed25519</strong> = fast,
-                                    lightweight digital signatures (128-bit security). Recommended for most use
-                                    cases.<br><br><strong>Ethereum</strong> = secp256k1 signatures compatible with
-                                    blockchain wallets like MetaMask for on-chain identity verification.</span></span>
+                            <span class="help-icon">?<span class="help-tooltip">This dashboard signs with Ed25519.
+                                    Wallet signing and other algorithms are not supported here.</span></span>
                         </span>
                         <div class="config-control">
-                            <select class="config-select" id="cfg-sign-backend" aria-label="Signing Backend">
+                            <select class="config-select" id="cfg-sign-backend" aria-label="Signing Backend" disabled>
                                 <option value="ed25519" selected>Ed25519</option>
-                                <option value="ethereum">Ethereum</option>
                             </select>
                         </div>
                     </div>
@@ -285,15 +270,13 @@
                     </div>
                     <!-- Overlay Text -->
                     <div class="config-row">
-                        <span class="config-label">Overlay Text
-                            <span class="help-icon">?<span class="help-tooltip">Custom text displayed above the QR data
-                                    matrix overlay. Labels the feed with classification level, organization name, or
-                                    session identifier. This text is burned into the video as a visible watermark.
-                                    Supports {timestamp}, {frame_index} placeholders.</span></span>
+                        <span class="config-label">Overlay Text (unavailable)
+                            <span class="help-icon">?<span class="help-tooltip">Visible text overlays are not applied to signed
+                                    dashboard artifacts. This saved setting is inactive.</span></span>
                         </span>
                         <div class="config-control">
-                            <input type="text" class="config-input" id="cfg-overlay-text" value="CONFIDENTIAL"
-                                placeholder="Overlay text...">
+                            <input type="text" class="config-input" id="cfg-overlay-text" disabled value="CONFIDENTIAL"
+                                placeholder="Unavailable for signed artifacts">
                         </div>
                     </div>
                     <!-- Sign Interval -->
@@ -311,14 +294,12 @@
                     </div>
                     <!-- QR Scale -->
                     <div class="config-row">
-                        <span class="config-label">QR Scale
-                            <span class="help-icon">?<span class="help-tooltip">Size of the QR data matrix overlay.
-                                    5–15% = discreet corner badge. 80–100% = full-frame coverage for maximum
-                                    machine-readability. The QR encodes cryptographic hash, frame index, timestamp, and
-                                    signature metadata.</span></span>
+                        <span class="config-label">QR Scale (unavailable)
+                            <span class="help-icon">?<span class="help-tooltip">The dashboard does not add QR metadata badges
+                                    to signed carriers. A visual badge would not authenticate an artifact.</span></span>
                         </span>
                         <div class="config-control">
-                            <input type="range" class="config-slider" id="cfg-qr-scale" min="5" max="100" value="10"
+                            <input type="range" class="config-slider" id="cfg-qr-scale" disabled min="5" max="100" value="10"
                                 step="5" aria-label="QR Overlay Scale">
                             <span class="config-slider-value" id="cfg-qr-scale-val">10%</span>
                         </div>
@@ -396,11 +377,11 @@
             </div>
             <div class="panel-stats" id="decode-stats">
                 <div class="stat stat-ok" id="stat-verified-ok">
-                    <span class="stat-label">✅ Verified</span>
+                    <span class="stat-label">✅ Verified (all media)</span>
                     <span class="stat-value" id="val-verified-ok">0</span>
                 </div>
                 <div class="stat stat-fail" id="stat-verified-fail">
-                    <span class="stat-label">❌ Failed</span>
+                    <span class="stat-label">❌ Failed (all media)</span>
                     <span class="stat-value" id="val-verified-fail">0</span>
                 </div>
                 <div class="stat" id="stat-verify-latency">
@@ -430,6 +411,11 @@
                     </button>
                 </div>
             </div>
+            <div class="camera-selector-row">
+                <button class="start-camera-btn" id="stop-mic-btn" disabled>■ Stop Microphone</button>
+                <label for="signed-audio-player">Latest signed chunk (sampled, not continuous):</label>
+                <audio id="signed-audio-player" controls preload="none"></audio>
+            </div>
             <div class="panel-stats" id="audio-encode-stats">
                 <div class="stat" id="stat-audio-chunks"
                     title="Total number of PCM audio chunks cryptographically signed since microphone started">
@@ -437,7 +423,7 @@
                     <span class="stat-value" id="val-audio-chunks">0</span>
                 </div>
                 <div class="stat" id="stat-audio-rate"
-                    title="Audio samples processed per second (e.g., 44100 = CD quality)">
+                    title="Signed audio samples per elapsed second; chunks are sampled, not a continuous capture">
                     <span class="stat-label">Sample/s</span>
                     <span class="stat-value" id="val-audio-rate">0</span>
                 </div>
@@ -448,7 +434,7 @@
                 </div>
                 <div class="stat stat-record" id="stat-record-audio">
                     <button class="record-btn" id="record-audio-btn"
-                        title="Record steganographically signed audio to a WAV file. Each chunk contains embedded integrity data via LSB.">
+                        title="Save exact signed WAV chunks and extraction manifest in a stored ZIP (64 MiB / 300 chunks maximum). Gaps are not filled.">
                         <span class="record-dot"></span>
                         <span id="record-audio-label">Record</span>
                     </button>
@@ -515,12 +501,12 @@
                 </div>
                 <div class="config-controls">
                     <div class="stego-explainer">
-                        <strong>Encode:</strong> PCM audio samples → BLAKE3 hash (32 B) → Ed25519 signature (64 B) →
-                        109-byte payload embedded in LSB of audio samples using keyed PRNG index selection.<br>
-                        <strong>Decode:</strong> Extract LSB payload from audio → deserialize frame_index + hash +
-                        signature → verify signature matches the extracted hash.<br>
-                        <strong>Round-trip:</strong> If the decoded hash + signature match, the audio chunk has not been
-                        tampered with since signing.
+                        <strong>Encode:</strong> Canonical PCM carrier → BLAKE3 hash → Ed25519 signature →
+                        109-byte payload embedded using keyed index selection. Only sampled chunks are signed.<br>
+                        <strong>Verify:</strong> Extract the payload, recompute the canonical carrier hash and verify
+                        against the actual public key. Status here is server-reported, not independent archive verification.<br>
+                        <strong>Record:</strong> Exact returned WAV chunks plus public key, extraction key, frame index,
+                        bit depth and timing metadata in a stored ZIP. Capture gaps remain gaps.
                     </div>
                 </div>
                 <!-- ═══ AUDIO CONFIG CONTROLS ═══ -->
@@ -544,16 +530,13 @@
                     <!-- Audio Sign Backend -->
                     <div class="config-row">
                         <span class="config-label">Sign Backend
-                            <span class="help-icon">?<span class="help-tooltip"><strong>Ed25519</strong> = fast elliptic
-                                    curve signatures (128-bit security).<br><br><strong>Ethereum</strong> = secp256k1
-                                    signatures compatible with blockchain wallets (MetaMask) for on-chain identity
-                                    verification.</span></span>
+                            <span class="help-icon">?<span class="help-tooltip">This dashboard signs audio with Ed25519 only.
+                                    Ethereum and wallet signing are unavailable.</span></span>
                         </span>
                         <div class="config-control">
                             <select class="config-select" id="audio-cfg-sign-backend"
-                                aria-label="Audio Signing Backend">
+                                aria-label="Audio Signing Backend" disabled>
                                 <option value="ed25519" selected>Ed25519</option>
-                                <option value="ethereum">Ethereum</option>
                             </select>
                         </div>
                     </div>
@@ -623,7 +606,7 @@
                         <span class="stego-info-value" id="audio-info-hash-algo">BLAKE3 (256-bit)</span>
                     </div>
                     <div class="stego-info-row"
-                        title="Digital signature algorithm used to sign the hash, proving authenticity. Ed25519 = 64-byte signature, Ethereum = 65-byte secp256k1 signature">
+                        title="Actual dashboard signing algorithm: Ed25519 with 64-byte signatures">
                         <span class="stego-info-label">Signature</span>
                         <span class="stego-info-value" id="audio-info-sig-algo">Ed25519 (512-bit)</span>
                     </div>
@@ -665,6 +648,7 @@
         </div>
     </main>
 
+    <section id="ots-container" aria-label="Current signed-media OpenTimestamps"></section>
     <footer id="dashboard-footer">
         <div class="footer-section" id="footer-backend">
             <span class="footer-label">Backend:</span>
@@ -677,10 +661,6 @@
         <div class="footer-section" id="footer-resolution">
             <span class="footer-label">Resolution:</span>
             <span class="footer-value" id="footer-resolution-value">—</span>
-        </div>
-        <div class="footer-section" id="footer-media-fps" title="WebRTC H.264 media preview frame rate">
-            <span class="footer-label">Media fps:</span>
-            <span class="footer-value" id="footer-media-fps-value">—</span>
         </div>
         <div class="footer-section" id="footer-payload">
             <span class="footer-label">Payload:</span>
@@ -779,7 +759,7 @@
             integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2"
             crossorigin="anonymous"></script>
     <script>
-        mermaid.initialize({
+        if (typeof mermaid !== 'undefined') mermaid.initialize({
             startOnLoad: false,
             theme: 'dark',
             themeVariables: {
@@ -805,6 +785,7 @@
     <script src="/app.js"></script>
     <script src="/audio_tab.js"></script>
     <script src="/docs_tab.js"></script>
+    <script src="/ots.js"></script>
 </body>
 
 </html>

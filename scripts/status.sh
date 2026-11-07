@@ -14,7 +14,11 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+case "${1:-}" in
+    "") [ "$#" -eq 0 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; } ;;
+    --check) [ "$#" -eq 1 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; }; CHECK=1 ;;
+    *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 2 ;;
+esac
 
 fail=0
 
@@ -23,31 +27,44 @@ ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 printf 'workspace version: %s  (source: Cargo.toml)\n' "$ver"
 
 # CLI subcommand count (source of truth: enum Commands in the CLI binary)
-subs=$(awk '/^enum Commands/,/^}/' steganographer-cli/src/main.rs \
+subs=$(awk '/^pub[(]crate[)] enum Commands/,/^}/' steganographer-cli/src/cli.rs \
         | grep -cE '^    [A-Z][a-zA-Z]+[[:space:]]*\{' || true)
-printf 'cli subcommands: %s  (source: steganographer-cli/src/main.rs enum Commands)\n' "$subs"
+printf 'cli subcommands: %s  (source: steganographer-cli/src/cli.rs enum Commands)\n' "$subs"
 
 # Docs count
-docn=$(ls docs/*.md | wc -l | tr -d ' ')
-plan=$(ls docs/plans/steganography-platform/*.md | wc -l | tr -d ' ')
-printf 'docs: %s files in docs/ + %s in plans/steganography-platform/  (source: ls)\n' "$docn" "$plan"
+shopt -s nullglob
+docs=(docs/*.md)
+plans=(docs/plans/steganography-platform/*.md)
+printf 'docs: %s files in docs/ + %s in plans/steganography-platform/  (source: shell globs)\n' "${#docs[@]}" "${#plans[@]}"
 
 # Git state
-up=$(git status -sb | head -1 | sed 's/^## //')
+if [[ -e .git ]]; then
+    up=$(git status -sb | head -1 | sed 's/^## //')
+else
+    up='source archive (no Git metadata)'
+fi
 printf 'git: %s\n' "$up"
 
 # Test count (slow; needs cargo). On --check this is the provenance gate.
-# Counting method matches CI's test-count job: sum the "test result: ok. N passed"
-# lines from every test binary and doc-test target.
-printf '\nrunning cargo test --workspace (slow on cold caches) ...\n'
-tcount=$(cargo test --workspace 2>/dev/null | awk '/^test result:/ { sum += $4 } END { print sum+0 }')
-printf 'tests (cargo test --workspace, CI method): %s\n' "$tcount"
+# Sum the "test result: ok. N passed" lines from every test binary and
+# doc-test target; retain complete diagnostics if any target fails.
+printf '\nrunning cargo test --workspace --locked (slow on cold caches) ...\n'
+if ! test_output=$(cargo test --workspace --locked); then
+    printf '%s\n' "$test_output" >&2
+    exit 1
+fi
+tcount=$(printf '%s\n' "$test_output" | awk '/^test result:/ { sum += $4 } END { print sum+0 }')
+printf 'tests (cargo test --workspace --locked, libtest totals): %s\n' "$tcount"
+if [ "$tcount" = "0" ]; then
+    printf 'ERROR: cargo reported no passing workspace tests.\n' >&2
+    exit 1
+fi
 
 # Canonical count home: root AGENTS.md Tests line
 canon=$(grep -m1 '^\- \*\*Tests\*\*' AGENTS.md | grep -oE '= \*\*[0-9]+ passing' | grep -oE '[0-9]+' || echo 0)
 printf 'canonical tests line (AGENTS.md): %s\n' "$canon"
 
-if [ "$CHECK" = "1" ] && [ "$tcount" != "0" ] && [ "$tcount" != "$canon" ]; then
+if [ "$CHECK" = "1" ] && [ "$tcount" != "$canon" ]; then
     printf 'MISMATCH: actual %s != canonical %s — update the Tests line in AGENTS.md first, then defer elsewhere.\n' "$tcount" "$canon"
     fail=1
 fi

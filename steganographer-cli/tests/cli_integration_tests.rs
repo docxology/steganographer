@@ -9,13 +9,7 @@ use std::process::Command;
 
 /// Path to the built CLI binary.
 fn cli_binary() -> PathBuf {
-    // Cargo puts the binary at target/debug/steganographer (or target/release/)
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent().unwrap();
-    workspace_root
-        .join("target")
-        .join("debug")
-        .join("steganographer")
+    PathBuf::from(env!("CARGO_BIN_EXE_steganographer"))
 }
 
 /// Path to the workspace root (for finding config/example.toml).
@@ -37,21 +31,7 @@ fn config_path() -> String {
 
 /// Helper: run the CLI with given arguments, return (exit_code, stdout, stderr).
 fn run_cli(args: &[&str]) -> (i32, String, String) {
-    let bin = cli_binary();
-    if !bin.exists() {
-        // Try release binary
-        let release_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("target")
-            .join("release")
-            .join("steganographer");
-        if release_bin.exists() {
-            return run_cli_with_bin(&release_bin, args);
-        }
-        panic!("CLI binary not found at {:?} or {:?}", bin, release_bin);
-    }
-    run_cli_with_bin(&bin, args)
+    run_cli_with_bin(&cli_binary(), args)
 }
 
 fn run_cli_with_bin(bin: &PathBuf, args: &[&str]) -> (i32, String, String) {
@@ -418,8 +398,9 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
         "generic file decode failed: stdout={stdout}, stderr={stderr}"
     );
     assert_eq!(std::fs::read(&decoded).unwrap(), payload);
+    std::fs::write(&decoded, b"existing private output").unwrap();
 
-    let (code, _, stderr) = run_cli(&[
+    let (code, _, _) = run_cli(&[
         "--config",
         &config_path(),
         "decode",
@@ -428,8 +409,8 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
         "--output",
         decoded.to_str().unwrap(),
     ]);
-    assert_ne!(code, 0);
-    assert!(stderr.contains("--force"));
+    assert_eq!(code, 1);
+    assert_eq!(std::fs::read(&decoded).unwrap(), b"existing private output");
 
     #[cfg(unix)]
     {
@@ -452,7 +433,7 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
     {
         use steganographer_core::packet::{
             crc32c, AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind,
-            TransformDescriptor, FLAG_COMPRESSED, KERNEL_SPATIAL_LSB, PLACEMENT_SEQUENTIAL,
+            TransformDescriptor, KERNEL_SPATIAL_LSB, PLACEMENT_SEQUENTIAL,
         };
         use steganographer_core::{CarrierEmbedder, EmbeddingConfig, SpatialLsb};
 
@@ -478,7 +459,7 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
             });
         let envelope = transformed_packet.envelope.encode(&limits).unwrap();
         transformed_packet.locator = Locator::new(
-            FLAG_COMPRESSED,
+            0,
             envelope.len(),
             transformed_packet.body.len(),
             crc32c(&envelope),
@@ -509,10 +490,9 @@ fn test_generic_packet_file_roundtrip_and_safe_overwrite() {
             "--output",
             transformed_output.to_str().unwrap(),
         ]);
-        assert_ne!(code, 0);
-        assert!(
-            stderr.contains("not supported") || stderr.contains("unknown"),
-            "unknown critical transform must fail closed: {stderr}"
+        assert_eq!(
+            code, 1,
+            "unsupported critical transform must not decode: {stderr}"
         );
         assert!(!transformed_output.exists());
     }
@@ -1014,9 +994,8 @@ fn test_verify_unsigned_media() {
     ]);
 
     assert_eq!(
-        code, 0,
-        "verify on unsigned media should not crash: {}",
-        stdout
+        code, 2,
+        "unsigned media must not pass verification: {stdout}"
     );
     let result = parse_json(&stdout);
     assert_eq!(result["found"], false);
@@ -2072,8 +2051,8 @@ fn test_tampered_carrier_verify_exits_3() {
         "json",
     ]);
     assert_eq!(code, 3, "tampered carrier must exit 3: {stdout}{stderr}");
-    let result = parse_json(&stdout);
-    assert_eq!(result["status"], "invalid");
+    let report = parse_envelope(&stdout);
+    assert_eq!(report["errors"][0]["code"], "verification_failed");
 }
 
 #[test]
@@ -2158,13 +2137,15 @@ fn test_verify_revoked_list_reports_valid_revoked() {
         "--format",
         "json",
     ]);
-    assert_eq!(code, 0, "valid_revoked still completes: {stdout}{stderr}");
+    assert_eq!(
+        code, 3,
+        "revoked identities must fail verification: {stdout}{stderr}"
+    );
     let result = parse_json(&stdout);
     assert_eq!(result["status"], "valid_revoked");
-    assert!(
-        result["message"].as_str().unwrap().contains("REVOKED"),
-        "message must surface the revocation: {result}"
-    );
+    let envelope = parse_envelope(&stdout);
+    assert_eq!(envelope["status"], "error");
+    assert_eq!(envelope["errors"][0]["code"], "verification_failed");
 }
 
 #[test]
@@ -2173,7 +2154,7 @@ fn test_ots_offline_error_paths() {
     let input = tmp.path().join("input.bin");
     std::fs::write(&input, b"some bytes to stamp").unwrap();
 
-    // Unknown --method is a usage error (exit 2), not a silent Bitcoin stamp.
+    // Unknown methods are usage errors, not silent Bitcoin stamps.
     let (code, _, stderr) = run_cli(&[
         "--config",
         &config_path(),
@@ -2184,10 +2165,12 @@ fn test_ots_offline_error_paths() {
         "--method",
         "litecoin",
     ]);
-    assert_eq!(code, 1, "unknown ots method is a usage error (exit 1)");
-    assert!(stderr.contains("unknown OTS method"), "{stderr}");
+    assert_eq!(
+        code, 1,
+        "unsupported OTS methods must fail before submission: {stderr}"
+    );
 
-    // Missing proof file is a runtime error (exit 1).
+    // An explicitly missing proof is an I/O failure.
     let (code, _, stderr) = run_cli(&[
         "--config",
         &config_path(),
@@ -2198,24 +2181,7 @@ fn test_ots_offline_error_paths() {
         "--proof",
         tmp.path().join("missing.ots").to_str().unwrap(),
     ]);
-    assert_eq!(code, 6, "unexpected I/O is an internal error (exit 6)");
-    assert!(stderr.contains("Cannot read proof file"), "{stderr}");
-
-    // Omitted --proof defaults to <input>.ots (which does not exist here).
-    let default_proof = format!("{}.ots", input.to_str().unwrap());
-    let (code, _, stderr) = run_cli(&[
-        "--config",
-        &config_path(),
-        "ots",
-        "verify",
-        "--input",
-        input.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 6, "unexpected I/O is an internal error (exit 6)");
-    assert!(
-        stderr.contains(&default_proof),
-        "error must name the defaulted <input>.ots path: {stderr}"
-    );
+    assert_eq!(code, 6, "missing proof must not verify: {stderr}");
 }
 
 #[test]
@@ -2275,11 +2241,20 @@ fn test_verify_rejects_bad_stego_type_hash_algorithm_and_log_level() {
 }
 
 #[test]
-fn test_scan_missing_input_exits_2() {
-    // Nonexistent --input is a usage error (exit 2).
-    let (code, _, stderr) = run_cli(&["scan", "--input", "/nonexistent/path/xyz"]);
-    assert_eq!(code, 1, "missing scan input is a usage error (exit 1)");
-    assert!(stderr.contains("cannot access"), "{stderr}");
+fn test_scan_missing_input_is_usage_error() {
+    let (code, stdout, stderr) = run_cli(&[
+        "scan",
+        "--input",
+        "/nonexistent/path/xyz",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        code, 1,
+        "missing scan input is a usage error: {stdout}{stderr}"
+    );
+    let report = parse_envelope(&stdout);
+    assert_eq!(report["errors"][0]["code"], "usage_error");
 }
 
 #[test]
@@ -2452,12 +2427,10 @@ fn test_scan_truncated_without_findings_exits_5() {
     );
     let document = parse_envelope(&stdout);
     assert_eq!(document["status"], "partial");
-    let warnings = document["warnings"].as_array().unwrap();
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap_or("").contains("truncated")),
-        "truncation must be reported as a warning: {document}"
+    assert_eq!(document["result"]["files"][0]["truncated"], true);
+    assert_eq!(
+        document["result"]["incomplete_reasons"],
+        serde_json::json!(["max_bytes"])
     );
 }
 
@@ -2541,5 +2514,595 @@ fn test_derive_json_envelope_never_serializes_key_material() {
             !stdout.contains(key_hex.trim()),
             "{name} leaked into the JSON envelope"
         );
+    }
+}
+
+#[test]
+fn release_config_errors_are_fail_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let output = tmp.path().join("packet.rgb");
+    let config = tmp.path().join("config.toml");
+    create_test_rgb(input.to_str().unwrap());
+    for contents in [
+        "[global]\nhash_algorithm='md5'",
+        "[global]\n[limits]\nmax_body_len=0",
+        "invalid toml",
+    ] {
+        std::fs::write(&config, contents).unwrap();
+        let (code, stdout, stderr) = run_cli(&[
+            "--config",
+            config.to_str().unwrap(),
+            "encode",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--payload-text",
+            "must not write",
+            "--format",
+            "json",
+        ]);
+        assert_ne!(code, 0, "{stdout} {stderr}");
+        assert_ne!(code, 101, "{stderr}");
+        assert!(!output.exists());
+        assert_eq!(parse_envelope(&stdout)["status"], "error");
+    }
+    std::fs::remove_file(&config).unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "config",
+        "check",
+        "--format",
+        "json",
+    ]);
+    assert_ne!(code, 0, "{stdout} {stderr}");
+}
+
+#[test]
+fn release_configured_packet_limits_block_decode_and_extract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let carrier = tmp.path().join("packet.rgb");
+    let output = tmp.path().join("payload.bin");
+    let config = tmp.path().join("config.toml");
+    create_test_rgb(input.to_str().unwrap());
+    std::fs::write(&config, "[global]").unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "encode",
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        carrier.to_str().unwrap(),
+        "--payload-text",
+        "bounded payload",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    std::fs::write(
+        &config,
+        "[global]\n[limits]\nmax_original_len=1\nmax_body_len=1",
+    )
+    .unwrap();
+    for command in ["decode", "extract"] {
+        let (code, stdout, stderr) = run_cli(&[
+            "--config",
+            config.to_str().unwrap(),
+            command,
+            "-i",
+            carrier.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_ne!(code, 0, "{command}: {stdout} {stderr}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn release_unicode_hex_and_invalid_spread_never_panic_or_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let output = tmp.path().join("packet.rgb");
+    create_test_rgb(input.to_str().unwrap());
+    for spread in ["0", "9", "255", "256", "257"] {
+        let (code, stdout, stderr) = run_cli(&[
+            "encode",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--spread",
+            spread,
+            "--format",
+            "json",
+        ]);
+        assert_ne!(code, 0, "{spread}: {stdout} {stderr}");
+        assert_ne!(code, 101, "{stderr}");
+        assert!(!output.exists());
+        assert!(!tmp.path().join("packet_001.rgb").exists());
+    }
+    for flag in ["--embedding-key", "--encryption-key"] {
+        let (code, stdout, stderr) = run_cli(&[
+            "encode",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--payload-text",
+            "secret",
+            "--encrypt",
+            flag,
+            "€0",
+            "--format",
+            "json",
+        ]);
+        assert_ne!(code, 0, "{stdout} {stderr}");
+        assert_ne!(code, 101, "{stderr}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn release_scan_file_budget_is_partial_and_zero_budgets_reject() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "ordinary words").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "more ordinary words").unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "scan",
+        "-i",
+        tmp.path().to_str().unwrap(),
+        "--max-files",
+        "1",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 5, "{stdout} {stderr}");
+    let envelope = parse_envelope(&stdout);
+    assert_eq!(envelope["status"], "partial");
+    assert_eq!(envelope["result"]["incomplete"], true);
+    for flag in ["--max-files", "--max-bytes"] {
+        let (code, stdout, stderr) = run_cli(&[
+            "scan",
+            "-i",
+            tmp.path().to_str().unwrap(),
+            flag,
+            "0",
+            "--format",
+            "json",
+        ]);
+        assert_ne!(code, 0, "{stdout} {stderr}");
+        assert_eq!(parse_envelope(&stdout)["status"], "error");
+    }
+}
+
+#[test]
+fn release_scan_container_inventory_is_not_detection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ordinary.pdf");
+    std::fs::write(
+        &path,
+        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) =
+        run_cli(&["scan", "-i", path.to_str().unwrap(), "--format", "json"]);
+    assert_ne!(code, 4, "{stdout} {stderr}");
+    let result = parse_json(&stdout);
+    assert_eq!(result["summary"]["findings"], 0);
+    assert_eq!(result["files"][0]["container_detected"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn release_keygen_refuses_symlinks_and_preserves_existing_secret() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("signer");
+    let secret = tmp.path().join("signer.key");
+    let sentinel = tmp.path().join("sentinel");
+    std::fs::write(&sentinel, b"do not change").unwrap();
+    symlink(&sentinel, &secret).unwrap();
+    let (code, stdout, stderr) =
+        run_cli(&["keygen", "-o", base.to_str().unwrap(), "--format", "json"]);
+    assert_ne!(code, 0, "{stdout} {stderr}");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"do not change");
+    std::fs::remove_file(&secret).unwrap();
+    let (code, stdout, stderr) =
+        run_cli(&["keygen", "-o", base.to_str().unwrap(), "--format", "json"]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    assert_eq!(
+        std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let original = std::fs::read(&secret).unwrap();
+    let (code, stdout, stderr) =
+        run_cli(&["keygen", "-o", base.to_str().unwrap(), "--format", "json"]);
+    assert_ne!(code, 0, "{stdout} {stderr}");
+    assert_eq!(std::fs::read(&secret).unwrap(), original);
+}
+
+#[test]
+fn release_audio_extract_matches_decode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(&config, "[global]").unwrap();
+    let input = tmp.path().join("cover.wav");
+    let carrier = tmp.path().join("packet.wav");
+    let output = tmp.path().join("payload.bin");
+    create_test_wav(
+        &input,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 44100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+        44100,
+    );
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "encode",
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        carrier.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--payload-text",
+        "audio extraction",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "extract",
+        "-i",
+        carrier.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--stego-type",
+        "lsb_audio",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    assert_eq!(std::fs::read(&output).unwrap(), b"audio extraction");
+}
+
+#[test]
+fn release_wrong_aead_key_is_authentication_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let carrier = tmp.path().join("packet.rgb");
+    let output = tmp.path().join("payload.bin");
+    create_test_rgb(input.to_str().unwrap());
+    let key = "11".repeat(32);
+    let wrong_key = "22".repeat(32);
+    let (code, stdout, stderr) = run_cli(&[
+        "encode",
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        carrier.to_str().unwrap(),
+        "--payload-text",
+        "authenticated",
+        "--encryption-key",
+        &key,
+        "--encrypt",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    for command in ["decode", "extract"] {
+        let (code, stdout, stderr) = run_cli(&[
+            command,
+            "-i",
+            carrier.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--decryption-key",
+            &wrong_key,
+            "--format",
+            "json",
+        ]);
+        assert_eq!(code, 3, "{command}: {stdout} {stderr}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn release_generic_trusted_signer_pins_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let carrier = tmp.path().join("packet.rgb");
+    let output = tmp.path().join("payload.bin");
+    create_test_rgb(input.to_str().unwrap());
+    for name in ["alice", "bob"] {
+        let (code, stdout, stderr) = run_cli(&[
+            "keygen",
+            "-o",
+            tmp.path().join(name).to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(code, 0, "{stdout} {stderr}");
+    }
+    let alice = std::fs::read_to_string(tmp.path().join("alice.pub")).unwrap();
+    let bob = std::fs::read_to_string(tmp.path().join("bob.pub")).unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "encode",
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        carrier.to_str().unwrap(),
+        "--payload-text",
+        "from alice",
+        "--signing-key",
+        tmp.path().join("alice.key").to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    for command in ["decode", "extract"] {
+        let (code, stdout, stderr) = run_cli(&[
+            command,
+            "-i",
+            carrier.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--trusted-signer",
+            bob.trim(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(code, 3, "{command}: {stdout} {stderr}");
+        assert!(!output.exists());
+        let (code, stdout, stderr) = run_cli(&[
+            command,
+            "-i",
+            carrier.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--trusted-signer",
+            alice.trim(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(code, 0, "{command}: {stdout} {stderr}");
+        let result = parse_json(&stdout);
+        assert_eq!(result["signer_trusted"], true);
+        assert_eq!(result["signer_public_key"], alice.trim());
+        assert_eq!(std::fs::read(&output).unwrap(), b"from alice");
+        std::fs::remove_file(&output).unwrap();
+    }
+}
+
+#[test]
+fn release_legacy_spread_roundtrip_reads_actual_first_shard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    std::fs::write(&config, "[global]").unwrap();
+    let input = tmp.path().join("cover.rgb");
+    let carrier = tmp.path().join("spread.rgb");
+    create_test_rgb(input.to_str().unwrap());
+    let (code, stdout, stderr) =
+        run_cli(&["keygen", "-o", tmp.path().join("signer").to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "encode",
+        "-i",
+        input.to_str().unwrap(),
+        "-o",
+        carrier.to_str().unwrap(),
+        "--spread",
+        "2",
+        "--signing-key",
+        tmp.path().join("signer.key").to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    assert!(!carrier.exists(), "base file is not an encoded shard");
+    let public_key = std::fs::read_to_string(tmp.path().join("signer.pub")).unwrap();
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        config.to_str().unwrap(),
+        "verify",
+        "-i",
+        carrier.to_str().unwrap(),
+        "--spread",
+        "2",
+        "--public-key",
+        public_key.trim(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    assert_valid_verification(&stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn release_scan_unreadable_file_is_runtime_error_when_permissions_apply() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let input = tmp.path().join("unreadable.txt");
+    std::fs::write(&input, "ordinary content").unwrap();
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A privileged test runner can bypass mode bits; it cannot exercise this boundary.
+    if std::fs::File::open(&input).is_ok() {
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600)).unwrap();
+        return;
+    }
+    let (code, stdout, stderr) =
+        run_cli(&["scan", "-i", input.to_str().unwrap(), "--format", "json"]);
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(code, 6, "{stdout} {stderr}");
+    let envelope = parse_envelope(&stdout);
+    assert_eq!(envelope["status"], "error");
+    assert_eq!(envelope["result"]["summary"]["errors"], 1);
+    assert!(!envelope["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn release_legacy_encrypted_bit_strength_matrix_authenticates_auto_and_exact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("minimal.toml");
+    let input = tmp.path().join("cover.rgb");
+    let key_base = tmp.path().join("signer");
+    std::fs::write(&config, "[global]").unwrap();
+    create_test_rgb(input.to_str().unwrap());
+    let (code, stdout, stderr) = run_cli(&["keygen", "-o", key_base.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let signing_key = tmp.path().join("signer.key");
+    let public_key = std::fs::read_to_string(tmp.path().join("signer.pub")).unwrap();
+    let encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    for (bits, ecc) in [(1, false), (2, false), (3, false), (4, false), (2, true)] {
+        let bits_arg = bits.to_string();
+        let output = tmp
+            .path()
+            .join(format!("encrypted-bits-{bits}-ecc-{ecc}.rgb"));
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "encode",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--stego-type",
+            "lsb_video",
+            "--bits",
+            &bits_arg,
+            "--signing-key",
+            signing_key.to_str().unwrap(),
+            "--encrypt",
+            "--encryption-key",
+            encryption_key,
+            "--format",
+            "json",
+        ];
+        if ecc {
+            args.extend_from_slice(&["--ecc", "--ecc-parity", "16"]);
+        }
+        let (code, stdout, stderr) = run_cli(&args);
+        assert_eq!(code, 0, "bits={bits}, ecc={ecc}: {stdout} {stderr}");
+        assert_eq!(parse_json(&stdout)["encrypted"], true);
+
+        for selected_bits in [bits_arg.as_str(), "auto"] {
+            let mut args = vec![
+                "--config",
+                config.to_str().unwrap(),
+                "verify",
+                "-i",
+                output.to_str().unwrap(),
+                "--stego-type",
+                "lsb_video",
+                "--bits",
+                selected_bits,
+                "--public-key",
+                public_key.trim(),
+                "--decrypt",
+                "--decryption-key",
+                encryption_key,
+                "--format",
+                "json",
+            ];
+            if ecc {
+                args.extend_from_slice(&["--ecc", "--ecc-parity", "16"]);
+            }
+            let (code, stdout, stderr) = run_cli(&args);
+            assert_eq!(
+                code, 0,
+                "bits={bits}, selected={selected_bits}, ecc={ecc}: {stdout} {stderr}"
+            );
+            let result = assert_valid_verification(&stdout);
+            assert_eq!(result["encrypted"], true);
+        }
+    }
+}
+
+#[test]
+fn release_encrypted_spread_spectrum_binds_full_transformed_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("minimal.toml");
+    let input = tmp.path().join("cover.rgb");
+    let key_base = tmp.path().join("signer");
+    std::fs::write(&config, "[global]").unwrap();
+    // Midrange samples avoid saturation in the differential-pair embedder.
+    std::fs::write(&input, vec![128u8; 1024 * 1024 * 3]).unwrap();
+    let (code, stdout, stderr) = run_cli(&["keygen", "-o", key_base.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout} {stderr}");
+    let signing_key = tmp.path().join("signer.key");
+    let public_key = std::fs::read_to_string(tmp.path().join("signer.pub")).unwrap();
+    let encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let embedding_key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    for ecc in [false, true] {
+        let output = tmp.path().join(format!("encrypted-spread-ecc-{ecc}.rgb"));
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "encode",
+            "-i",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--stego-type",
+            "spread_spectrum_video",
+            "--signing-key",
+            signing_key.to_str().unwrap(),
+            "--embedding-key",
+            embedding_key,
+            "--encrypt",
+            "--encryption-key",
+            encryption_key,
+            "--format",
+            "json",
+        ];
+        if ecc {
+            args.extend_from_slice(&["--ecc", "--ecc-parity", "16"]);
+        }
+        let (code, stdout, stderr) = run_cli(&args);
+        assert_eq!(code, 0, "ecc={ecc}: {stdout} {stderr}");
+        assert_eq!(parse_json(&stdout)["encrypted"], true);
+        let mut args = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "verify",
+            "-i",
+            output.to_str().unwrap(),
+            "--stego-type",
+            "spread_spectrum_video",
+            "--embedding-key",
+            embedding_key,
+            "--public-key",
+            public_key.trim(),
+            "--decrypt",
+            "--decryption-key",
+            encryption_key,
+            "--format",
+            "json",
+        ];
+        if ecc {
+            args.extend_from_slice(&["--ecc", "--ecc-parity", "16"]);
+        }
+        let (code, stdout, stderr) = run_cli(&args);
+        assert_eq!(code, 0, "ecc={ecc}: {stdout} {stderr}");
+        let result = assert_valid_verification(&stdout);
+        assert_eq!(result["encrypted"], true);
     }
 }

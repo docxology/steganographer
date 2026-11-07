@@ -13,6 +13,7 @@ Source modules for the core steganographer algorithms.
 | `video.rs` | 64 | `VideoFrame` struct, `VideoFormat` enum (Rgb8/Bgra8/Yuv420), `VideoStegoModule` trait |
 | `audio.rs` | 45 | `AudioBuffer` struct (i16 samples), `AudioStegoModule` trait |
 | `crypto.rs` | 600 | `Signer` (BLAKE3 hash → Ed25519 sign), `Verifier`, `SignaturePayload` serialization |
+| `revocation.rs` | 167 | Immutable compromise denial and normalized additional public-key registries, separate from signature mathematics |
 | `signer_backend.rs` | 1020 | `SignerBackend` trait, `Ed25519Backend`, `MlDsaBackend` (real FIPS 204 via RustCrypto `ml-dsa`), `HybridBackend`, `EthereumBackend` (feature-gated), plus public-key-only `Ed25519Verifier`, `MlDsaVerifier`, `HybridVerifier` |
 | `config.rs` | 856 | TOML config model with `serde`, hex key decode, overlay + info_bar config, `[limits]`/`[profiles]` tables + validation |
 | `metrics.rs` | 332 | `StegoMetrics` — atomic counters for frames/latency/verify, `to_json()`, `average_fps()`, `reset()` |
@@ -38,7 +39,7 @@ Verification-only (no private key): Ed25519Verifier · MlDsaVerifier · HybridVe
 ```
 
 ## Conventions
-- All modules include `#[cfg(test)] mod tests` with inline unit tests (381 total)
+- Inline unit tests exercise boundaries and failure behavior; see the canonical workspace totals in [`../../AGENTS.md`](../../AGENTS.md).
 - Error handling via `anyhow::Result`
 - Logging via `log::debug!()` / `log::warn!()`
 - No I/O operations — all methods operate on in-memory buffers

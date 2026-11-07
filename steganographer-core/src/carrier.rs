@@ -14,9 +14,9 @@ use crate::packet::{
 use crate::placement::{InterleavedSchedule, KeyedPermutation, PLACEMENT_INTERLEAVED};
 use thiserror::Error;
 
-/// Domain label for the keyed body-placement schedule. Distinct from the
-/// locator schedule so the same key never produces the same order twice.
-const PLACEMENT_LABEL: &[u8] = b"steganographer-placement-v1";
+/// Exact protocol-1 padded Feistel label (historically the first 16 bytes of
+/// "steganographer-placement-v1"). Do not change these bytes.
+const PLACEMENT_LABEL: &[u8] = b"steganographer-p";
 /// Recognition-tag context mixed with the locator key. A carrier with the
 /// wrong (or no) key produces a tag mismatch and reports "no packet".
 const RECOGNITION_CONTEXT: &[u8] = b"steganographer-recognition-v1";
@@ -560,15 +560,15 @@ fn validate_embed_descriptor(
     placement_params_must_be_empty: bool,
     keyed_locator_flag: Option<bool>,
 ) -> Result<(), CarrierError> {
-    let decoded = GenericPacket::decode(packet, &DecodeLimits::default())?;
-    let descriptor_ok = decoded.envelope.placement.algorithm == placement
-        && decoded.envelope.placement.version == 1
-        && (!placement_params_must_be_empty || decoded.envelope.placement.parameters.is_empty())
-        && decoded.envelope.kernel.algorithm == KERNEL_SPATIAL_LSB
-        && decoded.envelope.kernel.version == 1
-        && decoded.envelope.kernel.parameters == [bits];
+    let (locator, envelope) = crate::packet::validate_encoded_packet(packet)?;
+    let descriptor_ok = envelope.placement.algorithm == placement
+        && envelope.placement.version == 1
+        && (!placement_params_must_be_empty || envelope.placement.parameters.is_empty())
+        && envelope.kernel.algorithm == KERNEL_SPATIAL_LSB
+        && envelope.kernel.version == 1
+        && envelope.kernel.parameters == [bits];
     let flag_ok = match keyed_locator_flag {
-        Some(expected) => (decoded.locator.flags & FLAG_KEYED_LOCATOR != 0) == expected,
+        Some(expected) => (locator.flags & FLAG_KEYED_LOCATOR != 0) == expected,
         None => true,
     };
     if !descriptor_ok || !flag_ok {
@@ -1122,6 +1122,50 @@ fn extract_bytes(
 mod tests {
     use super::*;
     use crate::packet::{AlgorithmDescriptor, PayloadKind, FLAG_KEYED_LOCATOR};
+    #[test]
+    fn encoded_packet_embedding_does_not_reapply_default_filename_limits() {
+        let limits = DecodeLimits {
+            max_filename_len: 256,
+            ..DecodeLimits::default()
+        };
+        let mut packet = GenericPacket::new_untransformed(
+            b"body".to_vec(),
+            [1; 16],
+            [2; 8],
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, vec![]),
+            AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![4]),
+            &limits,
+        )
+        .unwrap();
+        packet.envelope.filename = Some("x".repeat(256));
+        let envelope = packet.envelope.encode(&limits).unwrap();
+        packet.locator = Locator::new(
+            0,
+            envelope.len(),
+            packet.body.len(),
+            crate::packet::crc32c(&envelope),
+            [2; 8],
+            &limits,
+        )
+        .unwrap();
+        let encoded = packet.encode(&limits).unwrap();
+        let mut carrier = vec![0; encoded.len() * 2];
+        let config = EmbeddingConfig::new(4).unwrap();
+        SpatialLsb
+            .embed_packet(&mut carrier, &encoded, &config)
+            .unwrap();
+        assert_eq!(
+            SpatialLsb
+                .extract_packet(&carrier, &config, &limits)
+                .unwrap()
+                .packet,
+            packet
+        );
+        assert!(SpatialLsb
+            .extract_packet(&carrier, &config, &DecodeLimits::default())
+            .is_err());
+    }
 
     fn packet(bits: u8, payload: &[u8]) -> Vec<u8> {
         GenericPacket::new_untransformed(

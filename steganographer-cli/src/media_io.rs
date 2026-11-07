@@ -79,23 +79,25 @@ pub fn detect_format(path: &str, stego_type: &str) -> String {
 }
 
 /// Decode supported input into the representation consumed by CLI kernels.
-pub fn read_input(path: &str, format: &str, _stego_type: &str) -> anyhow::Result<MediaInput> {
-    read_input_with_dimensions(path, format, _stego_type, None, None)
+pub fn read_input(path: &str, format: &str, stego_type: &str) -> anyhow::Result<MediaInput> {
+    read_input_with_dimensions(path, format, stego_type, None, None)
 }
 
 /// Decode supported input with optional explicit dimensions for headerless RGB.
 pub fn read_input_with_dimensions(
     path: &str,
     format: &str,
-    _stego_type: &str,
+    stego_type: &str,
     raw_width: Option<u32>,
     raw_height: Option<u32>,
 ) -> anyhow::Result<MediaInput> {
     let encoded_len = std::fs::metadata(path)?.len() as usize;
-    match format {
+    let media: anyhow::Result<MediaInput> = match format {
         "image" | "png" | "jpg" | "jpeg" => {
-            let img =
-                image::open(path).map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?;
+            let img = image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .decode()
+                .map_err(|e| anyhow::anyhow!("Failed to open image: {}", e))?;
             let rgb = img.to_rgb8();
             let (width, height) = (rgb.width(), rgb.height());
             Ok(MediaInput {
@@ -207,17 +209,132 @@ pub fn read_input_with_dimensions(
             "Unsupported input format '{}'; expected raw_rgb, raw_s16le, png/image, or wav",
             other
         ),
+    };
+    let media = media?;
+    if media.is_audio() != stego_type.contains("audio") {
+        anyhow::bail!(
+            "Carrier media does not match selected kernel '{}'",
+            stego_type
+        );
     }
+    if !matches!(media.kind, MediaKind::RawRgb8) {
+        match (raw_width, raw_height) {
+            (None, None) => {}
+            (Some(width), Some(height))
+                if !media.is_audio() && (width, height) == (media.width, media.height) => {}
+            _ => anyhow::bail!("Explicit dimensions must match the decoded RGB carrier"),
+        }
+    }
+    Ok(media)
 }
 
-/// Write a decoded carrier while preserving source properties and rejecting
-/// output encodings known to destroy the selected steganography domain.
-pub fn write_output(path: &str, media: &MediaInput, stego_type: &str) -> anyhow::Result<()> {
-    validate_output_compatibility(path, stego_type)?;
+/// Refuse an existing destination unless replacement was explicitly requested.
+/// `symlink_metadata` deliberately observes dangling links as existing outputs.
+pub(crate) fn preflight_output(path: &Path, force: bool) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !force {
+                anyhow::bail!(
+                    "Output '{}' already exists; refusing to overwrite",
+                    path.display()
+                );
+            }
+            if metadata.is_dir() {
+                anyhow::bail!("Output '{}' is a directory", path.display());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
 
+pub(crate) fn output_temp(path: &Path, force: bool) -> anyhow::Result<tempfile::NamedTempFile> {
+    preflight_output(path, force)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // tempfile creates the file with mode 0600 before any bytes are written.
+    Ok(tempfile::NamedTempFile::new_in(parent)?)
+}
+
+pub(crate) fn publish_output(
+    file: tempfile::NamedTempFile,
+    path: &Path,
+    force: bool,
+) -> anyhow::Result<()> {
+    file.as_file().sync_all()?;
+    if force {
+        // Rename replaces the directory entry, never truncating a symlink target
+        // or another name for a hard-linked input inode.
+        file.persist(path).map_err(|error| error.error)?;
+    } else {
+        file.persist_noclobber(path).map_err(|error| error.error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn atomic_write(
+    path: &Path,
+    bytes: &[u8],
+    force: bool,
+    _secret: bool,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut file = output_temp(path, force)?;
+    file.write_all(bytes)?;
+    publish_output(file, path, force)
+}
+
+/// Validate the target representation before embedding or creating any output.
+pub(crate) fn validate_media_output(
+    path: &str,
+    media: &MediaInput,
+    _stego_type: &str,
+) -> anyhow::Result<()> {
+    let format_path = path
+        .rsplit_once('_')
+        .filter(|(_, suffix)| {
+            matches!(
+                *suffix,
+                "001" | "002" | "003" | "004" | "005" | "006" | "007" | "008"
+            )
+        })
+        .map_or(path, |(base, _)| base);
+    let extension = Path::new(format_path)
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "jpg" | "jpeg") {
+        anyhow::bail!(
+            "Refusing lossy JPEG output: signed carriers require exact pixels; use PNG/raw"
+        );
+    }
+    let supported = match media.kind {
+        MediaKind::Rgb8Image => extension == "png",
+        MediaKind::WavPcm16(_) => extension == "wav",
+        MediaKind::RawRgb8 => matches!(extension.as_str(), "" | "rgb" | "raw" | "bin"),
+        MediaKind::RawS16Le => matches!(extension.as_str(), "" | "pcm" | "s16le" | "raw" | "bin"),
+    };
+    if !supported {
+        anyhow::bail!("Output '{}' does not match the decoded input representation; format conversion is unsupported", path);
+    }
+    preflight_output(Path::new(path), false)
+}
+
+/// Encode to a private same-directory temporary file and publish without clobber.
+pub fn write_output(path: &str, media: &MediaInput, stego_type: &str) -> anyhow::Result<()> {
+    validate_media_output(path, media, stego_type)?;
+    let destination = Path::new(path);
+    let mut file = output_temp(destination, false)?;
     match media.kind {
         MediaKind::Rgb8Image => {
-            let expected = media.width as usize * media.height as usize * 3;
+            let expected = (media.width as usize)
+                .checked_mul(media.height as usize)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| anyhow::anyhow!("Decoded RGB dimensions overflow"))?;
             if media.data.len() != expected {
                 anyhow::bail!(
                     "Decoded RGB buffer length mismatch: expected {}, got {}",
@@ -225,50 +342,30 @@ pub fn write_output(path: &str, media: &MediaInput, stego_type: &str) -> anyhow:
                     media.data.len()
                 );
             }
-            let image = image::RgbImage::from_raw(media.width, media.height, media.data.clone())
-                .ok_or_else(|| anyhow::anyhow!("Failed to create image from decoded RGB data"))?;
-            image
-                .save(path)
-                .map_err(|e| anyhow::anyhow!("Failed to write image: {}", e))?;
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(file.as_file_mut()).write_image(
+                &media.data,
+                media.width,
+                media.height,
+                image::ExtendedColorType::Rgb8,
+            )?;
         }
         MediaKind::WavPcm16(spec) => {
-            let mut writer = hound::WavWriter::create(path, spec)?;
-            let (pcm_chunks, _remainder) = media.data.as_chunks::<2>();
-            for bytes in pcm_chunks.iter() {
+            if !media.data.len().is_multiple_of(2) {
+                anyhow::bail!("PCM output has an incomplete sample");
+            }
+            let mut writer = hound::WavWriter::new(file.as_file_mut(), spec)?;
+            for bytes in media.data.as_chunks::<2>().0 {
                 writer.write_sample(i16::from_le_bytes(*bytes))?;
             }
             writer.finalize()?;
         }
         MediaKind::RawS16Le | MediaKind::RawRgb8 => {
-            std::fs::write(path, &media.data)?;
+            use std::io::Write;
+            file.write_all(&media.data)?;
         }
     }
-    Ok(())
-}
-
-fn validate_output_compatibility(path: &str, stego_type: &str) -> anyhow::Result<()> {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    if matches!(stego_type, "lsb_video") && matches!(extension.as_str(), "jpg" | "jpeg") {
-        anyhow::bail!(
-            "Refusing to write spatial LSB data to lossy JPEG output '{}': \
-             JPEG re-encoding destroys pixel LSBs. Use PNG/raw output or dct_video.",
-            path
-        );
-    }
-    if matches!(stego_type, "lsb_audio")
-        && matches!(extension.as_str(), "mp3" | "aac" | "ogg" | "opus" | "m4a")
-    {
-        anyhow::bail!(
-            "Refusing to write PCM LSB data to lossy audio output '{}'; use WAV/raw PCM",
-            path
-        );
-    }
-    Ok(())
+    publish_output(file, destination, false)
 }
 
 #[cfg(test)]
@@ -342,5 +439,54 @@ mod tests {
             None,
         )
         .is_err());
+    }
+    #[test]
+    fn atomic_outputs_do_not_clobber_or_follow_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("carrier");
+        let alias = directory.path().join("alias");
+        std::fs::write(&input, b"original carrier").unwrap();
+        std::fs::hard_link(&input, &alias).unwrap();
+        assert!(atomic_write(&alias, b"payload", false, false).is_err());
+        atomic_write(&alias, b"payload", true, false).unwrap();
+        assert_eq!(std::fs::read(&input).unwrap(), b"original carrier");
+        assert_eq!(std::fs::read(&alias).unwrap(), b"payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_outputs_replace_links_and_create_private_secrets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("missing");
+        let link = directory.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(atomic_write(&link, b"secret", false, true).is_err());
+        assert!(!target.exists());
+        atomic_write(&link, b"secret", true, true).unwrap();
+        assert!(!target.exists());
+        assert!(!std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&link).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn raw_target_format_mismatch_fails_without_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("carrier.png");
+        let media = MediaInput {
+            data: vec![0; 3],
+            width: 1,
+            height: 1,
+            encoded_len: 3,
+            kind: MediaKind::RawRgb8,
+        };
+        assert!(write_output(output.to_str().unwrap(), &media, "lsb_video").is_err());
+        assert!(!output.exists());
     }
 }

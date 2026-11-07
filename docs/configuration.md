@@ -1,517 +1,273 @@
 # Configuration
 
-## Overview
+The 0.8 TOML model is defined in `steganographer-core/src/config.rs` and
+`ots_config.rs`. Configuration fields are not a promise that every execution
+surface supports every combination. In particular, offline transforms, native
+signed pipelines and dashboard live settings have distinct contracts.
 
-Steganographer uses TOML configuration files to define pipeline behavior. The configuration is hierarchical with four main sections: `global`, `video` (with `pipeline`, `input`, `output`, `stego`), `audio`, plus the optional `ots` (OpenTimestamps attestation), `[limits]` (packet decode ceilings), and `[profiles.<name>]` (named limits + scanner presets).
+## Loading and validation
 
-The `run.sh` interactive menu reads these values to construct GStreamer pipelines, and the Rust CLI uses them for module configuration.
+The CLI defaults to `config/example.toml`. Override it explicitly:
 
-## File Location
+```bash
+steganographer --config steganographer.toml config check
+steganographer --config config/example.toml config check --format json
+```
 
-- Default: `config/example.toml`
-- Override with: `steganographer --config /path/to/config.toml`
+Only absence of the implicit default can fall back to a minimal `[global]`
+config. An explicitly selected missing file, malformed config, invalid limits,
+unknown profile/detector or unsupported configured algorithm fails (exit 1).
+Validation does not probe hardware, plugins, network reachability or whether a
+particular live module combination is usable. Live commands additionally need
+their video/audio section and enforce their own capabilities.
 
----
+The shipped example and root configuration use **LSB-only signed pipelines**.
+The populated overlay/info-bar tables do not activate those modules: `pipeline`
+selects them. Example embedding keys are public examples, not secrets.
 
-## Schema
+## Global fields
 
-### `[global]`
+| `[global]` key | Meaning |
+| --- | --- |
+| `log_level` | Logging setting; CLI `--log-level` controls CLI logging |
+| `hash_algorithm` | `blake3` (fallback), `sha256`, `sha3-256`; aliases `sha-256`, `sha3`, `sha-3` |
+| `key_file` | Hex embedding-key file used by offline resolution and native audio |
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `log_level` | String | `"info"` | Logging verbosity: `trace`, `debug`, `info`, `warn`, `error` |
-| `hash_algorithm` | String | `"blake3"` | Hash algorithm: `"blake3"`, `"sha256"`, `"sha3-256"` (also accepts `"sha-256"`, `"sha3"`, `"sha-3"`) |
-| `key_file` | String | — | Path to a file containing the LSB embedding key (hex, 64 chars = 32 bytes). Overrides inline `key` fields in LSB configs. |
+Keys are 32 bytes, represented as 64 hex characters. Native audio resolves
+the section's `key_file`, then global `key_file`, then section inline `key`.
+Offline CLI options take precedence over those configured sources. Prefer
+explicit `--embedding-key-file` for reproducible offline audio/SS workflows.
+
+## Video and audio fields
+
+When `[video]` is present it requires `input`, `output` and `stego`. `[audio]`
+has the same required sections but no `pipeline` parameters table.
+
+### Endpoints: `[video.input]`, `[video.output]`, audio equivalents
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `type` | string, required | `test`, `device`, `file` or `network` |
+| `backend` | optional string | Required platform backend for device input |
+| `device` | optional string | Device path/identifier; AVFoundation uses numeric index, CoreAudio numeric identifier |
+| `path` | optional string | File path or input network URI |
+
+`test` explicitly selects synthetic media without opening capture hardware.
+Device input requires `v4l2`/`avfoundation` for video or
+`pulseaudio`/`pipewire`/`coreaudio` for audio; unknown backends never fall back
+to fake media. File and network input use GStreamer decoding. Headerless raw
+input needs an explicit parsing `--source`. Network output requires an explicit
+lossless `--sink`; the CLI does not guess codecs or transports.
+
+Managed video output is exact RGB Matroska `.mkv`; managed audio output is
+whole-selection PCM `.wav` (64 MiB limit, one signature at frame index 0).
+Both publish atomically after EOS and never overwrite existing destinations.
+Live/explicit sources require `--max-frames` or `--max-buffers` for managed
+file capture. Explicit `--source` / `--sink` fragments override their endpoint;
+arbitrary sinks do not inherit exact-byte or atomic-file guarantees.
+
+### `[video.pipeline]`
+
+| Key | Resolved fallback | Meaning |
+| --- | --- | --- |
+| `width`, `height` | 640, 480 | Requested frame geometry |
+| `framerate` | 30 | Requested frames per second |
+| `opacity` | 1.0 | Native video accepts only 1.0; dashboard preview opacity is separate |
+| `payload` | absent | Payload settings below |
+
+The native config-driven source negotiates width, height and framerate caps
+before signing, scaling dimensions when needed. It does not insert `videorate`
+or manufacture/drop frames to repair an incompatible source rate; negotiation
+fails instead. An explicit `--source` owns its caps and any intentional rate
+conversion. Invisible LSB depth is controlled by `bits`, not opacity.
+
+### `[video.pipeline.payload]`
+
+| Key | Supported interpretation |
+| --- | --- |
+| `type` | Payload description (`signature` in shipped config) |
+| `size` | Legacy signature description, 109 bytes in format 4; not arbitrary packet sizing |
+| `signing_backend` | `ed25519` only for native signed pipelines |
+| `encrypt` | Offline legacy payload encryption |
+| `encryption_key`, `encryption_key_file` | Offline encryption key; file takes precedence |
+| `error_correction` | `none` or offline `reed_solomon` |
+| `multi_frame_spread` | Offline RGB LSB only, 1 disabled or 2–8 shards |
+
+Native video rejects enabled encryption, ECC, spreading, custom payload types
+and non-109-byte signature sizes **before starting pipelines**. Use offline
+encode for those transforms. The generic packet CLI is explicitly selected
+with `--payload-file` / `--payload-text`, not this table. Recoverable JSON
+workflows require explicit keys/password credentials; machine output contains
+no secrets. Audio has no video payload table and does not apply those settings.
+
+### `[video.stego]` and `[audio.stego]`
+
+`pipeline` is an ordered array of module names. Signed native video requires
+exactly one invisible kernel: `lsb_signature` or `dct`; native trait
+`spread_spectrum` signing is rejected because its channel mapping differs from
+the offline scalar binding. Signed native audio supports only
+`["lsb_signature"]`. Multiple invisible kernels or mixing signing with
+`overlay` / `info_bar` is unsupported, not a successfully authenticated chain.
+
+Visible `overlay` and `info_bar` modules remain available as separate unsigned
+rendering operations. Offline CLI kernel names differ: `lsb_video`,
+`lsb_audio`, `dct_video`, `spread_spectrum_video`.
+
+| Subtable | Fields |
+| --- | --- |
+| `lsb_signature` | Required `bits` (1–4), optional `key` / `key_file` |
+| `overlay` (video) | Optional `text`, `position`, `font_size` |
+| `info_bar` (video) | Optional `label`, `show_barcode`, `show_qr`, `show_timestamp` |
+
+Native LSB video uses sequential placement; audio needs its keyed placement
+config. Overlay positions are `top-left`, `top-right`, `bottom-left`,
+`bottom-right`, `center`. Text supports `{timestamp}`, `{frame_index}`, `{date}`,
+`{time}`. The font is a scaled bitmap font, not a system font selector.
+The native info bar honors its own label/timestamp fields, not overlay text.
+Visible-only native bars must explicitly disable `show_barcode` and `show_qr`:
+cryptographic barcode/QR rendering requires a supplied signature payload.
+
+### Minimal signed test pipelines
 
 ```toml
 [global]
-log_level = "info"
 hash_algorithm = "blake3"
-# key_file = "/path/to/lsb.key"
-```
 
----
-
-### `[video]`
-
-Optional. Controls the video pipeline.
-
-#### `[video.pipeline]`
-
-Controls GStreamer pipeline parameters. These values are read by `run.sh` for live pipeline construction.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `width` | u32 | 640 | Frame width in pixels |
-| `height` | u32 | 480 | Frame height in pixels |
-| `framerate` | u32 | 30 | Target framerate in fps |
-| `opacity` | f64 | 1.0 | Overlay opacity / steganographic intensity (0.0–1.0) |
-
-```toml
-[video.pipeline]
-width = 1280
-height = 720
-framerate = 30
-opacity = 1.0
-```
-
-##### `[video.pipeline.payload]`
-
-Cryptographic payload configuration.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `type` | String | `"signature"` | Payload type: `"signature"` or `"custom"` |
-| `size` | u32 | 109 | Legacy v2 payload bytes (4 magic + 1 version + 8 frame index + 32 hash + 64 signature) |
-
-```toml
-[video.pipeline.payload]
-type = "signature"
-size = 109
-```
-
-#### `[video.input]` / `[video.output]`
-
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `type` | String | ✅ | Endpoint type: `"device"`, `"file"`, `"network"` |
-| `backend` | String | ❌ | Backend identifier (see table below) |
-| `device` | String | ❌ | Device name or path |
-| `path` | String | ❌ | File path (for file endpoints) |
-
-**Backend options**:
-
-| Platform | Input Backends | Output Backends |
-| --- | --- | --- |
-| Linux | `v4l2` | `v4l2loopback` |
-| macOS | `avfoundation` | — (use `autovideosink`) |
-| Test | (omit backend) | (omit backend) |
-
-```toml
 [video.input]
-type = "device"
-backend = "v4l2"
-device = "/dev/video0"
-
+type = "test"
 [video.output]
 type = "device"
-backend = "v4l2loopback"
-device = "/dev/video42"
-```
-
-#### `[video.stego]`
-
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `pipeline` | Array[String] | ✅ | Ordered list of stego module names |
-
-Valid pipeline steps: `"lsb_signature"`, `"overlay"`, `"info_bar"`
-
-```toml
 [video.stego]
-pipeline = ["lsb_signature", "overlay", "info_bar"]
-```
-
-#### `[video.stego.lsb_signature]`
-
-Required if `"lsb_signature"` is in the pipeline.
-
-| Key | Type | Range | Description |
-| --- | --- | --- | --- |
-| `bits` | u8 | 1–4 | Number of LSBs per pixel byte |
-| `key` | String | 64 hex chars | 32-byte hex key for embedding |
-
-```toml
+pipeline = ["lsb_signature"]
 [video.stego.lsb_signature]
 bits = 1
-key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[audio.input]
+type = "test"
+[audio.output]
+type = "device"
+[audio.stego]
+pipeline = ["lsb_signature"]
+[audio.stego.lsb_signature]
+bits = 1
+key_file = "keys/embedding.key"
 ```
 
-#### `[video.stego.overlay]`
+Generate the embedding key independently (e.g. `openssl rand -hex 32`) or use
+`derive --password-file ...` to create separate signing/encryption/embedding
+keys. Do not repurpose a signing private key as a placement key.
 
-Required if `"overlay"` is in the pipeline.
+## Effective packet limits: `[limits]`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `text` | String | `"STEGANOGRAPHER"` | Watermark text (supports template placeholders) |
-| `position` | String | `"bottom-right"` | Position on frame |
-| `font_size` | u32 | 16 | Font size in pixels (maps to `scale = font_size / 8`) |
+The following optional fields override built-in `DecodeLimits`:
 
-**Position values**: `top-left`, `top-right`, `bottom-left`, `bottom-right`, `center`
+| Key | Built-in fallback |
+| --- | --- |
+| `max_packet_len` | 16 MiB + 16 KiB + locator |
+| `max_body_len` | 16 MiB |
+| `max_original_len` | 16 MiB |
+| `max_field_len` | 8 KiB |
+| `max_extensions` | 64 |
+| `max_nesting_depth` | 3 |
+| `max_aggregate_nested_bytes` | 64 MiB |
 
-**Template Placeholders** — dynamic values substituted at embed-time:
-
-| Placeholder | Expands To | Example Output |
-| --- | --- | --- |
-| `{timestamp}` | UTC datetime | `2026-03-07 20:25:52` |
-| `{frame_index}` | Frame number | `1042` |
-| `{date}` | UTC date | `2026-03-07` |
-| `{time}` | UTC time | `20:25:52` |
+Present values must be positive; configured body/packet ceilings must be
+consistent. Limits govern generic carrier extraction, packet parsing and
+transform reversal, including declared logical size before decompression.
+They are effective CLI bounds, not comments that extraction ignores. The full
+Rust/WASM limits API has additional fields; they are not invented TOML keys.
 
 ```toml
-[video.stego.overlay]
-text = "CONFIDENTIAL {timestamp} F{frame_index}"
-position = "bottom-right"
-font_size = 16
+[limits]
+max_packet_len = 2097152
+max_body_len = 1048576
+max_original_len = 1048576
 ```
 
----
+### `[profiles.<name>]`
 
-### `[audio]`
+Named profiles have optional `limits` (same override fields) and
+`scan.detectors`. Apply one with `scan --profile <name>`; there is no
+encode/decode `--profile` option. Supported detector IDs:
+`statistical`, `magic`, `ZERO_WIDTH`, `VARIATION_SELECTORS`, `BIDI_CONTROLS`,
+`WHITESPACE_ANOMALY`, `HOMOGLYPH_SUSPECT`. An empty or unknown detector set
+fails; container findings always contribute independently.
 
-Optional. Controls the audio pipeline.
+```toml
+[profiles.strict.limits]
+max_packet_len = 8192
+max_body_len = 4096
+[profiles.strict.scan]
+detectors = ["ZERO_WIDTH", "statistical"]
+```
 
-#### `[audio.input]` / `[audio.output]`
+## OpenTimestamps: `[ots]`
 
-Same schema as video endpoints.
-
-**Audio backend options**:
-
-| Platform | Input Backends | Output Backends |
-| --- | --- | --- |
-| Linux | `pulseaudio`, `pipewire` | `pulseaudio`, `pipewire` |
-| macOS | — (use default) | — (use default) |
-| Test | (omit backend) | (omit backend) |
-
-#### `[audio.stego]`
-
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `pipeline` | Array[String] | ✅ | Ordered stego module list |
-
-Valid pipeline steps: `"lsb_signature"`
-
-#### `[audio.stego.lsb_signature]`
-
-| Key | Type | Range | Description |
-| --- | --- | --- | --- |
-| `bits` | u8 | 1–4 | LSBs per 16-bit sample |
-| `key` | String | 64 hex chars | 32-byte hex key for pseudo-random index permutation |
-
----
-
-### `[ots]`
-
-Optional. Configures the OpenTimestamps (OTS) attestation integration. This
-feature is entirely **opt-in**: when the `[ots]` block is absent (or
-`enabled = false`), the project behaves exactly as before — no network calls,
-no proof files, no overhead.
-
-When enabled, the OTS client stamps the SHA-256 of the BLAKE3 Merkle root of
-each completed hash-chain segment (default: at most one stamp every 5
-minutes) against the chosen calendar server, writing `.ots` proof files to
-`proof_dir`. Only a small digest + method + timestamp reference is carried in
-packet envelope extension fields; the proofs themselves are not embedded in
-carrier media.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch |
-| `server_url` | String | `https://opentimestamps.org` | Stamping server base URL |
-| `method` | String | `"bitcoin"` | Blockchain attestation method: `"bitcoin"` or `"ethereum"` |
-| `interval_secs` | u64 | `300` | Minimum interval between stamps (seconds) |
-| `proof_dir` | String | `ots_proofs` | Directory for `.ots` proof files (created if missing) |
-| `timeout_secs` | u64 | `30` | HTTP request timeout for the OTS server |
+Optional, disabled by default for automatic integration. Explicit `ots` commands
+perform the requested operation. Bitcoin is the only supported method.
 
 ```toml
 [ots]
 enabled = true
-server_url = "https://opentimestamps.org"
+server_url = "https://alice.btc.calendar.opentimestamps.org"
 method = "bitcoin"
 interval_secs = 300
 proof_dir = "ots_proofs"
 timeout_secs = 30
+bitcoin_explorer_url = "https://blockstream.info/api"
 ```
 
-The dashboard reads the same block: with `enabled = true` it serves an OTS
-panel (`/ots.js`, `/ots/status`) and Bearer-authenticated `/ots/stamp` and
-`/ots/verify` endpoints. See [OTS Integration](ots-integration.md).
-
----
-
-### `[limits]`
-
-Optional. Resource ceilings for generic packet decoding, mirroring
-`DecodeLimits` in `steganographer-core::packet`. Every field is optional —
-absent fields keep the built-in defaults.
-
-| Key | Type | Built-in default | Description |
-| --- | --- | --- | --- |
-| `max_packet_len` | usize | 16 MiB + 16 KiB + locator | Maximum serialized packet size |
-| `max_body_len` | usize | 16 MiB | Maximum packet body size |
-| `max_original_len` | usize | 16 MiB | Maximum declared logical payload length (checked before any transform is reversed — blocks DEFLATE bombs) |
-| `max_field_len` | usize | 8 KiB | Maximum envelope field length |
-| `max_extensions` | usize | 64 | Maximum extension fields per envelope |
-| `max_nesting_depth` | usize | 3 | PKT-009 maximum parent-id chain depth |
-| `max_aggregate_nested_bytes` | usize | 64 MiB | PKT-009 maximum aggregate bytes across a nested chain |
-
-Validation (via `config check` or profile resolution): every field must be
-greater than 0, and `max_body_len` must not exceed `max_packet_len`.
-
-### `[profiles.<name>]`
-
-Optional named profiles (SUR-006). A profile bundles a `[limits]` override
-table and a `scan.detectors` scanner-knob set; `steganographer scan
---profile <name>` applies it, and `config check` validates every profile.
-Known `scan.detectors` IDs: `statistical`, `magic`, `ZERO_WIDTH`,
-`VARIATION_SELECTORS`, `BIDI_CONTROLS`, `WHITESPACE_ANOMALY`,
-`HOMOGLYPH_SUSPECT`. Container findings (`ZIP_TOPOLOGY`, DOC-001, DOC-002)
-have no detector knob and always contribute.
-
-```toml
-[limits]
-max_body_len = 1048576
-max_nesting_depth = 2
-
-[profiles.strict]
-[profiles.strict.limits]
-max_body_len = 4096
-max_packet_len = 8192
-max_nesting_depth = 1
-
-[profiles.strict.scan]
-detectors = ["ZERO_WIDTH", "statistical"]
-
-[profiles.loose]
-[profiles.loose.scan]
-detectors = ["magic"]
-```
-
-An unknown `--profile` name, an empty `scan.detectors` set, or an unknown
-detector ID is a usage error (exit 2).
-
-## Complete Example
-
-```toml
-[global]
-log_level = "debug"
-
-# ─── Video ─────────────────────────
-[video]
-
-[video.input]
-type = "device"
-backend = "v4l2"
-device = "/dev/video0"
-
-[video.output]
-type = "device"
-backend = "v4l2loopback"
-device = "/dev/video42"
-
-[video.stego]
-pipeline = ["lsb_signature", "overlay", "info_bar"]
-
-[video.stego.lsb_signature]
-bits = 1
-key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-[video.stego.overlay]
-text = "CONFIDENTIAL"
-position = "bottom-right"
-font_size = 16
-
-# ─── Audio ─────────────────────────
-[audio]
-
-[audio.input]
-type = "device"
-backend = "pulseaudio"
-
-[audio.output]
-type = "device"
-backend = "pulseaudio"
-
-[audio.stego]
-pipeline = ["lsb_signature"]
-
-[audio.stego.lsb_signature]
-bits = 1
-key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-
-# Optional packet-decode ceilings and named scan profiles (see above):
-# [limits]
-# max_body_len = 1048576
-# [profiles.strict]
-# [profiles.strict.limits]
-# max_body_len = 4096
-# [profiles.strict.scan]
-# detectors = ["ZERO_WIDTH", "statistical"]
-```
-
-## Minimal Configs
-
-### Video Only (Test Source)
-
-```toml
-[global]
-log_level = "info"
-
-[video]
-[video.input]
-type = "device"
-
-[video.output]
-type = "device"
-
-[video.stego]
-pipeline = ["lsb_signature"]
-
-[video.stego.lsb_signature]
-bits = 1
-key = "0000000000000000000000000000000000000000000000000000000000000000"
-```
-
-### Audio Only
-
-```toml
-[global]
-
-[audio]
-[audio.input]
-type = "device"
-
-[audio.output]
-type = "device"
-
-[audio.stego]
-pipeline = ["lsb_signature"]
-
-[audio.stego.lsb_signature]
-bits = 1
-key = "0000000000000000000000000000000000000000000000000000000000000000"
-```
-
----
-
-## Key Generation
-
-Generate a random 32-byte hex key for use in config:
-
-```bash
-# Using OpenSSL
-openssl rand -hex 32
-
-# Using steganographer's keygen (repurpose the output)
-steganographer keygen --output /tmp/tmpkey && cat /tmp/tmpkey.key
-```
-
----
-
-## Dashboard Live Configuration
-
-The web dashboard (`./run.sh` → `1`) provides real-time configuration controls that override TOML settings. Changes are immediate and synced to the server via `POST /api/config`.
-
-### Live Controls
-
-| Control | Range | Default | TOML Key |
-| --- | --- | --- | --- |
-| **Overlay Opacity** | 0.0–1.0 | 1.0 | `video.pipeline.opacity` |
-| **LSB Bits** | 1–4 | 1 | `video.stego.lsb_signature.bits` |
-| **Sign Backend** | ed25519 / ethereum | ed25519 | — |
-| **Overlay Text** | Free text | CONFIDENTIAL | `video.stego.overlay.text` |
-| **Sign Rate** | 0.2/s – 5/s | 1/s | — |
-| **QR Scale** | 5% – 100% | 10% | — |
-| **Resolution** | 320×240 – 1920×1080 | 640×480 | — |
-
-### Transport Policy
-
-The dashboard frame pipeline can run over a WebRTC DataChannel (requires the
-dashboard built with `--features webrtc`) or over WebSocket. The transport is
-selected by, in order of precedence:
-
-1. **URL query** — `?transport=webrtc|websocket|auto` on the dashboard URL.
-2. **Persisted choice** — the `stego-transport` localStorage key (set by the
-   *Transport* control in the dashboard settings, or automatically when the
-   client falls back).
-3. **Server default** — the `--transport` CLI flag (`auto` by default), which
-   populates `DashboardState::transport`.
-
-`TransportPolicy::Auto` tries the WebRTC DataChannel first; on any failure
-(501 from `/api/webrtc/offer` when the feature is not built in, SDP/ICE
-failure, DataChannel error or close, 5 s answer timeout) the client falls back
-to WebSocket permanently for the session and persists the resolved mode to
-localStorage so reloads skip the retry. `Websocket` and `WebRtc` pin the
-transport.
-
-### ICE Servers (WebRTC)
-
-By default the dashboard uses **no** ICE servers: peer connections gather
-loopback host candidates only and no traffic leaves the machine. For
-deployments on trusted networks, STUN/TURN URLs can be supplied to
-`DashboardState::ice_servers` (one URL per entry) and are mirrored to the
-browser via `GET /api/webrtc/config`.
-
-Supported forms:
-
-- `stun:host:port` / `stuns:host:port`
-- `turn:host:port` / `turns:host:port` — requires inline credentials
-  (`turn:user:cred@host:port`); they are hoisted into the
-  `username`/`credential` fields of the peer connection's ICE server entry.
-
-Entries with unsupported schemes, or TURN entries without credentials, are
-logged and skipped. Tests never contact external STUN/TURN servers; the
-plumbing is exercised by construction only. A `--ice-server <url>` CLI flag
-(repeatable) is the intended way to populate this list.
-
-### H.264 Media Track
-
-When the transport policy allows WebRTC (`auto` or `webrtc`) and the browser
-offer contains a video m-line, the server publishes the stego'd frames as a
-sendonly H.264 RTP track (OpenH264, 2.5 Mbps target @ 720p, IDR every
-~2 s). The browser shows the track as a media preview below the encode
-canvas with a Media fps counter in the footer; the DataChannel canvas view
-stays the primary verification surface and is unchanged when media is off.
-See `docs/api-reference.md` ("Media negotiation") for the wire-level
-details.
-
-### QR Data Matrix Overlay
-
-The dashboard renders a QR-style data matrix on every video frame containing:
-
-- Local frame counter (32-bit)
-- Server-signed frame index (32-bit)
-- BLAKE3 hash prefix (64-bit)
-- Timestamp (16-bit seconds)
-- Backend ID (8-bit: 0=ed25519, 1=ethereum)
-- Verification status (8-bit: 0=unverified, 1=verified)
-
-The Overlay Opacity slider controls this QR overlay's visibility from fully transparent to fully opaque.
-
-### Stego Info Display
-
-The dashboard dynamically calculates and displays:
-
-| Metric | Example Value | Formula |
-| --- | --- | --- |
-| **Payload Size** | 109 bytes | 8 (frame_index) + 32 (BLAKE3) + 64 (Ed25519) |
-| **Hash Algorithm** | BLAKE3 (256-bit) | Fixed |
-| **Signature** | Ed25519 (512-bit) | Depends on backend |
-| **Capacity** | 112.5 KB | width × height × 3 × lsb_bits / 8 |
-| **Utilization** | 0.090% | payload_size / capacity × 100 |
-
-### Audio Stego Info Display
-
-The Audio tab also dynamically calculates and displays:
-
-| Metric | Example Value | Formula |
-| --- | --- | --- |
-| **Payload Size** | 109 bytes | 8 (chunk_index) + 32 (BLAKE3) + 64 (Ed25519) |
-| **Hash Algorithm** | BLAKE3 (256-bit) | Fixed |
-| **Signature** | Ed25519 (512-bit) | Depends on backend |
-| **Capacity** | 256 B (2048 bits) | buffer_size × channels × lsb_bits / 8 |
-| **Utilization** | 40.6% | payload_size / capacity × 100 |
-| **Channels** | 1 (mono) | From microphone config |
-
-### Recording and Export
-
-Both Video and Audio tabs include a **Record** button:
-
-| Format | Container | Contents |
-| --- | --- | --- |
-| **Video** | WebM (VP9) | Canvas output with QR overlay, embedded LSB data |
-| **Audio** | WAV (PCM16) | Signed PCM chunks with LSB-embedded integrity data |
-
-Files are auto-downloaded with timestamped filenames (e.g., `steganographer-video-2024-01-15T14-30-00.webm`).
-
-![Dashboard with live config controls](images/dashboard-overview.png)
+`interval_secs` must be 1–86400; `timeout_secs` 1–300. Endpoints must be HTTP(S);
+`proof_dir` must be nonempty without NUL bytes. CLI file commitments use
+SHA-256(input). Proofs live at `proof_dir/<digest-hex>.ots`; omitted verify
+`--proof` resolves the same path. Dashboard paths are `/ots/status`,
+`/ots/stamp`, `/ots/verify`. Pending is not verified; canonical Bitcoin chain
+verification trusts the configured Esplora provider, not an independent full
+node. For the complete protocol and safe proof I/O requirements see
+[OTS Integration](ots-integration.md).
+
+## Dashboard live settings are a separate API
+
+The dashboard uses snake_case `LiveConfig` over `GET /api/config` and
+`POST /api/config`; it is not an arbitrary live TOML editor. Supported signed
+operation is Ed25519 + BLAKE3 + LSB, without encryption/ECC. Unsupported
+backend/kernel/hash/crypto selections fail rather than being ignored.
+
+- `lsb_bits`: 1–4; `resolution`: `WIDTHxHEIGHT`, dimensions 1–4096.
+- `sign_rate_ms`: at least 50 ms; requests are sampled artifacts, not a
+  continuous signed-media timeline.
+- `opacity`: 0–1, **preview only**, not modification of signed carrier bytes.
+- `signing_backend = "ed25519"`, `stego_type = "lsb"`,
+  `hash_algorithm = "blake3"`, `encrypt = false`, `ecc = false`.
+- `overlay_text` (at most 4096 bytes) and `qr_scale` (5–100) remain settings
+  fields, not evidence that an overlay is embedded. Unavailable visual
+  controls are disabled in the UI.
+- `transport`: `websocket` or feature-enabled `webrtc` (resolved transport,
+  distinct from CLI policy `auto`). Audio uses WebSocket.
+
+The browser hydrates supported settings before serialized full-config writes.
+Frame metadata belongs to the returned frame, not the latest settings view.
+The displayed public key is the actual runtime signer, stable for that runtime,
+not an independent person/organization identity. There is no live Ethereum or
+MetaMask signing backend.
+
+### Transport and evidence
+
+Transport choice is URL query (`?transport=`), then saved user choice, then
+server-advertised default from `GET /api/webrtc/config`. Auto may fall back to
+WebSocket; fallback is not persisted as the user's pinned preference. Pinned
+WebRTC fails visibly if unavailable. `--ice-server` is repeatable and requires
+a WebRTC-enabled build; unsupported schemes/TURN without credentials are
+skipped with diagnostics. No configured STUN/TURN server does not imply a
+loopback-only network topology: host candidates depend on the machine.
+
+Optional H.264 RTP is a lossy preview, not the exact signed evidence. Record
+exports are bounded stored-ZIP archives containing signed PNG snapshots or
+PCM16 WAV chunks and extraction manifests (public key, indices, bit depth,
+audio placement key). They are **sampled artifacts, not continuous video or
+uninterrupted microphone recordings**. Preview overlays and opacity are not
+part of the signed bytes. Extract/verify the archived artifacts using their
+manifest; live server metrics alone are not archive-verification proof.
+
+See [CLI Reference](cli-reference.md), [Getting Started](getting-started.md),
+and [Compatibility](compatibility.md).

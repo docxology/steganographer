@@ -1,9 +1,8 @@
 //! Multi-frame signature spreading.
 //!
 //! Spreads a single cryptographic signature across N consecutive video
-//! frames, providing resilience against partial frame loss. Each frame
-//! carries a shard of the payload, and extraction requires collecting
-//! shards from all N frames to reconstruct the full signature.
+//! frames using n-of-n sharing. Every shard is required; this does not recover
+//! from partial frame loss.
 //!
 //! ## Algorithm
 //!
@@ -63,6 +62,9 @@ pub fn split_payload_bytes(
     if n > 8 {
         anyhow::bail!("Number of shards must be at most 8, got {}", n);
     }
+    base_frame_index
+        .checked_add(u64::from(n - 1))
+        .ok_or_else(|| anyhow::anyhow!("Shard frame index overflow"))?;
     if payload.is_empty() {
         anyhow::bail!("Cannot split an empty payload");
     }
@@ -184,6 +186,9 @@ pub fn split(
     if n > 8 {
         anyhow::bail!("Number of shards must be at most 8, got {}", n);
     }
+    base_frame_index
+        .checked_add(u64::from(n - 1))
+        .ok_or_else(|| anyhow::anyhow!("Shard frame index overflow"))?;
 
     let payload_bytes = payload.to_bytes();
     let n = n as usize;

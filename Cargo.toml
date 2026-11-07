@@ -9,9 +9,9 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/docxology/steganographer"
 
@@ -21,12 +21,12 @@ thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-blake3 = "1.5"
+blake3 = { version = "1.5", features = ["zeroize"] }
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+k256 = { version = "0.14", features = ["ecdsa", "sha256"] }
 sha3 = "0.10"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 subtle = "2"
 rand = "0.8"
 log = "0.4"
@@ -36,7 +36,9 @@ axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 image = "0.25"
-# HTTP client for the OpenTimestamps REST API (steganographer-core::ots_client).
+# Shared wrapper version; the locked native codec stack supports the workspace MSRV.
+openh264 = "0.9.8"
+# HTTP client for standard OpenTimestamps calendars and trusted Esplora APIs.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-ml-dsa = "0.1.1"
+ml-dsa = { version = "0.1.1", features = ["zeroize"] }
 zeroize = "1.9"

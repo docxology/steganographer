@@ -18,8 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88.0  # held: this ref names the MSRV under test (1.88.0) and must not move until the MSRV policy does; the pin form is @v1 with `with: toolchain: 1.88.0`; revisit 2027-02-01
+      - name: Install Rust 1.91
+        uses: dtolnay/rust-toolchain@1.91.0  # held: explicit workspace MSRV; advance only with the documented compiler policy
 
       - name: Install GStreamer
         run: |
@@ -27,7 +27,7 @@ jobs:
           sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Check locked workspace
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --all-features --all-targets --locked
 
   test:
     name: Test (${{ matrix.os }})
@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo registry & build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # actions/cache@v6.1.0
@@ -78,57 +78,32 @@ jobs:
             -p gstreamer-sys -p gstreamer-base-sys -p gstreamer-app-sys \
             -p gstreamer-audio-sys -p gstreamer-video-sys || true
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Build workspace
         run: cargo build --workspace --locked
 
       - name: Run tests
         run: cargo test --workspace --locked
 
+      - name: Run optional-feature tests
+        run: cargo test --workspace --all-features --locked
+
       - name: Build CLI without GStreamer (gst feature gate)
         run: cargo build -p steganographer-cli --no-default-features --locked
 
       - name: Build release
-        run: cargo build --workspace --release --locked
+        run: cargo build --workspace --release --all-features --locked
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 
-  test-count:
-    name: Update Test Count Badge
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: write  # badge job commits the README count update to main
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+      - name: Build public Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
-
-      - name: Install GStreamer (Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-
-      - name: Count tests
-        id: count
-        run: |
-          # Sum the "test result: ok. N passed" lines from every test binary and
-          # doc-test target. This counts tests the same way the `test` job does,
-          # instead of grepping `#[test]` attributes (which misses `#[tokio::test]`
-          # and macro-generated tests and silently drifted the badge).
-          COUNT=$(cargo test --workspace 2>/dev/null | awk '/^test result:/ { sum += $4 } END { print sum+0 }')
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-
-      - name: Update README badge
-        run: |
-          sed -i "s/badge\/tests-[0-9]*_passing/badge\/tests-${{ steps.count.outputs.count }}_passing/" README.md
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add README.md
-          git diff --staged --quiet || git commit -m "ci: update test count badge to ${{ steps.count.outputs.count }}"
-          git push
 
   security:
     name: Security Audit
@@ -155,7 +130,7 @@ jobs:
         run: cargo install cargo-deny
 
       - name: Run cargo-deny (licenses + advisories)
-        run: cargo deny check
+        run: cargo deny --all-features check
 
   secret-scan:
     name: Secret Scanning (gitleaks)
@@ -185,20 +160,58 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly  # held: the ref carries the toolchain, so nightly is tracked deliberately; the pin form is @v1 with `with: toolchain: nightly`; revisit 2027-02-01
 
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz
-
-      - name: Install GStreamer (Linux)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+        run: cargo +nightly install cargo-fuzz --locked
 
       - name: Run fuzz targets (60s each)
         run: |
           cd steganographer-core
+          python3 - <<'PY'
+          import json, struct
+          from pathlib import Path
+          def seed(target, name, data):
+              directory = Path("fuzz/corpus") / target
+              directory.mkdir(parents=True, exist_ok=True)
+              (directory / name).write_bytes(data)
+          fixtures = Path("testdata/packets")
+          manifest = json.loads((fixtures / "manifest.json").read_text())
+          for vector in manifest["vectors"]:
+              for name in vector["fixtures"]:
+                  data = bytes.fromhex((fixtures / name).read_text())
+                  if data.startswith(b"STG3"):
+                      seed("fuzz_packet_decode", name, data)
+                      seed("fuzz_nested_decode", name, data)
+                      if int.from_bytes(data[6:8], "big") & 8 == 0:
+                          carrier = bytearray([128]) * max(4096, len(data) * 8)
+                          for bit in range(len(data) * 8):
+                              carrier[bit] |= (data[bit // 8] >> (7 - bit % 8)) & 1
+                          seed("fuzz_carrier_extract", name, bytes(32) + carrier)
+                  else:
+                      key = bytes([0x2c if "vector-03" in name else 0x3d]) * 32
+                      seed("fuzz_carrier_extract", name, key + data)
+          # Structurally valid v4 payload; this is not an authenticated signature.
+          payload = b"STEG\x04" + bytes(104)
+          seed("fuzz_payload_from_bytes", "format-v4", payload)
+          framed = struct.pack(">I", len(payload) * 8) + payload
+          for bits in range(1, 5):
+              units = (len(framed) * 8 + bits - 1) // bits
+              carrier = bytearray([128]) * ((units + 2) // 3 * 3)
+              for bit in range(len(framed) * 8):
+                  carrier[bit // bits] |= ((framed[bit // 8] >> (7 - bit % 8)) & 1) << (bits - 1 - bit % bits)
+              seed("fuzz_lsb_video_extract", f"depth-{bits}", bytes([bits - 1]) + carrier)
+          seed("fuzz_rs_decode", "zero-codeword", bytes([16, 3]) + bytes(20))
+          seed("fuzz_transforms_reverse", "short-22-regression", bytes(22))
+          seed("fuzz_transforms_reverse", "identity", bytes(16) + b"\0\x01" + struct.pack(">I", 8) + b"\0identity")
+          seed("fuzz_forensics", "zip-comment-eocd", b"PK\x05\x06" + bytes(16) + b"\x04\0PK\x05\x06")
+          seed("fuzz_forensics", "pdf", b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n")
+          PY
           cargo +nightly fuzz run fuzz_lsb_video_extract -- -max_total_time=60 -max_len=4096
           cargo +nightly fuzz run fuzz_payload_from_bytes -- -max_total_time=60 -max_len=4096
           cargo +nightly fuzz run fuzz_rs_decode -- -max_total_time=60 -max_len=4096
           cargo +nightly fuzz run fuzz_packet_decode -- -max_total_time=60 -max_len=8192
+          cargo +nightly fuzz run fuzz_transforms_reverse -- -max_total_time=60 -max_len=8192
+          cargo +nightly fuzz run fuzz_carrier_extract -- -max_total_time=60 -max_len=8192
+          cargo +nightly fuzz run fuzz_nested_decode -- -max_total_time=60 -max_len=8192
+          cargo +nightly fuzz run fuzz_forensics -- -max_total_time=60 -max_len=65536
 
   immutability:
     name: Golden-Vector Immutability
@@ -272,11 +285,9 @@ jobs:
         run: |
           python3 - <<'EOF'
           import json, subprocess, sys
-          meta = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1"]))
+          meta = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"]))
           missing = []
           for pkg in meta["packages"]:
-              if pkg["source"] is not None:
-                  continue  # skip third-party deps
               for field in ("description", "license", "repository"):
                   if not pkg.get(field):
                       missing.append(f"{pkg['name']}: missing {field}")
@@ -285,3 +296,43 @@ jobs:
               sys.exit(1)
           print(f"ok: all {len(meta['packages'])} workspace packages carry description/license/repository")
           EOF
+
+      - name: Install release build and consumer prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools
+          rustup target add wasm32-unknown-unknown
+          VERSION=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
+          cargo install wasm-bindgen-cli --version "$VERSION" --locked
+          go install github.com/zricethezav/gitleaks/v8@v8.24.3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Exercise release safety boundaries
+        run: cargo test -p steganographer-cli --example release --no-default-features --locked
+
+      - name: Assemble actual host and WASM artifacts
+        run: |
+          mkdir -p dist
+          bash scripts/release.sh --output dist/ci-release --variant all
+
+      - name: Verify archives and real artifact consumers
+        run: python3 scripts/check-release.py dist/ci-release
+
+  wasm:
+    name: WASM target and real JavaScript bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build isolated browser facade
+        run: cargo build -p steganographer-wasm --release --target wasm32-unknown-unknown --locked
+      - name: Install matching binding generator
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
+          cargo install wasm-bindgen-cli --version "$VERSION" --locked
+      - name: Exercise generated JavaScript API
+        run: |
+          wasm-bindgen --target nodejs --out-dir target/wasm-node --out-name steganographer_wasm target/wasm32-unknown-unknown/release/steganographer_wasm.wasm
+          node steganographer-wasm/tests/bindings.cjs "$PWD/target/wasm-node/steganographer_wasm.js"

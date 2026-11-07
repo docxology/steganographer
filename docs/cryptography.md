@@ -1,433 +1,155 @@
 # Cryptography
 
-## Overview
+## Scope and trust
 
-Steganographer uses a two-layer cryptographic scheme to produce tamper-evident signatures for each media frame:
+Steganographer 0.8 separates three different commitments:
 
-1. **Hashing** — Configurable hash function (BLAKE3 default, also SHA-256, SHA-3-256) producing a 256-bit digest
-2. **Signing** — Ed25519 (default), secp256k1/Ethereum (EIP-191), or post-quantum ML-DSA / hybrid signatures
-
-The combination provides both **integrity** (hash detects any modification) and **authenticity** (signature proves the frame was signed by the holder of the private key).
-
-> For the broader theoretical context of information hiding and its relationship to cryptography, see [Steganography Theory](steganography-theory.md).
-
----
-
-## Foundational Principles
-
-### Kerckhoffs' Principle
-
-Auguste Kerckhoffs (1883) established that **a cryptographic system should be secure even if everything about the system, except the key, is public knowledge**. In Steganographer:
-
-| Component | Public Knowledge | Secret |
+| Mechanism | Authenticated content | Not established by that mechanism |
 | --- | --- | --- |
-| LSB embedding algorithm | ✅ Known | — |
-| Hash + signing scheme | ✅ Known | — |
-| Payload format (109 bytes) | ✅ Known | — |
-| Ed25519 / secp256k1 signing key | — | ✅ Private key |
-| Audio PRNG permutation key | — | ✅ 32-byte key |
-| Payload encryption key (optional) | — | ✅ 32-byte ChaCha20 key |
+| Legacy `SignaturePayload` v4 | Version-framed frame index and supplied video/audio binding bytes | Person identity, capture truth, arbitrary file/container metadata |
+| Generic `STG3` payload-signature transform | Exact recovered logical payload bytes | Arbitrary envelope metadata or the surrounding carrier |
+| OpenTimestamps detached proof | The caller's expected SHA-256 digest; CLI uses SHA256 of the complete input file | Signer identity, media semantics, independent full-node validation |
 
-Security relies entirely on key secrecy, never on algorithm secrecy.
+A valid signature means the corresponding private key signed the authenticated bytes. To attribute it to an expected source, obtain and **pin the full public key through a separately trusted channel**. A key bundled with a packet is not independent identity evidence. Neither a signature nor a timestamp proves that a recorded event happened, or that signed media is not synthetic.
 
-### Composing Steganography and Cryptography
+Steganography places bytes in a carrier; signing authenticates bytes; optional encryption protects payload confidentiality. These are separate operations. Keyed placement is not encryption, and a visible overlay is not automatically an authenticated backup proof. See [Security](security.md) and [Threat Model](threat-model.md) for operational boundaries.
 
-Steganography and cryptography serve complementary purposes:
+## Legacy frame hashing and migration
 
-| Layer | Purpose | Steganographer Component |
-| --- | --- | --- |
-| **Cryptographic signing** | Ensures authenticity and integrity | Ed25519/Ethereum signature over hash |
-| **Payload encryption (optional)** | Ensures confidentiality of embedded data | ChaCha20-Poly1305 AEAD |
-| **Steganographic embedding** | Hides the signed payload from observers | LSB / Spread-Spectrum / DCT embedding |
-| **Exoteric overlay** | Provides visible, machine-readable proof | Info Bar with QR code and barcode |
+`crypto::HashAlgorithm` supports BLAKE3 (default), SHA-256 and SHA3-256, each producing 32 bytes. The configured hash must match at signing and verification. Selecting a standardized algorithm does not certify the application or deployment as FIPS compliant. No platform-specific speed guarantee is implied.
 
-The composition `Stego(Sign(Hash(frame)))` provides defense in depth:
+Version 4 hashes the following exact sequence with the selected algorithm:
 
-1. Even if the steganographic layer is broken (data extracted), the payload is a cryptographic signature — meaningless without context
-2. With encryption enabled, even extracted data is unreadable without the encryption key
-3. Even if the overlay is visible, the LSB layer provides a hidden backup channel
-4. Even if the LSB data is destroyed (re-encoding), the overlay survives
-5. Even if sequential LSB is detected, spread-spectrum and DCT alternatives are available
-
----
-
-## Hash Construction
-
-### Configurable Hash Algorithm
-
-The hash algorithm is configurable via `[global]` in `steganographer.toml`:
-
-```toml
-[global]
-hash_algorithm = "blake3"  # default
-# hash_algorithm = "sha256"     # FIPS 180-4
-# hash_algorithm = "sha3-256"   # FIPS 202 (Keccak)
+```text
+"steganographer-frame-v4\0"
+|| frame_index:u64 LE
+|| video_length:u64 LE || video_bytes
+|| audio_present:u8
+|| audio_length:u64 LE || audio_bytes
+|| "\0end"
 ```
 
-| Algorithm | Config String | Standard | Speed (single core) | Use Case |
-| --- | --- | --- | --- | --- |
-| BLAKE3 | `"blake3"` | — | ~6 GB/s | Default — fastest, best for real-time |
-| SHA-256 | `"sha256"` or `"sha-256"` | FIPS 180-4 | ~0.5 GB/s | FIPS compliance |
-| SHA-3 256 | `"sha3"` or `"sha3-256"` | FIPS 202 | ~0.3 GB/s | NIST-approved sponge |
+`audio_present` is 0 for `None`, 1 for `Some`, including `Some(&[])`. Explicit lengths distinguish different video/audio partitions of the same concatenated bytes; the presence byte distinguishes absent from empty audio. Ed25519 signs the resulting digest. The configurable media hash is not a replacement for Ed25519's internal hash processing.
 
-The hash algorithm is parsed by `HashAlgorithm::parse()` and falls back to BLAKE3 for unrecognized values.
+The legacy serialized payload remains **109 bytes**:
 
-### Input Domain
+| Field | Bytes | Encoding |
+| --- | ---: | --- |
+| Magic | 4 | ASCII `STEG` |
+| Version | 1 | `4` |
+| Frame index | 8 | u64 little-endian |
+| Media digest | 32 | Selected hash output |
+| Ed25519 signature | 64 | Signature over the digest |
 
-The BLAKE3 hash covers a deterministic concatenation of frame metadata and raw media bytes:
+`SignaturePayload::from_bytes` validates magic and version; `has_valid_magic` is only a framing check, not signature verification. The fixed payload does not carry the selected hash algorithm; preserve it as verification context.
 
-```mermaid
-flowchart LR
-    IDX["frame_index\n8 bytes (u64 LE)"] --> HASHER["🔑 Hasher\n(BLAKE3 / SHA-256 / SHA-3)"]
-    VID["video_bytes\nRaw pixel data"] --> HASHER
-    AUD["audio_bytes\n(optional PCM)"] -.-> HASHER
-    HASHER --> HASH["256-bit Hash\n(32 bytes)"]
-    style HASHER fill:#333,stroke:#e53935,color:#e0e0e0
-```
+Legacy versions 2 and 3 are rejected, not silently retried under historical hashing. Version 2 also used incompatible Reed-Solomon evaluation points. The v4 keyed legacy audio Feistel mapping has changed as well. **Re-encode from source media with 0.8**; changing only the version byte does not migrate an old signature, ciphertext or carrier.
 
-| Field | Size | Description |
-| --- | --- | --- |
-| `frame_index` | 8 bytes | Little-endian u64 frame counter |
-| `video_bytes` | Variable | Raw pixel data (RGB8, BGRA8, or Y plane) |
-| `audio_bytes` | Variable (optional) | Raw PCM samples, if present |
+## Canonical media is not the exact artifact
 
-### Why BLAKE3 (Default)?
+Embedding changes a carrier. Offline and supported native/dashboard signing paths use `carrier_binding::canonicalize` so verification can recompute the same binding from delivered pixels or samples rather than a private pre-embed snapshot:
 
-| Property | BLAKE3 | SHA-256 | SHA-3 256 |
-| --- | --- | --- | --- |
-| Speed (single core) | ~6 GB/s | ~0.5 GB/s | ~0.3 GB/s |
-| Parallelizable | ✅ (tree hash) | ❌ | ❌ |
-| Output size | 256 bits | 256 bits | 256 bits |
-| Security level | 128-bit | 128-bit | 128-bit |
-| FIPS certified | ❌ | ✅ | ✅ |
+- LSB RGB clears the selected low bits of all color bytes. Packed BGRA keeps alpha intact. Row padding is not logical pixel content.
+- LSB S16LE clears the selected low bits of each complete sample.
+- Offline scalar spread-spectrum excludes its payload-length-dependent modified prefix (including its length prefix).
+- DCT binding excludes the green-channel samples in the blocks owned by the signature kernel.
 
-For real-time video at 30 fps with 1080p frames (~6 MB/frame), BLAKE3 can hash a frame in **<1 ms**, making it viable for live pipelines. SHA-256 and SHA-3-256 are available for FIPS-compliant deployments at the cost of higher latency.
+These exclusions are deliberate **unauthenticated regions**, not a promise to detect every visible or audible edit. In particular, excluding a whole kernel-owned block/prefix can omit much more than a single embedded bit. Container headers, filenames, display timestamps, sample-rate labels and other rendered metadata are not automatically covered by the media signature. Geometry and other extraction context must be preserved and trusted as required by the consuming workflow.
 
-### Implementation
+A library verification example for one delivered packed RGB frame:
 
 ```rust
-// HashAlgorithm is configurable: Blake3 (default), Sha256, or Sha3_256
-let hash = signer.hash_algorithm().hash(frame_index, video_bytes, audio_bytes);
-// → 32-byte digest
+use steganographer_core::{carrier_binding::canonicalize, SignaturePayload, Verifier};
 
-// The Signer handles this internally:
-let payload = signer.sign_frame(frame_index, video_bytes, audio_bytes);
-// Uses the configured hash algorithm + Ed25519 signature
-```
-
----
-
-## Signature Scheme
-
-### Ed25519 Parameters
-
-| Parameter | Value |
-| --- | --- |
-| Curve | Curve25519 (twisted Edwards form) |
-| Key size | 256 bits (32 bytes) |
-| Signature size | 512 bits (64 bytes) |
-| Security level | ~128-bit |
-| Standard | RFC 8032 |
-
-### Key Types
-
-| Type | Rust Type | Size | Purpose |
-| --- | --- | --- | --- |
-| Signing key | `SigningKey` | 32 bytes | Private key for producing signatures |
-| Verifying key | `VerifyingKey` | 32 bytes | Public key for checking signatures |
-| Signature | `Signature` | 64 bytes | The Ed25519 signature output |
-
-### Key Generation
-
-```rust
-let signer = Signer::generate();           // Random keypair from OsRng
-let pub_key = signer.verifying_key();       // Extract public key
-let priv_bytes = signer.signing_key_bytes(); // Export private key
-```
-
-Keys are hex-encoded for storage:
-
-```bash
-steganographer keygen --output mykey
-# Creates: mykey.key (64 hex chars = 32 bytes private key)
-#          mykey.pub (64 hex chars = 32 bytes public key)
-```
-
-### Key Derivation (KDF)
-
-A single master secret can derive all three working keys (signing,
-encryption, embedding) via BLAKE3's `derive_key` with fixed domain-separation
-context strings (`steganographer-signing-v1`, `steganographer-encryption-v1`,
-`steganographer-embedding-v1`). This is a **fast** KDF for already
-high-entropy material — it is *not* a password hashing function.
-
-For human-chosen passwords, Steganographer stretches the password with
-**Argon2id** (RFC 9106) before feeding the result through the same
-domain-separated derivation:
-
-| Property | Master secret (BLAKE3) | Password (Argon2id) |
-| --- | --- | --- |
-| Algorithm | BLAKE3 `derive_key` | Argon2id v0x13 |
-| Input | ≥ 32 bytes high-entropy | Any memorable password |
-| Salt | none (context-separated) | 128-bit random, must be persisted |
-| Default cost | — | 19 MiB / 2 iterations / 1 lane (OWASP minimums) |
-| Brute-force resistance | key-strength | memory-hard |
-| CLI | `derive --master-secret*` | `derive --password* --salt <hex>` |
-
-Argon2id parameters below the OWASP floor are accepted with a warning; the
-library rejects only *algorithmically invalid* parameters (memory < 8 KiB ×
-lanes, 0 iterations/lanes, output length outside 16–64 bytes).
-
----
-
-## Pluggable Signing Backends
-
-Steganographer supports multiple signing backends via the `SignerBackend` trait, configurable through `steganographer.toml`:
-
-```toml
-[video.pipeline.payload]
-signing_backend = "ed25519"   # default
-# signing_backend = "ethereum"  # requires --features ethereum
-```
-
-### Backend Comparison
-
-| Property              | Ed25519 (default)              | Ethereum (secp256k1)                    | ML-DSA (FIPS 204)                          | Hybrid (Ed25519 + ML-DSA) |
-| --------------------- | ------------------------------ | --------------------------------------- | ------------------------------------------ | ------------------------- |
-| Curve/scheme          | Curve25519 (twisted Edwards)   | secp256k1 (Koblitz)                     | Module-Lattice (ML-DSA-44/65/87)           | Both of the adjacent halves |
-| Hash function         | BLAKE3 (for frame hash)        | Keccak-256 (EIP-191 personal_sign)      | FIPS 204 internal (SHAKE)                  | Per-half                  |
-| Signature size        | 64 bytes                       | 64 bytes (r, s)                         | 2,420 / 3,309 / 4,627 bytes (44/65/87)     | 64 + ML-DSA size          |
-| Public key size       | 32 bytes                       | 33 bytes (SEC1)                         | 1,312 / 1,952 / 2,592 bytes                | 32 + ML-DSA size          |
-| Signing speed         | ~50 μs                         | ~50 μs                                  | Slower (lattice operations)                | Sum of both halves        |
-| Key format            | 32-byte raw                    | 32-byte raw (SEC1)                      | 32-byte seed (FIPS 204 Algorithm 6)        | Concatenated `pk ∥ mldsa_pk` |
-| Identity format       | Hex public key (64 chars)      | Ethereum address (0x + 40 hex chars)    | `ml-dsa-<level>:<16-byte-pk-hex-prefix>`   | `hybrid:<ed25519>/<mldsa>` |
-| Standard              | RFC 8032                       | EIP-191 / SEC 2                         | FIPS 204                                   | Combination               |
-| Feature flag          | (default, always available)    | `--features ethereum`                   | (always available)                         | (always available)        |
-
-### ML-DSA (FIPS 204) — Real Post-Quantum Signatures
-
-The `MlDsaBackend` implements **real FIPS 204 ML-DSA** via the RustCrypto
-[`ml-dsa` crate](https://crates.io/crates/ml-dsa) (pure Rust; note that the
-crate has **not** been independently audited):
-
-- **Parameter sets**: `MlDsaLevel::MlDsa44` / `MlDsa65` / `MlDsa87` map 1:1 to
-  the crate's `MlDsa44` / `MlDsa65` / `MlDsa87`; signature and public-key
-  sizes are the exact FIPS 204 encoded sizes (see table above).
-- **Key generation**: `from_seed` passes the caller's 32 bytes directly as the
-  ml-dsa `Seed` — FIPS 204 Algorithm 6 (`ML-DSA.KeyGen_internal`), where
-  SHAKE-256 expands the seed into ρ, ρ′ and K. The same seed always yields
-  the same key pair.
-- **Signing**: deterministic ML-DSA (FIPS 204 Algorithm 2, deterministic
-  variant, empty context string). Same seed + same message ⇒ byte-identical
-  signature.
-- **Verification**: real public-key verification (FIPS 204 Algorithm 3,
-  `ML-DSA.Verify`, empty context string), available without any private key
-  material via `MlDsaVerifier` (from raw FIPS 204 public-key bytes or a typed
-  `ml_dsa::VerifyingKey`).
-
-`HybridBackend` produces concatenated signatures `(Ed25519_sig ∥ ML-DSA_sig)`
-and public keys `(Ed25519_pk(32) ∥ ML-DSA_pk)`; `HybridVerifier` verifies from
-public keys only and requires **both** halves to be valid.
-
-> **Migration note (pre-0.8 payloads are NOT verifiable):** signatures
-> produced by the pre-0.8 placeholder "ML-DSA" scheme — keyed BLAKE3-XOF MACs
-> over the private seed, whose "public key" could not verify anything — are
-> **not verifiable** by `MlDsaBackend` or `MlDsaVerifier`. Payloads signed
-> with that scheme must be **re-signed** with the real implementation.
-
-### Ethereum / EIP-191 Signing
-
-The Ethereum backend implements the `personal_sign` message format used by MetaMask and other Ethereum wallets:
-
-1. **Message prefix**: `"\x19Ethereum Signed Message:\n" + len(data)` is prepended
-2. **Keccak-256 hash**: The prefixed message is hashed with Keccak-256 (32 bytes)
-3. **secp256k1 ECDSA**: The hash is signed using `sign_prehash` to produce a 64-byte (r, s) signature
-
-The Ethereum address is derived from the public key: `Keccak-256(uncompressed_pubkey[1..65])[12..32]`.
-
-```rust
-use steganographer_core::EthereumBackend;
-
-let backend = EthereumBackend::generate();
-let sig = backend.sign(frame_data);
-assert!(backend.verify(frame_data, &sig));
-println!("Address: {}", backend.ethereum_address()); // 0x...
-```
-
----
-
-## SignaturePayload Format
-
-The `SignaturePayload` is the atomic unit of cryptographic data embedded into media frames. The v2 format includes a magic header and version number for format identification and future compatibility:
-
-```mermaid
-block-beta
-    columns 5
-    A["magic\n4 bytes (\"STEG\")"]:1
-    B["version\n1 byte (= 2)"]:1
-    C["frame_index\n8 bytes (u64 LE)"]:1
-    D["hash\n32 bytes"]:1
-    E["signature\n64 bytes"]:1
-    style A fill:#5c1a1a,stroke:#a33c3c,color:#fff
-    style B fill:#3a3a3a,stroke:#888,color:#fff
-    style C fill:#5c1a1a,stroke:#a33c3c,color:#fff
-    style D fill:#1a3a5c,stroke:#2d6da3,color:#fff
-    style E fill:#2d5016,stroke:#4a8c2a,color:#fff
-```
-
-**Total: 109 bytes** (`SERIALIZED_SIZE = 4 + 1 + 8 + 32 + 64`)
-
-### Format Identification
-
-Every payload begins with:
-- **Magic header** (4 bytes): ASCII `STEG` — identifies the data as a Steganographer payload
-- **Version** (1 byte): Currently `2` — allows future format evolution
-
-Extraction validates both the magic header and version before parsing. Non-matching data returns `None` (no payload found), preventing false positives from random LSB data. The `has_valid_magic()` helper provides a quick check without full deserialization.
-
-### Serialization
-
-```rust
-// Serialize to 109-byte array
-let bytes: [u8; 109] = payload.to_bytes();
-
-// Deserialize from 109-byte array (validates magic + version)
-let payload = SignaturePayload::from_bytes(&bytes)?;
-
-// Quick check without full deserialization
-if SignaturePayload::has_valid_magic(&some_bytes) {
-    // Likely a valid steganographer payload
+fn verify_delivered_rgb(
+    pinned_public_key: &[u8; 32],
+    extracted_payload: &SignaturePayload,
+    delivered_rgb: &[u8],
+    width: u32,
+    height: u32,
+) -> anyhow::Result<bool> {
+    let binding = canonicalize(delivered_rgb, "lsb_video", 1, width, height, 109)?;
+    let verifier = Verifier::from_bytes(pinned_public_key)?;
+    Ok(verifier.verify(extracted_payload, &binding, None))
 }
 ```
 
-All multi-byte fields use **little-endian** byte order.
+The caller supplies the payload actually extracted from those delivered pixels and a separately trusted public key. This example uses one LSB and the default BLAKE3 hash; preserve the matching bit depth/hash for other settings. Verification of a standalone payload against unrelated supplied bytes is not proof that those bytes were delivered in a file.
 
----
+For an exact-artifact commitment, retain the original file and its SHA-256 digest. CLI OTS commits to **every input file byte**, unlike canonical media signing. Repackaging identical pixels into a different PNG or Matroska container changes that file digest even if media verification still succeeds.
 
-## Signing Flow
+## Strict Ed25519 and other library backends
 
-```mermaid
-sequenceDiagram
-    participant F as Frame Data
-    participant H as Hasher
-    participant S as Signer (Ed25519/Ethereum)
-    participant P as SignaturePayload
+Ed25519 uses a 32-byte signing seed, 32-byte public key and 64-byte signature. Generation uses OS randomness. Verification uses strict Ed25519 checks; raw public-key imports reject weak keys, including small-order identities. Generic payload-signature and hybrid verification also enforce strict Ed25519 verification rather than permissive acceptance.
 
-    F->>H: frame_index || video_bytes || audio_bytes
-    H->>H: Compute 256-bit hash
-    H->>S: hash (32 bytes)
-    S->>S: Sign(private_key, hash)
-    S->>P: SignaturePayload { magic, version, frame_index, hash, signature }
+`SignerBackend` exposes additional **library** implementations:
+
+| Backend | Contract |
+| --- | --- |
+| `Ed25519Backend` | Ed25519 signing and strict verification |
+| `EthereumBackend` (feature `ethereum`) | secp256k1 EIP-191 personal-message prefix and Keccak-256; address derived from the public key |
+| `MlDsaBackend` / `MlDsaVerifier` | Real FIPS 204 ML-DSA-44/65/87 through RustCrypto `ml-dsa`; public-key-only verification is available |
+| `HybridBackend` / `HybridVerifier` | Ed25519 and ML-DSA concatenation; both signature halves must verify |
+
+ML-DSA signatures are 2,420 / 3,309 / 4,627 bytes, with public keys of 1,312 / 1,952 / 2,592 bytes for levels 44/65/87. These are not drop-in replacements for the fixed 109-byte legacy Ed25519 payload. Historical placeholder “ML-DSA” MACs cannot be verified by the real implementation and must be re-signed. The RustCrypto ML-DSA implementation is not claimed to be independently audited.
+
+Ed25519 and secp256k1 are not post-quantum signatures. Available ML-DSA/hybrid library APIs do not make every CLI, dashboard or carrier path post-quantum. Live signed pipelines and the dashboard currently support **Ed25519**, not wallet-driven signing. EIP-191 compatibility in a library is not MetaMask integration, on-chain publication or proof of a person's identity.
+
+## Generic packet signatures and metadata
+
+The generic packet magic is `STG3`, with protocol version **1.0**, independently of legacy `FORMAT_VERSION = 4`. Its transform pipeline is:
+
+```text
+sign logical payload → optional DEFLATE → optional password KDF / AEAD
+→ optional Reed-Solomon ECC → embed
 ```
 
-## Verification Flow
+The Ed25519 descriptor contains `public_key(32) || signature(64)`. Verification occurs over the recovered logical bytes after reversing the other transforms. It does **not** sign every semantic envelope field. CRC32C and the unkeyed content digest provide structural/corruption checks, not trusted authorship. Filename, MIME, timestamps and other metadata must not be treated as signer-authorized merely because payload verification succeeds. If such meaning must be authenticated, include it in the signed logical payload using an application-defined encoding.
 
-```mermaid
-sequenceDiagram
-    participant F as Frame Data
-    participant E as Extractor
-    participant H as Hasher
-    participant V as Ed25519 Verifier
+AEAD associated data is specifically:
 
-    E->>E: Extract SignaturePayload from LSBs
-    E->>E: Validate magic header "STEG" + version
-    F->>H: frame_index || video_bytes || audio_bytes
-    H->>H: Recompute 256-bit hash
-    H->>V: Constant-time comparison (ct_eq) of extracted vs computed hash
-    V->>V: Verify(public_key, hash, signature)
-    V-->>V: ✅ VALID or ❌ INVALID
+```text
+packet_id(16) || payload_kind:u16 BE || original_length:u64 BE
 ```
 
----
+This is not full-envelope authentication. Unknown critical fields/unsupported transforms and flag/transform inconsistencies fail closed; preserving unknown non-critical metadata does not authenticate it.
 
-## Threat Model
+Generic CLI `decode`/`extract --trusted-signer <full-public-key-hex>` rejects unsigned packets and mismatched signing keys. Reports distinguish `signer_public_key` from `signer_trusted`. Without a trusted pin, a mathematically valid self-supplied signer is still untrusted.
 
-### What This Protects Against
+### Frozen protocol-v1 vectors
 
-| Threat | Protection |
-| --- | --- |
-| Frame content modification | Hash (BLAKE3/SHA-256/SHA-3) will mismatch |
-| Frame index manipulation (replay/reorder) | Frame index is included in the hash domain |
-| Signature forgery | Ed25519 requires the private key |
-| Audio-video desynchronization | Combined hash covers both streams |
+The historical packet and placement `.hex` fixtures and SHA-256 sidecars under [`steganographer-core/testdata/packets/`](../steganographer-core/testdata/packets/) remain frozen. Their [`manifest.json`](../steganographer-core/testdata/packets/manifest.json) records the documented test keys, deterministic inputs, raw AEAD nonce/AAD derivation and protocol-1.0 framing. They are compatibility evidence, not production secrets or secure nonce-generation examples. The v4 legacy cutover does not rewrite these generic packet/carrier bytes.
 
-### What This Does NOT Protect Against
+## Payload encryption and nonce responsibility
 
-| Limitation | Notes |
-| --- | --- |
-| Side-channel attacks | Hash comparison uses constant-time `ct_eq`; no constant-time guarantees for signing beyond what `ed25519-dalek` provides |
-| Quantum adversaries | Ed25519 is not post-quantum, but real ML-DSA and hybrid (Ed25519 + ML-DSA) signing backends are available (`MlDsaBackend`, `HybridBackend`, and public-key-only `MlDsaVerifier`/`HybridVerifier`) |
-| Key compromise | If the private key leaks, all signatures can be forged |
-| Frame removal | Missing frames are detectable only by frame index gaps |
-| Re-encoding attacks | Lossy transcoding destroys LSB-embedded data |
+ChaCha20-Poly1305 uses a separate 32-byte key. Raw `encryption::encrypt` / `decrypt` retain the protocol-v1 layout:
 
-### Key Management Recommendations
+```text
+salt(4) || ciphertext || Poly1305_tag(16)
+nonce = BLAKE3(salt || packet_id)[..12]
+```
 
-1. **Generate keys per-session** — Each recording session should use a fresh keypair
-2. **Store private keys securely** — Use OS keychain or encrypted storage
-3. **Distribute public keys out-of-band** — Share verification keys through a trusted channel
-4. **Rotate keys regularly** — Limit the blast radius of any key compromise
+**Raw callers must supply a fresh 16-byte packet ID for every encryption under a key, including retries.** A four-byte random salt alone is not sufficient protection for repeated packet IDs; do not use a zero ID or infer nonce safety from frame indices or public locator nonces. Encryption is randomized, not a mathematical guarantee of collision-free nonces for an unlimited number of messages.
 
----
+Legacy workflows use `encrypt_legacy` / `decrypt_legacy` instead:
 
-## Provable Security Model
+```text
+STGE(4) || wrapper_version(1 byte = 1) || random_packet_id(16)
+|| salt(4) || ciphertext || tag(16)
+```
 
-### EUF-CMA Security
+The wrapper generates a fresh random 128-bit packet ID and adds **41 bytes** (`LEGACY_ENCRYPTION_OVERHEAD`). Its version is separate from both legacy signature v4 and STG3 protocol 1.0. Decryption requires this wrapper; there is **no historical raw zero-ID fallback**. Capacity calculations must use actual transformed ciphertext length. Authentication failure is an error, never a request to try plaintext.
 
-Steganographer's signature scheme provides **Existential Unforgeability under Chosen Message Attack (EUF-CMA)**:
+## Derivation, storage and caller-owned secrets
 
-- An adversary with access to a signing oracle (can request signatures on arbitrary frames) still cannot forge a valid signature on a *new* frame without the private key
-- Ed25519 achieves EUF-CMA security under the Discrete Logarithm assumption on Curve25519
+BLAKE3 context-separated derivation produces signing, encryption and embedding keys from high-entropy master material (`steganographer-signing-v1`, `steganographer-encryption-v1`, `steganographer-embedding-v1`). This fast KDF does not make a weak password strong. Password routes use Argon2id with a persisted salt and bounded work parameters; preserve the parameters needed for recovery. Generic password transforms and legacy encryption are different supported interfaces, not interchangeable flags.
 
-### Collision Resistance
+Owned encryption-key and master/derived-key buffers use zeroization. This does not erase caller-owned borrowed passwords, exported key arrays/strings, copies, command-line history, swap, crash dumps or backups. Callers remain responsible for secret lifetimes and storage. Session derivation is not forward secrecy: possession of the master can regenerate derived keys.
 
-BLAKE3 (and SHA-256/SHA-3-256) provides **128-bit collision resistance**: finding two distinct frame payloads with the same hash requires ~2^128 operations. This ensures:
+Use separate signing/encryption/placement keys, restrict access to plaintext `.key` files, back up necessary decryption/extraction context securely, and distribute public keys out-of-band. Rotation needs an authenticated key transition/revocation policy; generating a fresh key alone does not establish continuity.
 
-- **Preimage resistance**: Given a hash, finding any frame that produces it is infeasible
-- **Second preimage resistance**: Given a frame, finding another frame with the same hash is infeasible
-- **Collision resistance**: Finding any two frames with the same hash is infeasible
+## Source map and further reading
 
----
+Implementation contracts: [`crypto.rs`](../steganographer-core/src/crypto.rs), [`carrier_binding.rs`](../steganographer-core/src/carrier_binding.rs), [`encryption.rs`](../steganographer-core/src/encryption.rs), [`transforms.rs`](../steganographer-core/src/transforms.rs), [`signer_backend.rs`](../steganographer-core/src/signer_backend.rs), [`kdf.rs`](../steganographer-core/src/kdf.rs).
 
-## Post-Quantum Cryptography Considerations
-
-### Current Vulnerability
-
-Ed25519 relies on the hardness of the Elliptic Curve Discrete Logarithm Problem (ECDLP). Shor's algorithm on a sufficiently large quantum computer would solve ECDLP in polynomial time, breaking Ed25519.
-
-### Migration Path
-
-| Component | Current | Post-Quantum Replacement | Status |
-| --- | --- | --- | --- |
-| Signing | Ed25519 (64B sig) | `MlDsaBackend` — ML-DSA-44/65/87 via the RustCrypto `ml-dsa` crate | **Implemented** (FIPS 204; see the backend table above) |
-| Signing (belt-and-braces) | — | `HybridBackend` — Ed25519 + ML-DSA dual signature | **Implemented** (`HybridVerifier` verifies both halves) |
-| Hashing | BLAKE3 (32B) | BLAKE3 (unchanged) | Quantum-resistant (Grover: 128→64 bit, still safe) |
-| Key generation | `OsRng` | `OsRng` (unchanged) | N/A |
-
-**Impact on Steganography**: ML-DSA signatures are ~50× larger than Ed25519 (3,309 bytes for ML-DSA-65 vs 64 bytes). A legacy v2 frame payload carrying one would grow from 109 bytes to ~3,354 bytes, requiring ~26,832 pixel bytes at LSB-1 (still easily fits in a 640×480 frame with 921,600 bytes).
-
----
-
-## Cryptographic Dependencies
-
-| Crate | Version | Purpose | Audited |
-| --- | --- | --- | --- |
-| `blake3` | 1.5.x | Hashing (default) | [Official audits](https://github.com/BLAKE3-team/BLAKE3) |
-| `sha2` | 0.10.x | SHA-256 hashing (FIPS 180-4) | Widely reviewed |
-| `sha3` | 0.10.x | SHA-3-256 hashing (FIPS 202) + Keccak-256 for Ethereum | Widely reviewed |
-| `ed25519-dalek` | 2.x | Ed25519 signing/verification | [Dalek audits](https://github.com/dalek-cryptography/ed25519-dalek) |
-| `k256` | 0.13.x | secp256k1/Ethereum signing (feature-gated) | Reviewed |
-| `chacha20poly1305` | 0.10.x | Payload encryption (AEAD) | Audited, RFC 8439 |
-| `subtle` | 2.x | Constant-time comparison | Audited, anti-timing-attack |
-| `rand` | 0.8.x | Key generation (OsRng) | Widely reviewed |
-| `ml-dsa` | 0.1.1 | FIPS 204 ML-DSA post-quantum signing/verification | **Not audited** — RustCrypto, pure Rust; used for real ML-DSA and hybrid backends |
-
-All dependencies use the standard Ed25519 specification (SHA-512 internal prehash per RFC 8032). The configurable hash algorithm (BLAKE3/SHA-256/SHA-3) is used **only** for hashing frame data, not as a replacement for Ed25519's internal hash.
-
----
-
-## Further Reading
-
-- [Steganography Theory](steganography-theory.md) — Information-theoretic foundations and steganalysis
-- [Security](security.md) — Threat analysis and steganalysis resistance
-- [Algorithms](algorithms.md) — Implementation details of LSB embedding protocols
+See [Security](security.md), [Threat Model](threat-model.md), [OpenTimestamps](ots-integration.md), and [Steganography Theory](steganography-theory.md). Primitive security assumptions and dependency advisories are not an exhaustive security assessment of the composed application.
