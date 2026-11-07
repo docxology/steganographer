@@ -2,13 +2,13 @@
 
 ## Module Details
 
-### main.rs
+### cli.rs and main.rs
 
-- `Cli` — `#[derive(Parser)]` with `--config`, `--log-level`, `--quiet`, and
-  `--schema-version` global flags (v1 gates the machine JSON envelope)
-- `Commands` — `Video`, `Audio`, `Encode`, `Decode`, `Verify`, `Keygen`,
-  `Info`, `Analyze`, `Scan`, `Derive`, `Dashboard`, `Revoke`, `Config`, and `Ots`
-- `main()` — initializes `env_logger`, dispatches to `cmd_*::run()`
+- `cli.rs` defines `Cli`, `Commands` and `OtsAction`; the binary and `build.rs`
+  share this schema for parsing, five shell completions and all manual pages.
+- The native schema has 15 top-level commands, including generic `Decode` and
+  `Extract`; GStreamer-free builds omit live `Video` and `Audio`.
+- `main.rs` initializes logging/envelope context and dispatches commands.
 
 ### envelope.rs
 
@@ -20,6 +20,12 @@
   exit-code table (0/1/2/3/4/5/6) via `classify_exit`
 - JSON-mode context so the central error path emits error envelopes on
   stdout; secrets are never serialized
+
+### key_policy.rs
+
+- `load_signing_key` — zeroized fixed-size secret ingestion and known-compromise denial
+- `load_revocations` — one shared registry load per command; only an omitted,
+  genuinely absent default is optional, never an explicit or malformed policy
 
 ### cmd_video.rs
 

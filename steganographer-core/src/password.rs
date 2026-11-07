@@ -24,7 +24,7 @@
 //!
 //! ## Example
 //!
-//! ```ignore
+//! ```
 //! use steganographer_core::password::{self, Argon2Params};
 //!
 //! let salt = password::generate_salt();
@@ -37,6 +37,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Salt length in bytes (128-bit, unique per password).
 pub const SALT_LEN: usize = 16;
@@ -159,6 +160,9 @@ pub fn generate_salt() -> [u8; SALT_LEN] {
 ///
 /// The output length is `params.output_len` (32 bytes by default). The same
 /// `salt` and `params` must be supplied to reproduce the secret later.
+///
+/// The returned owned buffer is secret material. The caller MUST erase it after
+/// use, preferably by immediately wrapping it in [`zeroize::Zeroizing`].
 pub fn derive_master_from_password(
     password: &[u8],
     salt: &[u8],
@@ -182,9 +186,10 @@ pub fn derive_master_from_password(
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
 
     let mut output = vec![0u8; params.output_len];
-    argon
-        .hash_password_into(password, salt, &mut output)
-        .map_err(|e| PasswordKdfError::DerivationFailed(e.to_string()))?;
+    if let Err(error) = argon.hash_password_into(password, salt, &mut output) {
+        output.zeroize();
+        return Err(PasswordKdfError::DerivationFailed(error.to_string()));
+    }
     Ok(output)
 }
 
@@ -199,7 +204,7 @@ pub fn derive_all_from_password(
     salt: &[u8],
     params: &Argon2Params,
 ) -> Result<crate::kdf::DerivedKeys, PasswordKdfError> {
-    let master = derive_master_from_password(password, salt, params)?;
+    let master = Zeroizing::new(derive_master_from_password(password, salt, params)?);
     Ok(crate::kdf::derive_all(&master))
 }
 

@@ -2,294 +2,122 @@
 
 ## Overview
 
-Steganographer is organized as a four-crate Cargo workspace following a strict layered architecture with clean dependency boundaries.
+Steganographer has five workspace crates. Media acquisition and delivery are separate from packet/carrier algorithms; network and filesystem features in core are optional, not a promise that every core feature is I/O-free.
 
 ```mermaid
-block-beta
-    columns 3
-    CLI["steganographer-cli\nClap CLI · Config · Logs"]:3
-    GST["steganographer-gst\nGStreamer · AppSink"]:1
-    DASH["steganographer-dashboard\nAxum GUI · WebSocket"]:1
-    space:1
-    CORE["steganographer-core\nPackets · Carriers · Crypto · Stego Algorithms"]:3
-    style CLI fill:#5c1a1a,stroke:#a33c3c,color:#fff
-    style GST fill:#1a3a5c,stroke:#2d6da3,color:#fff
-    style DASH fill:#3d1a3d,stroke:#7a3c7a,color:#fff
-    style CORE fill:#2d5016,stroke:#4a8c2a,color:#fff
+flowchart TD
+    CLI[steganographer-cli] --> GST[steganographer-gst]
+    CLI --> DASH[steganographer-dashboard]
+    CLI --> CORE[steganographer-core]
+    GST --> CORE
+    DASH --> CORE
+    WASM[steganographer-wasm] --> CORE
 ```
 
 ## Design Principles
 
-### 1. Strict Layering
+### Layering and module boundaries
 
-- **`steganographer-core`** has **zero** dependencies on GStreamer, OS APIs, or I/O. It only knows about raw `&[u8]` buffers and metadata structs. This makes it testable without any system dependencies.
-- **`steganographer-gst`** depends on `core` and provides the bridge between GStreamer buffer types and core's `VideoFrame`/`AudioBuffer` types.
-- **`steganographer-dashboard`** depends on `core` and provides a live web GUI for round-trip steganography verification via Axum + WebSocket.
-- **`steganographer-cli`** depends on all three and adds user interaction (CLI, config files, logging).
+| Crate | Responsibility |
+| --- | --- |
+| `steganographer-core` | Packet framing, bounded decode, carrier geometry, canonical carrier binding, crypto, stego kernels, statistical and structural analysis; optional learned/OTS/signing features |
+| `steganographer-gst` | Native elements and AppSink/AppSrc bridges, packed pixel/sample conversion, caps/segments, bus errors and EOS delivery |
+| `steganographer-dashboard` | Axum HTTP/WebSocket service, optional WebRTC transport, shared signed-media pipeline, bounded caches and browser UI |
+| `steganographer-cli` | Validated configuration, media file I/O, key/output policy, command dispatch and machine-readable outcomes |
+| `steganographer-wasm` | Browser-facing packet/carrier/forensic APIs with checked JS numeric boundaries and explicit decode limits |
 
-### 2. Trait-Based Extensibility
+`carrier_binding` lives in core and is shared by CLI and native signing. It defines which carrier regions a kernel owns. Hashing excludes those regions so extraction can verify delivered media without an unsigned private copy. This does **not** authenticate every container byte, ancillary metadata field, or arbitrary rendering transformation.
 
-Legacy signed-frame algorithms implement one of two media traits:
+### Trait-based algorithms and generic packets
 
-```rust
-pub trait VideoStegoModule: Send {
-    fn embed(&mut self, frame: &mut VideoFrame, sig: Option<&SignaturePayload>) -> Result<()>;
-    fn extract(&self, frame: &VideoFrame) -> Result<Option<SignaturePayload>>;
-}
+Legacy media modules implement `VideoStegoModule` or `AudioStegoModule`; both expose fallible embedding and `Result<Option<SignaturePayload>>` extraction. A trait implementation is not sufficient to establish a compatible signed-media pipeline: the signing canonicalization must match its exact placement.
 
-pub trait AudioStegoModule: Send {
-    fn embed(&mut self, buf: &mut AudioBuffer, sig: Option<&SignaturePayload>) -> Result<()>;
-    fn extract(&self, buf: &AudioBuffer) -> Result<Option<SignaturePayload>>;
-}
-```
+The opt-in generic packet path separates `PacketCodec` framing from `CarrierEmbedder`/`CarrierExtractor` placement. Locator-first bounded decoding and explicit `DecodeLimits` apply before trusting declared sizes. Generic signatures authenticate logical payload bytes, not arbitrary semantic envelope metadata. A signed packet without a separately pinned signer establishes mathematical integrity, not authorship.
 
-New algorithms (DCT, spread-spectrum, wavelet, etc.) simply implement the trait and plug into the pipeline.
+Legacy `SignaturePayload` format 4 retains its fixed 109-byte size, with unambiguous frame index, media lengths and audio-presence framing. Earlier legacy formats are rejected and must be re-encoded. Frozen STG3 protocol-v1 packets are a separate format.
 
-The opt-in generic path separates packet framing from carrier placement:
+### Configurable pipelines, not arbitrary signed chains
 
-```rust
-pub trait PacketCodec {
-    type Value;
-    fn encode(&self, value: &Self::Value, output: &mut Vec<u8>) -> Result<(), PacketError>;
-    fn decode(&self, input: &[u8], limits: &DecodeLimits) -> Result<Self::Value, PacketError>;
-}
+Plain rendering/kernel APIs may compose operations. Signed live pipelines accept exactly one supported invisible kernel. Mixing invisible embedding with a visible text/info-bar overlay, or selecting unsupported encryption/ECC/spreading in a live path, fails rather than silently ignoring settings.
 
-pub trait CarrierEmbedder { /* checked capacity + byte packet embedding */ }
-pub trait CarrierExtractor { /* locator-first bounded packet extraction */ }
-```
+Spread-spectrum uses keyed bounded integer residue/QIM and majority detection. Its video trait maps green pixels only; its audio trait maps the first PCM channel. Offline scalar helpers operate on byte/sample slices instead. Native trait-based SS signing is rejected because the offline canonical binding is not the same mapping. Earlier additive/averaged SS artifacts must be re-embedded.
 
-This keeps protocol serialization independent of media I/O and lets legacy
-`SignaturePayload` coexist with the `GenericPacket` alpha.
-
-### 3. Configurable Pipeline Chains
-
-The config system supports ordered lists of stego modules:
-
-```toml
-[video.stego]
-pipeline = ["lsb_signature", "overlay"]
-```
-
-Each module is instantiated in order and applied sequentially to every frame.
-
----
-
-## Crate Dependency Graph
-
-```mermaid
-graph TD
-    CLI["steganographer-cli<br/>Binary"]
-    GST["steganographer-gst<br/>GStreamer Bridge"]
-    DASH["steganographer-dashboard<br/>Web Dashboard"]
-    CORE["steganographer-core<br/>Pure Algorithms"]
-    
-    CLI --> GST
-    CLI --> DASH
-    CLI --> CORE
-    GST --> CORE
-    DASH --> CORE
-    
-    style CORE fill:#2d5016,stroke:#4a8c2a,color:#fff
-    style GST fill:#1a3a5c,stroke:#2d6da3,color:#fff
-    style DASH fill:#3d1a3d,stroke:#7a3c7a,color:#fff
-    style CLI fill:#5c1a1a,stroke:#a33c3c,color:#fff
-```
-
----
-
-## Module Map
-
-### steganographer-core
-
-| Module | Purpose | Lines | Tests |
-| --- | --- | --- | --- |
-| `config.rs` | TOML configuration model and parsing | ~180 | 4 |
-| `crypto.rs` | BLAKE3 hashing + Ed25519 signing/verification | ~260 | 7 |
-| `signer_backend.rs` | Pluggable signing backends (Ed25519, Ethereum/secp256k1) | ~440 | 14 |
-| `video.rs` | `VideoFrame`, `VideoFormat`, `VideoStegoModule` trait | ~55 | — |
-| `audio.rs` | `AudioBuffer`, `AudioStegoModule` trait | ~42 | — |
-| `packet.rs` | Bounded generic locator, canonical envelope, packet and legacy codecs | ~1180 | 9 |
-| `carrier.rs` | Shared carrier contracts; byte + PCM S16 LSB kernels (sequential + keyed placement) | ~1000 | 13 |
-| `forensics.rs` | Structural detectors: entropy, magic-byte family, embedded signature/packet magic | ~250 | 5 |
-| `lsb_video.rs` | Sequential LSB video embedding/extraction | ~290 | 5 |
-| `lsb_audio.rs` | Keyed PRNG LSB audio embedding/extraction | ~340 | 7 |
-| `overlay.rs` | Text overlay with built-in bitmap font | ~340 | 9 |
-| `info_bar.rs` | Exoteric overlay (QR, barcode, hash, timestamp) | ~150 | 5 |
-| `metrics.rs` | Lock-free pipeline performance counters | ~120 | 5 |
-| `lib.rs` | Module declarations and re-exports | ~37 | — |
-| `learned/mod.rs`* | Learned watermarking: 8×8 DCT chip embedding with trained MLP decoder (opt-in `learned` feature) | ~860 | gated* |
-
-\* Feature-gated behind `learned`; gated tests do not run under default features.
-
-### steganographer-gst
-
-| Module | Purpose | Lines |
-| --- | --- | --- |
-| `lib.rs` | GStreamer init, pipeline launch helpers | ~40 |
-| `plugin.rs` | Plugin registration skeleton | ~45 |
-| `video_filter.rs` | AppSink/AppSrc video buffer processing | ~180 |
-| `audio_filter.rs` | AppSink/AppSrc audio buffer processing | ~175 |
-
-### steganographer-dashboard
-
-| Module | Purpose | Lines | Tests |
-| --- | --- | --- | --- |
-| `lib.rs` | LiveConfig, DashboardState, Axum router, HTTP handlers, session API | ~290 | 12 |
-| `ws_handler.rs` | WebSocket encode/decode handlers, frame signing, full signature + timestamp | ~660 | — |
-| `static/index.html` | Three-tab dashboard (Video/Audio/Docs), config controls, copy-to-clipboard | ~690 | — |
-| `static/app.js` | Client JS: webcam, QR overlay, config, MetaMask, keyboard shortcuts, session export | ~1000 | — |
-| `static/audio_tab.js` | Audio tab: microphone, waveform/spectrum, audio WebSocket, WAV recording | ~710 | — |
-| `static/docs_tab.js` | Documentation viewer: markdown rendering, syntax highlighting, search | ~250 | — |
-| `static/style.css` | Premium dark theme, glassmorphism, animations, help tooltips, kbd hints | ~1790 | — |
-
-### steganographer-cli
-
-| Module | Purpose | Lines |
-| --- | --- | --- |
-| `main.rs` | Clap CLI entry point, 15 subcommands incl. generic packet `decode`, forensic `scan`, and OpenTimestamps `ots` | — |
-| `cmd_video.rs` | Live video pipeline command | ~130 |
-| `cmd_audio.rs` | Live audio pipeline command | ~90 |
-| `cmd_encode.rs` | Correctness-preserving legacy offline encode, capacity, info, and analysis | ~1330 |
-| `cmd_packet.rs` | Opt-in generic packet encode/decode vertical slice | ~300 |
-| `cmd_scan.rs` | Bounded forensic scan of files/directories (JSONL + exit policy) | ~230 |
-| `cmd_verify.rs` | Legacy signature extraction and verification | ~1010 |
-| `media_io.rs` | Decoded image/WAV/raw carrier I/O and output compatibility policy | ~330 |
-| `carrier_binding.rs` | Kernel-canonical carrier bytes used by signing and verification | ~130 |
-
----
+DCT embedding checks extraction from reconstructed integer blocks before committing writes; unstable saturation is an error, not a successful watermark. Neither DCT nor SS implies universal codec robustness. Learned watermarking is an optional fallible library API for a short payload; its decoder score is not an identity proof.
 
 ## Data Flow
 
-### Embedding Pipeline
-
-```mermaid
-flowchart TD
-    CAM["📷 Physical Camera/Mic"] --> GST_SRC["GStreamer Source\n(v4l2src, avfvideosrc, pulsesrc)\n→ AppSink"]
-    GST_SRC -->|"Raw GstBuffer"| CONV["Buffer Conversion\n(steganographer-gst)\nVideoFrameRef → VideoFrame"]
-    CONV --> CRYPTO["🔐 BLAKE3 + Ed25519\n(crypto.rs)\n→ SignaturePayload (109 bytes)"]
-    CRYPTO --> STEGO["📦 Stego Module Chain\nLSB embed → text overlay → InfoBar\nModifies pixels in-place"]
-    STEGO --> GST_SINK["GStreamer Sink\n(v4l2sink, autovideosink, filesink)\n← AppSrc"]
-    GST_SINK --> OUT["🖥️ Virtual Camera / Output File"]
-    style CAM fill:#333,stroke:#e53935,color:#e0e0e0
-    style CRYPTO fill:#333,stroke:#e53935,color:#e0e0e0
-    style STEGO fill:#333,stroke:#e53935,color:#e0e0e0
-```
-
-### Verification Pipeline
-
-```mermaid
-flowchart TD
-    INPUT["📂 Input File/Stream"] --> EXTRACT["📦 Stego Extract\n→ SignaturePayload (109 bytes)"]
-    EXTRACT --> HASH["🔑 Recompute BLAKE3\nhash of frame data"]
-    HASH --> VERIFY["✍️ Ed25519 Verify\n(public_key, hash, signature)"]
-    VERIFY --> VALID["✅ VALID"]
-    VERIFY --> INVALID["❌ INVALID"]
-    style VALID fill:#2d5016,stroke:#4a8c2a,color:#fff
-    style INVALID fill:#5c1a1a,stroke:#a33c3c,color:#fff
-```
-
----
-
-## Threading & Memory Models
-
-### macOS Audio/Video Context (`NSRunLoop`)
-
-macOS native UI APIs (like `NSWindow` used by `osxvideosink`) and AVFoundation capture devices (`avfvideosrc`) strictly require that they are instantiated on a thread running an active `NSRunLoop` (specifically the main thread).
-To bridge GStreamer into this Apple ecosystem, the application uses `gstreamer::macos_main()`.
-
-1. The **Main Thread** is hijacked to pump the `NSRunLoop` (via `[NSApp run]`).
-2. The **Pipeline Setup and Iteration** runs inside a spawned GCD background closure.
-
-### AppSink Decoupling
-
-Live media sources (cameras) drop frames or lock up if they cannot push their streams in real-time. Because our steganography operations run entirely in software on the CPU, we decouple the timing domains of the `AppSink` (source capture) and `AppSrc` (playback/sink) using explicit buffering:
-
-```text
-... ! queue max-size-buffers=5 ! appsink   [CPU Processing]   appsrc ! queue max-size-buffers=5 ! ...
-```
-
-This prevents deadlock where the rendering sink waiting on the main thread blocks the camera capture thread.
-
-### CVPixelBuffer and Objective-C AutoRelease Pools
-
-When pulling frames from `avfvideosrc` into Rust's background threads, the raw macOS `CVPixelBuffer` references are temporarily bridged into GStreamer. However, because GCD background threads do not automatically pump an `NSAutoreleasePool`, these buffer references leak.
-
-Unreleased frames will permanently exhaust Apple's hardware pool limit of ~35 frames (exactly 1 second of 30FPS video), halting the camera entirely. We bypass this via a custom RAII `Drop` guard:
-
-```rust
-struct AutoReleasePool; // Calls objc_autoreleasePoolPush/Pop
-```
-
-Instantiated on every frame loop iteration, it forces the hardware pool to instantly recycle memory.
-
----
-
-## Error Handling
-
-- Core crate uses `anyhow::Result` for all fallible operations
-- Capacity errors (frame too small for payload) are explicit `anyhow::bail!` with descriptive messages
-- GStreamer errors map to `gst::FlowError` for pipeline integration
-- CLI uses `anyhow::Result` in `main()` for clean error reporting
-
----
-
-## Config-Driven Pipeline Construction
-
-The `run.sh` interactive menu reads pipeline parameters from `steganographer.toml` at startup:
+### Native embedding and delivery
 
 ```mermaid
 flowchart LR
-    TOML["📄 steganographer.toml\n[video.pipeline]\nwidth, height, framerate\nopacity, payload"] -->|"read_toml_value"| VARS["🔧 run.sh Variables\nVIDEO_WIDTH\nVIDEO_HEIGHT\nVIDEO_FPS\nOPACITY"]
-    VARS --> CAPS["🎬 GStreamer\nCaps String"]
-    TOML -->|"Rust Config"| RUST["⚙️ VideoPipelineConfig\n_or_default() helpers"]
-    style TOML fill:#333,stroke:#e53935,color:#e0e0e0
-    style CAPS fill:#1a3a5c,stroke:#2d6da3,color:#fff
+    SOURCE[Native source] --> DECODE[Decode and negotiate caps]
+    DECODE --> PACK[Validate layout and pack media]
+    PACK --> SIGN[Canonicalize and sign]
+    SIGN --> EMBED[Supported invisible kernel]
+    EMBED --> SINK[AppSrc and output sink]
 ```
 
-The Rust `VideoPipelineConfig` struct mirrors this TOML section with `_or_default()` helper methods.
+Rows are packed for signing: row padding is not image content. Native exact file outputs are RGB Matroska (`.mkv`) and PCM WAV (`.wav`). File audio is gathered within its bounded whole-file budget and signed at index 0; explicit `max_buffers` limits the selection. Downstream errors and EOS drain/finalization are part of delivery, not just a successful appsrc push. Arbitrary downstream lossy codecs or screen capture may destroy embedded data.
 
----
+### Dashboard signed-media pipeline
+
+1. Accept bounded image/PCM input and snapshot the validated configuration for that operation.
+2. Canonicalize carrier media and sign with the actual runtime Ed25519 signer using BLAKE3.
+3. Embed LSB data and return **lossless PNG** or the actual signed **S16LE PCM** bytes.
+4. Verify from the post-embed delivered artifact: PNG is decoded again; audio uses the delivered samples. Extraction and canonical hashing use that artifact's metadata, not the latest configuration or pre-embed snapshots.
+5. Publish asynchronous verification results with the artifact index and server-wide monotonic cache revision. Connection-local sequence/index values alone are not unique across reconnects.
+
+The public identity returned by the API is the public key of this same signer, stable for that server runtime. Restarting may generate a different key. It is not independently established person/organization identity. CLI/library consumers, including private caller applications, must independently pin a trusted public key rather than trust a key delivered alongside an artifact.
+
+### UI, archives and independent verification
+
+The browser displays **server-reported** verification and matches it to the current artifact's index/revision. It does not independently verify the exported archive. Camera/request and transport generations discard stale asynchronous work; the client allows one outstanding signing request. Server admission, verification queues, image/audio limits and WebRTC chunk/reply budgets bound work. Overload fails visibly rather than creating an unbounded queue.
+
+Recordings are bounded stored-ZIP archives of sampled signed PNG snapshots or returned PCM WAV chunks plus an extraction manifest. The manifest records public key, indices, bit depth and, for audio, the public extraction key. These are not continuous VP9/WebM recordings or uninterrupted microphone capture; sampling, backpressure and capture gaps remain relevant. Reaching an archive cap stops recording visibly. Verify the downloaded PNG/WAV entries separately with a trusted public key and their manifest parameters; successful browser counters alone do not prove their contents.
+
+Preview opacity affects display only, not the signed media. Signed visual overlays, QR provenance, MetaMask and Ethereum dashboard signing are unavailable, not alternate working modes. Core/library Ethereum, ML-DSA and hybrid signing support does not imply those backends work in the dashboard or fixed Ed25519 legacy media format.
+
+## Threading & Memory Models
+
+### macOS application ownership
+
+Cocoa/AVFoundation application bootstrap belongs to the executable. The CLI dispatches native video/audio commands through `gstreamer::macos_main` before constructing Tokio. Reusable headless library operations do not enter a process-global Cocoa loop on a caller's worker/test thread. Applications embedding the library own any required native main-loop integration.
+
+### AppSink/AppSrc lifecycle
+
+Bridges decouple source and sink with bounded queues, preserve negotiated caps/segments, validate stride and sample layouts, observe both buses and drain EOS. A per-iteration autorelease-pool guard scopes Objective-C temporaries on macOS. No fixed hardware-pool exhaustion threshold is promised across devices.
+
+Dashboard shutdown/reconnect clears pending requests, timers, sockets, RTC peers, chunk assemblies and capture tracks. WebRTC peers are also reaped after failure, disconnection or idle/never-connected deadlines; transport cleanup is required even when signaling fails.
+
+## Dashboard Authentication and Transport Policy
+
+- Default bind is loopback. A network bind without an auth token is not a secure deployment; use a trusted reverse proxy/TLS where needed.
+- Configured bearer auth guards mutations and `/api/webrtc/config` (which may disclose ICE configuration). Public read routes are not blanket-authenticated.
+- Tokenless browser mutations reject a foreign Origin. WebSocket upgrades enforce their Origin gate and, when configured, a token via the supported query/subprotocol mechanism. CORS is not an authentication boundary; absent-Origin nonbrowser requests are not proof of local identity.
+- HTTP config uses the existing **snake_case** schema. UI hydration precedes serialized full-object updates. Unsupported signer/hash/kernel/encryption/ECC settings reject.
+- Video transport preference is URL query, then saved choice, then server default. Only `auto` may fall back from WebRTC to WebSocket; pinned WebRTC fails visibly. A transient fallback is not saved as the user's preference. Audio uses WebSocket.
+- The Docs tab inserts rendered Markdown only after sanitization; absent/failed renderer or sanitizer falls back to text. Documentation content is not trusted executable HTML.
+
+## Analysis and Trust Boundaries
+
+RS/chi-squared outputs are statistical diagnostics, not calibrated natural-image probabilities. Unavailable statistics must remain unavailable rather than look like a clean result. ZIP/OOXML, PDF and Unicode analysis report findings, `detected`, completeness and bounded-resource reasons separately. A positive finding remains positive if display evidence is capped; an incomplete negative is not a clean bill of health.
+
+OpenTimestamps commits the exact file SHA-256, unlike kernel-canonical media signatures. Pending calendar proofs are not Bitcoin-confirmed. Verification relies on an explicitly trusted Esplora provider, not independent full-node validation; see the dedicated integration guide.
+
+## Error Handling
+
+Capacity, layout, reconstruction, configuration, authentication and downstream delivery errors propagate through fallible APIs. CLI absence (exit 2), failed verification/revocation (exit 3), findings and partial scans are distinct outcomes; extraction without a public key is explicitly not verified. Invalid explicit configuration or malformed revocation state must not silently fall back to defaults.
 
 ## Architectural Decision: C2PA Interoperability
 
-**Status:** Deferred — monitor, do not implement yet.
-
-**Context:** C2PA (Coalition for Content Provenance and Authenticity) / Content
-Credentials is a mature, industry-backed standard (Adobe, Google, Microsoft) for
-content provenance. It defines manifest stores embedded in media files (JPEG, PNG,
-MP4) that record creation/editing history, signing identity, and assertions.
-
-**Decision:** Steganographer will **not** emit or consume C2PA manifests in the
-near term. The custom steganographic format (BLAKE3 + Ed25519 + LSB embedding)
-serves a different use case — real-time per-frame signing of live streams — that
-C2PA's file-based manifest model does not directly address.
-
-**Rationale:**
-1. C2PA operates on finished files, not live streams. Steganographer's core
-   value is signing frames as they are captured, before they hit a container.
-2. C2PA's manifest store adds ~2-10KB per file, which would be impractical for
-   per-frame embedding in a live pipeline.
-3. The custom format's QR overlay provides human-visible provenance that C2PA
-   does not offer.
-
-**Revisit when:**
-- C2PA adds a streaming/real-time profile
-- A user needs to produce C2PA-compliant output from Steganographer-signed media
-- The project targets content authentication workflows where C2PA is a hard
-  requirement (e.g., newsroom ingest, legal evidence)
-
-**If implemented:** Add a `steganographer c2pa-export` command that reads a
-signed media file and produces a C2PA manifest from the embedded signatures,
-rather than replacing the custom format.
-
----
+**Status: not implemented.** Steganographer does not emit or consume C2PA manifests. Its custom signed-carrier format must not be represented as C2PA-compliant provenance. A future interoperability design would need its own signed scope, trust and delivery requirements rather than relying on a visual QR mark.
 
 ## Further Reading
 
-- [Configuration](configuration.md) — Full TOML schema with `[video.pipeline]`
-- [GStreamer Integration](gstreamer.md) — Pipeline construction details
-- [API Reference](api-reference.md) — Complete Rust API including `VideoPipelineConfig` and audio WebSocket handlers
-- [Steganography Theory](steganography-theory.md) — Information hiding foundations
-- [Security](security.md) — Threat models, use cases, deployment guidance
-- [Threat Model](threat-model.md) — Adversary model, attack categories, security boundaries
-- [Contributing](contributing.md) — Adding new modules and config options
+- [Algorithms](algorithms.md) — Placement, capacity and reconstruction limits
+- [Configuration](configuration.md) — TOML and dashboard configuration
+- [GStreamer Integration](gstreamer.md) — Native ownership and delivery
+- [API Reference](api-reference.md) — Public interfaces and routes
+- [FAQ: dashboard](faq.md#dashboard) — Recordings and trust expectations
+- [Security](security.md) — Threat and deployment boundaries
+- [OTS Integration](ots-integration.md) — Exact-artifact timestamp proofs

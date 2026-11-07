@@ -1,10 +1,9 @@
 //! Structural forensic detectors for the standard media scan.
 //!
-//! Complements the statistical detectors in [`crate::steganalysis`] with cheap,
-//! content-agnostic probes that need no container parsing: Shannon entropy,
-//! magic-byte file identification, and embedded signature/packet-magic scanning.
-//! Every probe here is non-recursive and bounded — it only looks at the bytes it
-//! is given and never opens containers, follows links, or touches the network.
+//! Bounded zero-I/O observations: entropy and statistics, inline magic, decoded
+//! text, and nonrecursive ZIP/OOXML and lexical PDF inspection. No filesystem
+//! access, link following or network operations. Coverage cutoffs are separate
+//! from positive detections; malformed structure alone is not concealment.
 //! Unicode/text steganography probes delegate to [`crate::unicode_text`];
 //! see [`detect_text_stego`].
 
@@ -93,7 +92,7 @@ impl FileFamily {
 
 /// Identify a file family from leading magic bytes.
 ///
-/// The probe reads at most the first 12 bytes and never decodes the file.
+/// Reads bounded header bytes (1024 for PDF, 262 for tar), never decodes files.
 pub fn detect_file_family(data: &[u8]) -> FileFamily {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         return FileFamily::Png;
@@ -116,7 +115,11 @@ pub fn detect_file_family(data: &[u8]) -> FileFamily {
     if data.starts_with(b"II*\x00") || data.starts_with(b"MM\x00*") {
         return FileFamily::Tiff;
     }
-    if data.starts_with(b"%PDF") {
+    if data.starts_with(b"%PDF")
+        || data[..data.len().min(1024)]
+            .windows(5)
+            .any(|window| window == b"%PDF-")
+    {
         return FileFamily::Pdf;
     }
     if data.starts_with(b"PK\x03\x04")
@@ -204,17 +207,45 @@ pub fn detect_embedded_magics_detailed(data: &[u8]) -> Vec<EmbeddedMagicMatch> {
 
 /// Scan decoded text for Unicode/text steganography markers (FOR-005).
 ///
-/// Thin adapter over [`crate::unicode_text`]: validates UTF-8 and applies the
-/// module's bounded 1 MiB scan cap. Non-UTF-8 buffers yield no text findings
-/// (they are not text). Reported offsets are character offsets into the
-/// decoded text, not byte offsets.
+/// Validates only the bounded 1 MiB prefix, excluding a character split by the
+/// boundary. Binary prefixes yield no text findings. Invalid suffix bytes past
+/// the budget cannot erase earlier evidence. Offsets count decoded characters.
 pub fn detect_text_stego(data: &[u8]) -> Vec<unicode_text::TextFinding> {
-    unicode_text::analyze_bytes(data)
+    let end = data.len().min(unicode_text::MAX_TEXT_SCAN_BYTES);
+    let window = &data[..end];
+    match std::str::from_utf8(window) {
+        Ok(text) => unicode_text::analyze_text(text),
+        Err(error) if error.error_len().is_none() && end < data.len() => {
+            unicode_text::analyze_bytes(&window[..error.valid_up_to()])
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Byte budget for the inline embedded-magic scan: [`scan_bytes`] scans at
 /// most the first [`MAX_MAGIC_SCAN_BYTES`] bytes for `STEG`/`STG3` magics.
 pub const MAX_MAGIC_SCAN_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum retained inline-magic locations; positives remain latched at the cap.
+pub const MAX_MAGIC_FINDINGS: usize = 256;
+/// Bound for entropy and statistical observations in the top-level scanner.
+pub const MAX_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
+
+/// Container evidence and coverage are independent: an incomplete scan can
+/// still positively identify a concealment channel.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerAnalysis {
+    pub findings: Vec<ContainerFinding>,
+    pub detected: bool,
+    pub incomplete_reasons: Vec<String>,
+}
+
+/// Add a stable reason once, keeping report metadata bounded.
+pub(super) fn incomplete(reasons: &mut Vec<String>, code: &str) {
+    if reasons.len() < 32 && !reasons.iter().any(|reason| reason == code) {
+        reasons.push(code.to_string());
+    }
+}
 
 /// One container-aware finding: an evidence location, the detector family
 /// that produced it, and a bounded human-readable detail line.
@@ -275,36 +306,36 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
     &[
         DetectorInfo {
             id: "STAT_CHI2",
-            summary: "Chi-squared attack over byte-value pairs (LSB embedding equalizes pair histograms).",
-            budget: "single pass over the full input, O(n) time, constant memory",
-            fp_limits: "high-entropy compressed/encrypted data can fire; reported as an observation backed by confidence, never a verdict alone",
-            calibration: "benign: smooth gradient bitmap; triggered: LSB-laced bitmap (corpus STAT_CHI2)",
+            summary: "Chi-squared pair-histogram equality compatibility (not a steganography probability).",
+            budget: "first MAX_ANALYSIS_BYTES (67108864) bytes, O(n), constant memory",
+            fp_limits: "balanced clean, compressed or noisy data can match equality; upper-tail p is a null-compatibility score, never a verdict alone",
+            calibration: "unchanged ascending/even ramp bytes demonstrate equality compatibility and rejection respectively; neither is a labeled stego cover",
         },
         DetectorInfo {
             id: "STAT_SPA",
-            summary: "Sample-pair analysis of LSB deviations between adjacent sample pairs.",
-            budget: "single pass over the full input, O(n) time, constant memory",
-            fp_limits: "natural noise-heavy imagery can produce weak positives; confidence below the aggregate threshold is ignored",
-            calibration: "benign: smooth gradient bitmap; triggered: LSB-laced bitmap (corpus STAT_SPA)",
+            summary: "Adjacent sample-pair and pair-histogram heuristic, not a validated embedding-rate estimator.",
+            budget: "first MAX_ANALYSIS_BYTES (67108864) bytes, O(n), constant memory",
+            fp_limits: "natural noisy or structured data can trigger this heuristic; its score is not a probability and never sets the forensic verdict",
+            calibration: "unchanged even/ascending ramps exercise the documented heuristic, not empirical detector accuracy",
         },
         DetectorInfo {
             id: "STAT_RS",
-            summary: "RS analysis of group regularity under LSB flipping, estimating the embedding rate.",
-            budget: "single pass over the full input with fixed 8-byte groups",
-            fp_limits: "dithered or quantized media can shift the discriminant; weak results are folded into the combined verdict",
-            calibration: "benign: smooth gradient bitmap; triggered: LSB-laced bitmap (corpus STAT_RS)",
+            summary: "RS masked group regularity and quadratic embedding-rate estimate.",
+            budget: "first MAX_ANALYSIS_BYTES (67108864) bytes with fixed 8-byte groups, constant-memory masked discriminants",
+            fp_limits: "requires correlated suitable samples; degenerate or nonphysical fits are explicitly inconclusive; score is a rate estimate, not probability",
+            calibration: "historical ramps are degenerate controls; independently enumerated random-LSB replacement controls exercise the estimator",
         },
         DetectorInfo {
             id: "MAGIC_FILE_FAMILY",
             summary: "Identify a file family from leading magic bytes (observation accompanying every scan).",
-            budget: "first 12 bytes of input (262 bytes for tar ustar)",
-            fp_limits: "prefix match only; extended headers, polyglots, and prepended-data containers are not resolved",
+            budget: "first 1024 bytes for PDF, 262 bytes for tar, at most 12 bytes for other families",
+            fp_limits: "bounded header identification only; arbitrary polyglots and prefixed non-PDF containers are not resolved",
             calibration: "benign: plain text (unknown); triggered: PNG/JPEG/ZIP headers (corpus MAGIC_FILE_FAMILY)",
         },
         DetectorInfo {
             id: "MAGIC_EMBEDDED",
             summary: "Inline `STEG`/`STG3` signature and packet magic scan with byte offsets.",
-            budget: "first MAX_MAGIC_SCAN_BYTES (16777216) bytes, 4-byte sliding window",
+            budget: "first MAX_MAGIC_SCAN_BYTES (16777216) bytes, at most MAX_MAGIC_FINDINGS (256) retained locations",
             fp_limits: "any ordinary text containing the ASCII letters STEG or STG3 matches; offsets are evidence, not payloads",
             calibration: "benign: plain text; triggered: inline STG3 packet bytes (corpus MAGIC_EMBEDDED)",
         },
@@ -373,9 +404,9 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
         },
         DetectorInfo {
             id: "DOC-004",
-            summary: "Bounded PDF structural scan: header/version, %%EOF inventory and trailing data, trailer/startxref sanity, object-keyword scan (/EmbeddedFile, /JavaScript, /JS, /OpenAction, /Launch, /URI, /AcroForm), XMP presence, suspicious /Filter chains, and a literal-string text channel.",
-            budget: "first pdf::PDF_MAX_FILE_BYTES (67108864) bytes; at most pdf::PDF_MAX_OBJECTS_SCANNED (8192) objects and pdf::PDF_MAX_STRING_LENGTH (4096) bytes per literal string; extracted text capped at unicode_text::MAX_TEXT_SCAN_BYTES (1048576) bytes; stream inflate capped at 262144 bytes per stream / 1048576 bytes total",
-            fp_limits: "AcroForm and http(s)/mailto /URI links stay observational (common in legitimate PDFs); stacked-filter and appended-data evidence is suspicious but does not prove payload recovery; invisible-text rendering heuristics (text render mode 3, off-page Td positioning) are out of scope and skipped",
+            summary: "Bounded lexical PDF scan: escaped names, objects/comments/strings, all direct URI values, stream filters, final EOF, UTF-8 and BOM-marked UTF-16 text.",
+            budget: "first 64 MiB; 8192 objects, 64 KiB object windows, 4096 decoded bytes/string, 1 MiB text; streams searched within 8 MiB, zlib output 256 KiB/stream and 1 MiB total, 16 inflates; 64 findings including cap sentinel",
+            fp_limits: "AcroForm, ordinary URI links and malformed structure stay observational; unsupported filters/object streams/encodings and resource cutoffs are incomplete; no renderer, CMap, glyph or invisible-text interpretation",
             calibration: "benign: minimal clean PDF (no DOC-004 findings); triggered: PDF with an /EmbeddedFile object (corpus DOC-004)",
         },
     ]
@@ -384,13 +415,13 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
 /// Aggregated forensic scan of one byte buffer.
 #[derive(Debug, Clone)]
 pub struct ForensicScan {
-    /// Shannon entropy in bits per byte.
+    /// Shannon entropy in bits per byte over at most MAX_ANALYSIS_BYTES.
     pub entropy: f64,
     /// File family inferred from magic bytes.
     pub file_family: FileFamily,
     /// Embedded signature/packet magic, if present inline.
     pub embedded_magic: Option<EmbeddedMagic>,
-    /// All inline embedded magic matches and their offsets.
+    /// Retained inline magic matches, bounded by MAX_MAGIC_FINDINGS.
     pub magic_matches: Vec<EmbeddedMagicMatch>,
     /// Unicode/text steganography findings (FOR-005 detector IDs).
     pub text_findings: Vec<unicode_text::TextFinding>,
@@ -398,12 +429,18 @@ pub struct ForensicScan {
     /// DOC-001/DOC-002/DOC-003, PDF DOC-004; empty for non-container
     /// inputs).
     pub container_findings: Vec<ContainerFinding>,
-    /// Aggregated statistical detector results.
+    /// Positive container verdict, independent of retained display evidence.
+    pub container_detected: bool,
+    /// Resource or unsupported-parse cutoffs prevented complete scoped analysis.
+    pub incomplete: bool,
+    /// Bounded, stable machine-readable coverage reason codes.
+    pub incomplete_reasons: Vec<String>,
+    /// Statistical observations over at most MAX_ANALYSIS_BYTES.
     pub statistical: CombinedResult,
     /// `true` if a content-derived detector (inline magic, Unicode/text, or
     /// a DOC-002/DOC-003/DOC-004 container concealment finding) flags the
     /// buffer as suspicious. Statistical detector results are observations
-    /// (see [`statistical`]): high-entropy or structured input can trip them
+    /// (see [`ForensicScan::statistical`]): high-entropy or structured input can trip them
     /// on clean data, so they never trigger the verdict by themselves.
     pub detected: bool,
     /// Human-readable summary of the strongest finding.
@@ -420,25 +457,49 @@ pub struct ForensicScan {
 /// registry); entropy, file family, ZIP topology, DOC-001 topology
 /// anomalies, and PDF structural observations likewise stay observational.
 pub fn scan_bytes(data: &[u8]) -> ForensicScan {
-    let statistical = steganalysis::analyze_combined(data);
-    let entropy = shannon_entropy(data);
+    let mut incomplete_reasons = Vec::new();
+    let bounded = &data[..data.len().min(MAX_ANALYSIS_BYTES)];
+    if bounded.len() != data.len() {
+        incomplete(&mut incomplete_reasons, "analysis_byte_limit");
+    }
+    let statistical = steganalysis::analyze_combined(bounded);
+    let entropy = shannon_entropy(bounded);
     let file_family = detect_file_family(data);
-    let magic_matches =
-        detect_embedded_magics_detailed(&data[..data.len().min(MAX_MAGIC_SCAN_BYTES)]);
-    let container_findings = match file_family {
+    if data.len() > MAX_MAGIC_SCAN_BYTES {
+        incomplete(&mut incomplete_reasons, "magic_byte_limit");
+    }
+    let magic_window = &data[..data.len().min(MAX_MAGIC_SCAN_BYTES)];
+    let mut magic_matches = Vec::new();
+    for (offset, window) in magic_window.windows(4).enumerate() {
+        let magic = match window {
+            b"STEG" => EmbeddedMagic::LegacySignature,
+            b"STG3" => EmbeddedMagic::GenericPacket,
+            _ => continue,
+        };
+        if magic_matches.len() == MAX_MAGIC_FINDINGS {
+            incomplete(&mut incomplete_reasons, "magic_finding_limit");
+            break;
+        }
+        magic_matches.push(EmbeddedMagicMatch { magic, offset });
+    }
+    let container = match file_family {
         FileFamily::Zip => ooxml::analyze_package(data),
         FileFamily::Pdf => pdf::analyze_pdf(data),
-        _ => Vec::new(),
+        _ => ContainerAnalysis::default(),
     };
+    for reason in container.incomplete_reasons {
+        incomplete(&mut incomplete_reasons, &reason);
+    }
+    let container_findings = container.findings;
+    let container_detected = container.detected;
     let embedded_magic = magic_matches.first().map(|m| m.magic);
-    let text_findings = unicode_text::analyze_bytes(data);
-    let container_detected = container_findings.iter().any(|f| {
-        f.family == ooxml::DOC_002_FAMILY
-            || f.family == ooxml::DOC_003_FAMILY
-            || f.family == pdf::DOC_004_FAMILY
-    });
+    let text_end = data.len().min(unicode_text::MAX_TEXT_SCAN_BYTES);
+    if text_end != data.len() {
+        incomplete(&mut incomplete_reasons, "text_byte_limit");
+    }
+    let text_findings = detect_text_stego(data);
     let detected = embedded_magic.is_some() || !text_findings.is_empty() || container_detected;
-    let message = if let Some(magic) = embedded_magic {
+    let mut message = if let Some(magic) = embedded_magic {
         format!("embedded {} magic found inline", magic.as_str())
     } else if !text_findings.is_empty() || container_detected {
         // The summary must reflect every non-statistical family that fired:
@@ -473,6 +534,9 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
     } else {
         "no forensic indicators".to_string()
     };
+    if !incomplete_reasons.is_empty() {
+        message.push_str("; analysis incomplete (examined scope only)");
+    }
     ForensicScan {
         entropy,
         file_family,
@@ -480,6 +544,9 @@ pub fn scan_bytes(data: &[u8]) -> ForensicScan {
         magic_matches,
         text_findings,
         container_findings,
+        container_detected,
+        incomplete: !incomplete_reasons.is_empty(),
+        incomplete_reasons,
         statistical,
         detected,
         message,

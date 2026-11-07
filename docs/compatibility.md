@@ -1,107 +1,167 @@
-# Compatibility & Deprecation Policy
+# Compatibility and Migration
 
-This document is the normative compatibility contract for the Steganographer
-workspace. It defines versioning semantics, wire-format compatibility rules,
-deprecation procedure, the MSRV policy, and the supported platform matrix.
+## Versioning
 
-## 1. Semantic Versioning (0.x crate semantics)
+The workspace is on the 0.8 release line. Before 1.0, a minor release may make
+breaking Rust/API or legacy format changes with an explicit migration note;
+patch releases do not change wire contracts or MSRV. Generic packet protocol
+versioning is independent of the crate version. See [CHANGELOG](../CHANGELOG.md)
+for release changes and [CLI Reference](cli-reference.md) for current flags.
 
-All workspace crates are published at `0.x` versions. Under 0.x SemVer:
+## 0.7 to 0.8 cutover
 
-- **Patch releases** (`0.7.z`) contain bug fixes only. No API, wire-format, or
-  MSRV changes.
-- **Minor releases** (`0.7.0` → `0.8.0`) MAY contain breaking API changes,
-  wire-format changes, deprecation removals, and MSRV bumps. A minor bump is
-  therefore the compatibility horizon: code that compiles against
-  `steganographer-core = 0.7` is not guaranteed to compile against `0.8`
-  without a migration note in the [CHANGELOG](../CHANGELOG.md).
-- **Pre-1.0 maturity**: the wire packet format (see §2) is treated as more
-  stable than the Rust API. Breaking the wire format is never a patch-level
-  change and is avoided outside minor releases.
+### Legacy media signatures: format 4
 
-## 2. Wire-Format Compatibility
+The fixed 109-byte legacy `SignaturePayload` remains magic, version, index,
+hash and Ed25519 signature, but its format version is now **4**. Canonical
+hash input unambiguously frames index, video length, audio presence and audio
+length. Legacy versions 2/3 are rejected, not silently verified using the old
+ambiguous hash. **Re-encode original source media**; changing a version byte is
+not migration. Keyed legacy audio placement also changed with format 4; use
+matching encoder/extractor and the actual signed chunk index.
 
-### 2.1 Generic packet (major v1)
+Signatures bind canonical media content, excluding kernel-owned regions/low
+bits as appropriate. They do not authenticate every container byte, rendered
+metadata or the semantics of arbitrary envelopes. A pinned trusted signer is
+needed for identity; a public key carried alongside a signature does not
+independently prove a person or organization.
 
-The generic packet locator declares a protocol version (`STG3` magic +
-`1.0`). Within packet major version **v1**:
+### Legacy encryption: `STGE` wrapper
 
-- **Additive only.** New envelope TLV field ids, new placement/kernel
-  algorithm ids, and new flag bits may be added in minor releases. Decoders
-  MUST ignore unknown non-critical fields and reject unknown critical fields
-  (fail closed).
-- **No field removals or re-orderings.** Existing field ids, flag bit values,
-  descriptor encodings, and the locator layout are immutable within v1.
-- **Breaking changes → `/v2`.** Any change that removes/reorders a field,
-  changes the magic, or invalidates the locator/accounting layout requires a
-  new packet major version (`2.0` in the locator), a new parser module, and a
-  migration note. v1 decoders reject v2 packets loudly, never silently
-  misdecode.
+Legacy encrypted payloads now require wrapper version 1 with a fresh random
+128-bit packet ID, adding 41 bytes. There is no raw/zero-ID legacy fallback.
+Re-encode from source with retained explicit encryption credentials. This does
+**not** change frozen generic STG3 protocol-v1 raw AEAD bytes. Callers of the
+raw encryption API must ensure packet-ID uniqueness for each key.
 
-### 2.2 Legacy signature payload (`crypto::FORMAT_VERSION`)
+### Generic packets: STG3 protocol v1 preserved
 
-The 109-byte legacy payload (`MAGIC || FORMAT_VERSION || frame_index ||
-hash || signature`) carries its own format version byte. Bumping
-`crypto::FORMAT_VERSION` is a wire-format change that makes older payloads
-loudly rejected (`Unsupported payload version`) instead of misdecoded:
+The STG3 locator and protocol-v1 golden packet/carrier bytes remain unchanged.
+Within that protocol, unknown non-critical fields can be ignored; unknown
+critical fields fail closed. Existing field IDs, descriptors, flags, locator
+layout and transform signature/AAD encodings must not be repurposed. A breaking
+wire layout requires a new protocol major version, not a rewritten fixture.
+Frozen `.hex` vectors and integrity sidecars are evidence, not outputs to
+regenerate to make a changed implementation pass.
 
-- Bump `FORMAT_VERSION` **only** when the legacy wire layout or its
-  cryptographic primitives change (precedent: 2 → 3 with the Reed-Solomon
-  `ALPHA` 2 → 3 change).
-- Every `FORMAT_VERSION` bump MUST land in a **minor release** with a
-  migration note in the CHANGELOG ("no in-place migration path; re-encode
-  from source media" where applicable) and MUST be accompanied by the
-  version-coupling tests in `steganographer-core/src/crypto.rs`.
+Generic signatures authenticate logical payload bytes, not arbitrary semantic
+metadata. Decode/extract now support `--trusted-signer` to require the expected
+Ed25519 public key. Reports distinguish `signer_public_key` from
+`signer_trusted`; unsigned/mismatched packets fail when a pin is supplied.
+Both commands also enforce the shared `--revoked-list` registry and immutable
+known-compromise policy before payload output, with or without a pin. Empty or
+absent local policy cannot restore the documented compromised identity.
 
-### 2.3 Golden vectors
+### CLI behavior and flags
 
-The golden-vector corpus in
-`steganographer-core/testdata/packets/` is **stable** (owner-approved
-2026-09-21, see `manifest.json` `status`):
+- Both **decode and extract** use `--decryption-key` /
+  `--decryption-key-file`; extract's old encryption-key spellings are removed,
+  not retained as aliases. Encode uses `--encryption-key*`.
+- Extract uses the same bounded validation, transform reversal and digest/
+  signature checks as decode. It is not a raw unchecked envelope bypass.
+- Verify with no public key returns extraction-only `not_verified`.
+  `no_signature` is exit 2, `packet_not_found`; `valid_revoked` is exit 3,
+  `verification_failed`. Both error envelopes retain their result.
+- Machine output uses `steganographer.cli/v1`, not an unwrapped result.
+  User/config errors are exit 1; runtime errors are exit 6; scans distinguish
+  positive findings (4) from inconclusive cutoffs without findings (5).
+- Explicit missing/invalid config and revocation files fail. Effective packet
+  limits reach extraction/parsing/transform reversal. Auto-bits probes real
+  depths and preserves recognized authentication failure precedence.
+- Password options are generic-packet-only, not accepted-and-ignored on legacy
+  encode. Prefer `--password-file`. Generated encryption/placement secrets may
+  not be silently lost in JSON: supply recoverable explicit credentials.
+- Outputs are atomic and no-clobber by default. Explicit decode/extract force
+  replaces the directory entry without truncating another symlink/hardlink
+  target. Secret creation uses Unix 0600 before bytes; Windows ACLs remain the
+  caller's deployment responsibility.
+- Legacy offline spreading is RGB LSB only, 2–8 shards (1 disables). Unsupported
+  audio/SS/DCT spreading and generic spreading fail before writes.
 
-- Stable vectors change **only** in a minor release, with a version-tagged
-  migration note in the CHANGELOG explaining the derivation change.
-- The manifest (`manifest.json`) and fixtures (`<id>.hex` plus
-  `.sha256` sidecars) are immutable between releases; the CI
-  `immutability` job (`golden_vectors` + `calibration` drift gates) fails on
-  any uncommitted drift.
-- Materialization of new fixtures happens only via the owner-facing
-  `--ignored` test in `steganographer-core/tests/golden_vectors.rs`, and only
-  as part of a reviewed minor-release change.
+Dashboard `create_router` now returns `Result<Router>` and rejects a known
+compromised signing identity. Propagate/handle that result instead of assuming
+router construction cannot fail. Native managed signing APIs reject the same key;
+raw core signature mathematics remains separate from authorization.
 
-## 3. Deprecation Policy
+### Live/native contracts
 
-A deprecated API or behavior:
+Shipped signed defaults are LSB-only. Native signed video uses exactly one
+invisible kernel; adding overlays/info bars or multiple signing kernels is not
+supported. Visible modules are separate rendering operations. Signed native
+audio is LSB-only. Native trait SS signing is rejected because its channel
+mapping differs from offline CLI scalar binding. Offline SS now uses bounded
+integer residue/quantization modulation, not additive/pair-averaging behavior;
+re-encode older SS carriers rather than assume placement/modulation identity.
+Current low-level SS sample helpers use typed `u8` / `i16` input and fallible
+results; downstream callers must retain error propagation.
 
-1. Is annotated with `#[deprecated]` (or documented as deprecated) in a
-   **minor release**, with the replacement named in the CHANGELOG.
-2. Remains functional for **at least one full minor cycle**. Removal happens
-   no earlier than the next minor release after the one that deprecated it.
-3. Removal of a deprecated item MUST be called out in the CHANGELOG under the
-   release that removes it, with a migration path.
+Live encryption, ECC and spreading are unsupported; they must not become
+ignored live settings. Use offline encode for supported transform workflows.
+The dashboard supports Ed25519 + BLAKE3 + LSB only; core alternative signer
+APIs do not imply live Ethereum/MetaMask support.
 
-Wire formats and golden vectors are **never** deprecated silently: see §2.
+Native exact-file APIs use RGB Matroska `.mkv` and PCM `.wav`, not arbitrary
+lossy codecs. Audio file signing uses one bounded gathered selection (64 MiB),
+index 0, honoring `max_buffers`. macOS application callers own Cocoa main-loop
+setup; library file calls do not seize the main thread. The CLI handles its
+own live-command dispatch. Startup/Record exports are sampled PNG snapshots /
+PCM chunks with extraction manifests, not continuous signed media.
 
-## 4. MSRV Policy
+### WASM and other Rust callers
 
-- The workspace MSRV is **1.88** (`[workspace.package] rust-version`).
-- The MSRV is bumped **only in minor releases**, never in patches, and the
-  bump must be justified by a concrete dependency or language need recorded
-  in the CHANGELOG.
-- CI enforces the MSRV via the `msrv` job (`dtolnay/rust-toolchain@1.88.0`
-  + `cargo check --workspace --locked`).
+WASM packet report schema is **`steganographer.packet-report.v2`**. All `u64`
+fields are exact decimal strings; migrate consumers away from JavaScript
+Number arithmetic/parsing that loses precision. Original JS numeric inputs
+are range-checked before narrowing. Custom decode limits remain effective at
+the carrier and transform boundaries; callers must handle rejected inputs.
+See [WASM guide](../steganographer-wasm/README.md) for generated binding APIs.
 
-## 5. Supported Platform Matrix
+Native filter signing uses an explicit signing-kernel binding. Propagate
+fallible embed/extract operations rather than replacing errors with apparent
+success. Hash-chain verification of a later segment requires a trusted prior
+hash; exact segment ordinal remains external trusted metadata. See
+[API Reference](api-reference.md) and [GStreamer](gstreamer.md).
 
-| Crate / surface | macOS | Linux | Windows | wasm32 |
-| ---------------- | ----- | ----- | ------- | ------ |
-| `steganographer-core` | yes | yes | yes (gst-free) | yes (subset: packet encode/decode, RGB/PCM carriers, forensic scan) |
-| `steganographer-cli` | yes | yes | yes (gst-free, `--no-default-features`) | — |
-| `steganographer-dashboard` | yes | yes | best effort | — |
-| `steganographer-gst` | yes (via brew) | yes (via apt) | not supported (gst feature excluded) | — |
+### OTS protocol
 
-GStreamer is macOS/Linux-only. The Windows CI job (`test-windows`) builds and
-tests `steganographer-core`, `steganographer-cli`, and `steganographer-wasm`
-with `--no-default-features` (gst-free). Windows support for the gst
-dashboard transport is not offered; build the CLI there without default
-features.
+Only Bitcoin attestations are supported. CLI commitments are SHA-256 of exact
+input files; standard detached proofs live at configured
+`proof_dir/<digest-hex>.ots`, also the omitted-`--proof` verify default. Pending
+is not verified. Verification requires the expected digest and trusted
+canonical-chain Esplora provider; it is not independent full-node validation.
+See [OTS Integration](ots-integration.md) for protocol and proof I/O migration.
+
+## Deprecation and evidence policy
+
+Ordinary API deprecations should name their replacement and migration horizon.
+Security/correctness cutovers may remove unsafe behavior at the minor release
+boundary, as above; unsupported behavior is not kept as a silent shim. Wire
+changes and fixture changes are never silent or patch-level migrations.
+
+Do not preserve wording/default/property echoes as acceptance tests or repin
+them to a new implementation. Preserve meaningful behavior, negative,
+boundary and immutable-wire evidence instead. Canonical test/inventory totals
+are maintained in root `AGENTS.md`, not copied into this policy.
+
+## MSRV
+
+The 0.8 workspace MSRV is **Rust 1.91**, increased in this minor release because
+the updated RTC dependency uses
+[`Ipv4Addr::from_octets`](https://doc.rust-lang.org/1.91.0/std/net/struct.Ipv4Addr.html#method.from_octets),
+stabilized in 1.91. The current OpenH264 wrapper also requires a newer floor
+than 1.88. CI checks the locked all-feature workspace on 1.91; dependencies
+are not vendored or silently downgraded to preserve an inaccurate MSRV.
+
+## Platform boundaries
+
+| Surface | Release boundary |
+| --- | --- |
+| macOS / Linux | Native workspace CI targets; GStreamer integration supported |
+| Windows | GStreamer-free core/CLI/WASM build/test CI subset; no native GStreamer support |
+| wasm32 | Generated-binding facade for packets, RGB/PCM carriers and forensics; no native pipelines/network OTS |
+
+A configured CI job is not evidence of a particular successful hosted run.
+Synthetic headless tests and fake browser media do not establish physical
+camera/microphone, virtual-device or conferencing application coverage.
+Dashboard H.264 preview and third-party lossy pipelines are not exact signed
+artifact transports. See [Platforms](platforms.md) for setup and limitations.

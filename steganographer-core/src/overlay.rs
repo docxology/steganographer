@@ -92,15 +92,25 @@ impl TextOverlay {
 
     /// Render text into a frame at the configured position.
     fn render_text(&self, frame: &mut VideoFrame) -> anyhow::Result<()> {
+        frame.validate_packed_layout()?;
         if self.text.is_empty() {
             return Ok(());
         }
 
         let char_w = 8 * self.scale as u32;
         let char_h = 8 * self.scale as u32;
-        let text_w = self.text.len() as u32 * char_w;
+        let text_w = u32::try_from(self.text.chars().count())?
+            .checked_mul(char_w)
+            .ok_or_else(|| anyhow::anyhow!("Overlay width overflow"))?;
         let text_h = char_h;
         let margin = 4u32;
+        anyhow::ensure!(
+            text_w
+                .checked_add(2 * margin)
+                .is_some_and(|width| width <= frame.width)
+                && text_h + 2 * margin <= frame.height,
+            "Overlay text does not fit the frame"
+        );
 
         // Compute origin based on position
         let (start_x, start_y) = match self.position {
@@ -120,7 +130,7 @@ impl TextOverlay {
         let bpp = match frame.format {
             VideoFormat::Rgb8 => 3,
             VideoFormat::Bgra8 => 4,
-            VideoFormat::Yuv420 => return Ok(()), // not supported for overlay
+            VideoFormat::Yuv420 => unreachable!("validated packed format"),
         };
 
         for (ci, ch) in self.text.chars().enumerate() {
@@ -135,7 +145,8 @@ impl TextOverlay {
                                     start_x + ci as u32 * char_w + col * self.scale as u32 + sx;
                                 let py = start_y + row * self.scale as u32 + sy;
                                 if px < frame.width && py < frame.height {
-                                    let offset = (py * frame.stride + px * bpp as u32) as usize;
+                                    let offset =
+                                        py as usize * frame.stride as usize + px as usize * bpp;
                                     if offset + bpp <= frame.data.len() {
                                         match frame.format {
                                             VideoFormat::Rgb8 => {
@@ -249,6 +260,37 @@ pub fn get_glyph(ch: char) -> [u8; 8] {
 mod tests {
     use super::*;
     use crate::video::VideoFormat;
+    #[test]
+    fn invalid_or_nonfitting_overlay_rejects_before_writing() {
+        for stride in [3, u32::MAX] {
+            let mut data = vec![0x80; 32 * 32 * 3];
+            let before = data.clone();
+            let mut frame = VideoFrame {
+                width: 32,
+                height: 32,
+                stride,
+                format: VideoFormat::Rgb8,
+                data: &mut data,
+                frame_index: 0,
+            };
+            let mut overlay = TextOverlay::new("A".into(), OverlayPosition::TopLeft);
+            assert!(overlay.embed(&mut frame, None).is_err());
+            assert_eq!(data, before);
+        }
+        let mut data = vec![0x80; 32 * 32 * 3];
+        let before = data.clone();
+        let mut frame = VideoFrame {
+            width: 32,
+            height: 32,
+            stride: 96,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        let mut overlay = TextOverlay::new("TOO LONG".into(), OverlayPosition::TopLeft);
+        assert!(overlay.embed(&mut frame, None).is_err());
+        assert_eq!(data, before);
+    }
 
     #[test]
     fn test_overlay_renders_without_panic() {

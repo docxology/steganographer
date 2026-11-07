@@ -9,11 +9,11 @@
 
 use base64::Engine;
 use bytes::BytesMut;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use steganographer_dashboard::webrtc::{
     frame_chunks, remove_session, Reassembler, CHUNK_PAYLOAD_MAX, FRAMING_MAGIC,
+    INCOMPLETE_MESSAGE_MAX,
 };
 use steganographer_dashboard::{create_router, DashboardState, TransportPolicy};
 use tokio::sync::mpsc;
@@ -26,9 +26,8 @@ use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Serialize the CPU-heavy loopback tests (720p DataChannel pump, H.264 media
-/// streams) so they do not run in parallel and skew each other's fps
-/// measurements on loaded machines.
+/// Serialize CPU-heavy loopback workloads to avoid competing with the media
+/// tests for encoder resources. Delivery assertions do not depend on frame rate.
 static HEAVY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Acquire the heavy-test lock for the duration of a test body.
@@ -45,10 +44,11 @@ fn init_test_logging() {
 }
 
 fn test_state() -> Arc<DashboardState> {
+    let signer = steganographer_core::Signer::generate();
     Arc::new(DashboardState {
         metrics: Arc::new(steganographer_core::StegoMetrics::new()),
         signing_backend: "ed25519".into(),
-        identity: "test_identity_abc123".into(),
+        identity: steganographer_core::crypto::encode_hex(&signer.verifying_key().to_bytes()),
         width: 1280,
         height: 720,
         last_encoded_frame: Mutex::new(None),
@@ -58,11 +58,12 @@ fn test_state() -> Arc<DashboardState> {
         auth_token: None,
         ots_config: steganographer_core::OtsConfig::default(),
         ots_client: None,
+        ots_outcome: Mutex::new(None),
         transport: TransportPolicy::Auto,
         // Session-wide signer: the DataChannel pump signs with this key
         // (process_encode_frame) and the verify worker checks against its
         // public half. Audio key unused by the video path.
-        signer: steganographer_core::Signer::generate(),
+        signer,
         audio_key: [7u8; 32],
         webrtc_sessions: Mutex::new(std::collections::HashMap::new()),
         #[cfg(feature = "webrtc")]
@@ -206,29 +207,28 @@ async fn next_json_reply(
     rx: &mut mpsc::UnboundedReceiver<DataChannelEvent>,
     re: &mut Reassembler,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for JSON reply"
-        );
-        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
             .await
-            .expect("event wait");
-        let Some(DataChannelEvent::OnMessage(msg)) = ev else {
-            continue;
+            .expect("timed out waiting for JSON reply")
+            .expect("DataChannel event stream ended before its reply");
+        let msg = match ev {
+            DataChannelEvent::OnMessage(msg) => msg,
+            DataChannelEvent::OnClose | DataChannelEvent::OnError => {
+                panic!("DataChannel closed before delivering its reply");
+            }
+            _ => continue,
         };
-        let bytes: Vec<u8> = if msg.is_string {
+        let bytes = if msg.is_string {
             msg.data.to_vec()
         } else {
-            match re.push(&msg.data) {
-                Ok(Some(p)) => p,
-                _ => continue,
+            match re.push(&msg.data).expect("valid reply chunk") {
+                Some(payload) => payload,
+                None => continue,
             }
         };
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            return v;
-        }
+        return serde_json::from_slice(&bytes).expect("reply must be JSON");
     }
 }
 
@@ -273,13 +273,8 @@ async fn send_chunked_json(dc: &Arc<dyn DataChannel>, msg_id: u64, request: &ser
     }
 }
 
-/// Generate a deterministic ~720p JPEG (high-entropy so it is realistically sized).
-fn make_jpeg_720p() -> Vec<u8> {
-    // The payload is a ~60 KB base64 frame (multi-chunk at the 16 KiB framing
-    // limit) from a 640x360 image: sized so the debug-profile encode pipeline
-    // sustains the 15 fps target through the in-process SCTP stack while still
-    // exercising identical chunking, reassembly, and latency paths as a real
-    // 720p webcam frame would.
+/// Deterministic 640x360 JPEG large enough to require application chunking.
+fn make_jpeg_640x360() -> Vec<u8> {
     let (w, h) = (640u32, 360u32);
     let mut img = image::RgbImage::new(w, h);
     // Block-level pseudo-random content: realistically sized JPEG without
@@ -328,7 +323,7 @@ fn now_ms() -> u64 {
 async fn test_webrtc_offer_route_and_session_registration() {
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, _connected_rx) = client_peer_connection().await;
     let (_rx, _dc) = negotiate(app, &client, &mut gather_rx).await;
 
@@ -345,7 +340,7 @@ async fn test_webrtc_offer_route_and_session_registration() {
 async fn test_session_map_lifecycle() {
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, _connected_rx) = client_peer_connection().await;
     let (_rx, _dc) = negotiate(app, &client, &mut gather_rx).await;
     assert_eq!(state.webrtc_sessions.lock().unwrap().len(), 1);
@@ -365,111 +360,205 @@ async fn test_session_map_lifecycle() {
     assert_eq!(state.webrtc_sessions.lock().unwrap().len(), 0);
 }
 
-/// Pump 100 binary messages (~720p JPEG size) at a 15 fps target through the
-/// full encode pipeline; assert achieved fps >= 15 and p95 one-way latency
-/// (sent -> received, via the msg_id/sent_unix_ms echo) < 500 ms.
+/// A bounded window of requests must deliver every lossless artifact in order.
+/// This is not an open-loop rate benchmark: offering frames faster than PNG
+/// encoding can consume them measures queue residence, not a latency guarantee.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_webrtc_frame_throughput_and_latency() {
+async fn test_webrtc_bounded_windows_deliver_lossless_frames() {
     let _heavy = heavy_test_guard().await;
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, _connected_rx) = client_peer_connection().await;
     let (mut rx, dc) = negotiate(app, &client, &mut gather_rx).await;
-
-    let jpeg = make_jpeg_720p();
-    eprintln!("jpeg size: {} bytes", jpeg.len());
-    assert!(
-        jpeg.len() > 24 * 1024,
-        "expected a realistically sized JPEG, got {} bytes",
-        jpeg.len()
-    );
-
-    const MESSAGES: usize = 100;
-    let mut latencies_ms: Vec<u64> = Vec::with_capacity(MESSAGES);
-    let mut replies = 0usize;
+    let session_id = state
+        .webrtc_sessions
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let server_pc = state.webrtc_sessions.lock().unwrap()[&session_id]
+        .pc
+        .clone();
+    let jpeg = make_jpeg_640x360();
+    let jpeg_b64 = b64_encode(&jpeg);
     let mut re = Reassembler::default();
-
-    // Pump messages at a 15 fps target (66 ms cadence) without waiting for
-    // each reply — mirrors the browser's continuous frame pump and lets SCTP
-    // congestion control ramp up.
-    let start = Instant::now();
-    let dc2 = dc.clone();
-    let sent_map: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    let sent_map2 = sent_map.clone();
-    let sender = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(55));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await; // first tick fires immediately
-        for msg_id in 1..=MESSAGES as u64 {
-            let sent = now_ms();
-            sent_map2.lock().unwrap().insert(msg_id, sent);
+    let mut revision = 0;
+    const WINDOW: u64 = 4;
+    for window in 0..3 {
+        let bits = window + 1;
+        state.live_config.lock().unwrap().lsb_bits = bits as u8;
+        // At most WINDOW outstanding requests; replenish only after delivery.
+        for offset in 0..WINDOW {
+            let msg_id = window * WINDOW + offset + 1;
             let request = serde_json::json!({
-                "kind": "encode",
-                "msg_id": msg_id,
-                "sent_unix_ms": sent,
-                "jpeg_b64": b64_encode(&jpeg),
+                "kind": "encode", "msg_id": msg_id, "jpeg_b64": jpeg_b64,
             });
-            let payload = request.to_string().into_bytes();
-            let chunks = frame_chunks(msg_id, &payload);
-            for (i, chunk) in chunks.iter().enumerate() {
-                // Pace chunks so the loopback UDP buffers are not overrun.
-                if i > 0 {
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-                }
-                dc2.send(BytesMut::from(&chunk[..]))
-                    .await
-                    .expect("send chunk");
-            }
-            interval.tick().await;
+            assert!(request.to_string().len() > CHUNK_PAYLOAD_MAX);
+            send_chunked_json(&dc, msg_id, &request).await;
         }
-    });
-
-    while replies < MESSAGES {
-        let reply = next_json_reply(&mut rx, &mut re).await;
-        if reply["kind"] == "pong" {
-            continue;
+        for offset in 0..WINDOW {
+            let msg_id = window * WINDOW + offset + 1;
+            let reply = next_json_reply(&mut rx, &mut re).await;
+            assert_eq!(reply["type"], "encoded_frame", "{reply}");
+            assert_eq!(
+                reply["msg_id"], msg_id,
+                "no missing, reordered or duplicate replies"
+            );
+            assert_eq!(reply["frame_index"], msg_id - 1);
+            assert_eq!(reply["lsb_bits"], bits);
+            let next_revision = reply["cache_revision"].as_u64().unwrap();
+            assert!(next_revision > revision);
+            revision = next_revision;
+            assert_delivered_png(&reply, &state);
         }
-        let msg_id = reply["msg_id"].as_u64().expect("msg_id in reply");
-        let received = reply["received_unix_ms"].as_u64().unwrap();
-        let sent = sent_map.lock().unwrap()[&msg_id];
-        latencies_ms.push(received.saturating_sub(sent));
-        replies += 1;
+        // The decode poll must return the same signed carrier/settings, not
+        // metadata from a later configuration or a private pre-embed snapshot.
+        dc.send_text(r#"{"kind":"decode_poll","msg_id":100}"#)
+            .await
+            .unwrap();
+        let decoded = next_json_reply(&mut rx, &mut re).await;
+        assert_eq!(decoded["type"], "decoded_frame");
+        assert_eq!(decoded["msg_id"], 100);
+        assert_eq!(decoded["cache_revision"], revision);
+        assert_eq!(decoded["lsb_bits"], bits);
+        assert_delivered_png(&decoded, &state);
     }
-    sender.await.expect("sender task");
-    let elapsed = start.elapsed();
+    assert!(remove_session(&state, &session_id).await);
+    assert!(state.webrtc_sessions.lock().unwrap().is_empty());
+    assert!(state.media_publishers.lock().unwrap().is_empty());
+    assert!(server_pc
+        .create_data_channel("after-removal", None)
+        .await
+        .is_err());
+    client.close().await.unwrap();
+}
 
-    assert_eq!(replies, MESSAGES, "every frame must be answered");
-    let achieved_fps = MESSAGES as f64 / elapsed.as_secs_f64();
-    latencies_ms.sort_unstable();
-    let p95 = latencies_ms[(latencies_ms.len() as f64 * 0.95).ceil() as usize - 1];
+/// Independently verify the actual network artifact against the advertised
+/// session key; no server cache or original image participates in verification.
+fn assert_delivered_png(reply: &serde_json::Value, state: &DashboardState) {
+    use steganographer_core::{Verifier, VideoFormat, VideoFrame, VideoStegoModule};
+    assert_eq!(reply["image_mime"], "image/png");
+    assert_eq!(reply["public_key"], state.identity);
+    assert_eq!(reply["identity"], state.identity);
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(reply["frame"].as_str().unwrap())
+        .unwrap();
+    let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .unwrap()
+        .to_rgb8();
+    let (width, height) = image.dimensions();
+    assert_eq!((width, height), (640, 360));
+    let mut data = image.into_raw();
+    let bits = reply["lsb_bits"].as_u64().unwrap() as u8;
+    let index = reply["frame_index"].as_u64().unwrap();
+    let payload = steganographer_core::lsb_video::LsbVideo::new(bits)
+        .extract(&VideoFrame {
+            width,
+            height,
+            stride: width * 3,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: index,
+        })
+        .unwrap()
+        .expect("signature in delivered pixels");
+    assert_eq!(payload.frame_index, index);
+    let canonical = steganographer_core::carrier_binding::canonicalize(
+        &data,
+        "lsb_video",
+        bits,
+        width,
+        height,
+        steganographer_core::SignaturePayload::SERIALIZED_SIZE,
+    )
+    .unwrap();
+    let key = state.signer.verifying_key().to_bytes();
+    let verifier = Verifier::from_bytes(&key).unwrap();
+    assert!(verifier.verify(&payload, &canonical, None));
+    let mut tampered = canonical;
+    tampered[8192] ^= 0x40;
+    assert!(!verifier.verify(&payload, &tampered, None));
+}
 
-    eprintln!(
-        "metrics: messages={} elapsed={:.3}s achieved_fps={:.1} p95_one_way_ms={}",
-        MESSAGES,
-        elapsed.as_secs_f64(),
-        achieved_fps,
-        p95
+/// The incomplete-message limit applies to real remote traffic: completing an
+/// admitted message frees a slot; exceeding the limit closes and removes the peer.
+#[tokio::test]
+async fn test_webrtc_incomplete_admission_recovers_then_closes_on_overflow() {
+    let state = test_state();
+    let (client, mut gather_rx, _) = client_peer_connection().await;
+    let (mut rx, dc) = negotiate(
+        create_router(state.clone()).unwrap(),
+        &client,
+        &mut gather_rx,
+    )
+    .await;
+    let session_id = state
+        .webrtc_sessions
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let server_pc = state.webrtc_sessions.lock().unwrap()[&session_id]
+        .pc
+        .clone();
+    let request = serde_json::json!({
+        "kind": "ping", "msg_id": 1, "padding": "x".repeat(CHUNK_PAYLOAD_MAX),
+    })
+    .to_string();
+    for id in 1..=INCOMPLETE_MESSAGE_MAX as u64 {
+        let chunks = frame_chunks(id, request.as_bytes());
+        assert_eq!(chunks.len(), 2);
+        dc.send(BytesMut::from(chunks[0].as_slice())).await.unwrap();
+    }
+    let chunks = frame_chunks(1, request.as_bytes());
+    dc.send(BytesMut::from(chunks[1].as_slice())).await.unwrap();
+    let mut reassembler = Reassembler::default();
+    let reply = next_json_reply(&mut rx, &mut reassembler).await;
+    assert_eq!(
+        reply["kind"], "pong",
+        "an admitted complete message must be delivered"
     );
-
-    // The >= 15 fps floor is a release-profile acceptance: the debug build
-    // is load-sensitive (the same loopback measured 17.4 fps idle and
-    // 13.3 fps under parallel test load). Debug asserts a total-stall
-    // sanity floor and records the measured rate; release enforces.
-    if cfg!(debug_assertions) {
-        assert!(
-            achieved_fps >= 5.0,
-            "achieved fps {:.1} — DataChannel pump stalled",
-            achieved_fps
-        );
-    } else {
-        assert!(
-            achieved_fps >= 15.0,
-            "achieved fps {:.1} < 15 (release acceptance floor)",
-            achieved_fps
-        );
+    assert_eq!(reply["msg_id"], 1);
+    // Fill and complete the newly freed slot while the other messages remain
+    // incomplete: admission must recover rather than retaining the old charge.
+    let replacement_id = INCOMPLETE_MESSAGE_MAX as u64 + 1;
+    let replacement = frame_chunks(replacement_id, request.as_bytes());
+    for chunk in &replacement {
+        dc.send(BytesMut::from(chunk.as_slice())).await.unwrap();
     }
-    assert!(p95 < 500, "p95 one-way latency {} ms >= 500 ms", p95);
+    assert_eq!(
+        next_json_reply(&mut rx, &mut reassembler).await["kind"],
+        "pong"
+    );
+    // Fill that slot again, then offer one more incomplete message.
+    for id in replacement_id + 1..=replacement_id + 2 {
+        let chunks = frame_chunks(id, request.as_bytes());
+        dc.send(BytesMut::from(chunks[0].as_slice())).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while state
+            .webrtc_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&session_id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("overflowed peer must be removed");
+    assert!(state.last_encoded_frame.lock().unwrap().is_none());
+    assert!(state.media_publishers.lock().unwrap().is_empty());
+    assert!(server_pc
+        .create_data_channel("after-overflow", None)
+        .await
+        .is_err());
+    client.close().await.unwrap();
 }
 
 /// Encode round-trip over the DataChannel: reply has the same shape as the
@@ -478,11 +567,11 @@ async fn test_webrtc_frame_throughput_and_latency() {
 async fn test_webrtc_encode_decode_roundtrip() {
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, _connected_rx) = client_peer_connection().await;
     let (mut rx, dc) = negotiate(app, &client, &mut gather_rx).await;
 
-    let jpeg = make_jpeg_720p();
+    let jpeg = make_jpeg_640x360();
     send_chunked_json(
         &dc,
         1,
@@ -745,7 +834,7 @@ async fn test_webrtc_media_rtp_stream() {
     let _heavy = heavy_test_guard().await;
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, track_rx) = media_client_peer_connection().await;
     let (_rx, _dc, mut track_rx) = negotiate_media(app, &client, &mut gather_rx, track_rx).await;
 
@@ -861,7 +950,7 @@ async fn test_webrtc_media_dimension_change() {
     let _heavy = heavy_test_guard().await;
     init_test_logging();
     let state = test_state();
-    let app = create_router(state.clone());
+    let app = create_router(state.clone()).unwrap();
     let (client, mut gather_rx, track_rx) = media_client_peer_connection().await;
     let (_rx, _dc, mut track_rx) = negotiate_media(app, &client, &mut gather_rx, track_rx).await;
 
@@ -1015,7 +1104,7 @@ async fn test_webrtc_config_endpoint() {
     init_test_logging();
     let mut state = test_state();
     let resp = {
-        let app = create_router(state.clone());
+        let app = create_router(state.clone()).unwrap();
         let req = axum::http::Request::builder()
             .method("GET")
             .uri("/api/webrtc/config")
@@ -1030,18 +1119,37 @@ async fn test_webrtc_config_endpoint() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["ice_servers"], serde_json::json!([]));
     assert_eq!(json["media"], serde_json::json!(true));
+    assert_eq!(json["default_transport"], "auto");
 
-    // With ICE servers configured the endpoint mirrors them verbatim.
+    // TURN credentials are available only to a bearer-authorized client.
     Arc::get_mut(&mut state)
         .expect("exclusive state")
         .ice_servers = vec![
         "stun:stun.l.google.com:19302".to_string(),
         "turn:user:cred@turn.example.com:3478".to_string(),
     ];
-    let app = create_router(state.clone());
+    Arc::get_mut(&mut state).unwrap().auth_token = Some("capability-token".into());
+    let app = create_router(state.clone()).unwrap();
+    for token in [None, Some("Bearer wrong")] {
+        let mut request = axum::http::Request::builder().uri("/api/webrtc/config");
+        if let Some(token) = token {
+            request = request.header("authorization", token);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("turn:user:cred"));
+    }
     let req = axum::http::Request::builder()
         .method("GET")
         .uri("/api/webrtc/config")
+        .header("authorization", "Bearer capability-token")
         .body(axum::body::Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

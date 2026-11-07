@@ -1,18 +1,18 @@
 //! Native integration tests for the `steganographer-wasm` facade.
 //!
-//! The same [`api`] functions back the `#[wasm_bindgen]` exports (cfg-gated to
-//! `wasm32`), so these tests exercise the exact logic the browser will call;
-//! wasm32 target correctness is verified by
-//! `cargo check --target wasm32-unknown-unknown -p steganographer-wasm`.
+//! These exercise the plain-Rust implementation, not wasm-bindgen's generated
+//! JavaScript glue. Actual wasm32/Node/browser smoke coverage is also required
+//! for JS number validation, report parsing, and platform-sized decode limits.
 
 use serde_json::{json, Value};
 use steganographer_core::carrier::{
     CarrierDescriptor, CarrierEmbedder, EmbeddingConfig, SpatialLsb,
 };
+use steganographer_core::packet::{crc32c, DecodeLimits, GenericPacket, Locator};
 use steganographer_wasm::{
     capacity_pcm_s16le, capacity_rgb, decode_limits_default, decode_limits_from_json,
     embed_pcm_s16le, embed_rgb, extract_pcm_s16le, extract_rgb, forensic_scan, packet_decode,
-    packet_encode, text_analyze_bytes, text_analyze_text,
+    packet_encode, text_analyze_bytes, text_analyze_text, PACKET_REPORT_SCHEMA,
 };
 
 fn encoded_packet(payload: &[u8], bits: u8) -> Vec<u8> {
@@ -239,4 +239,181 @@ fn decode_limits_are_enforced_on_decode_and_extract() {
     assert!(err.contains("exceeds"), "unexpected error: {err}");
     let extracted = extract_rgb(&laced, 1, None).expect("default limits accept");
     assert_eq!(body_of(&extracted), payload);
+}
+
+#[test]
+fn packet_strength_is_validated_before_encoding() {
+    for bits in [0, 5, 255] {
+        assert!(
+            packet_encode(b"payload".to_vec(), 1, vec![0; 16], vec![0; 8], bits, None).is_err(),
+            "accepted strength {bits}"
+        );
+    }
+    for bits in 1..=4 {
+        let packet = encoded_packet(b"all supported strengths", bits);
+        let units = (packet.len() * 8).div_ceil(usize::from(bits));
+        let (rgb, _) = embed_rgb(vec![0x7f; units], &packet, bits).unwrap();
+        assert_eq!(
+            body_of(&extract_rgb(&rgb, bits, None).unwrap()),
+            b"all supported strengths"
+        );
+        let (pcm, _) = embed_pcm_s16le(vec![0x7f; units * 2], &packet, bits).unwrap();
+        assert_eq!(
+            body_of(&extract_pcm_s16le(&pcm, bits, None).unwrap()),
+            b"all supported strengths"
+        );
+    }
+}
+
+fn encode_modified_packet(mut packet: GenericPacket, limits: &DecodeLimits) -> Vec<u8> {
+    let envelope = packet.envelope.encode(limits).unwrap();
+    packet.locator = Locator::new(
+        packet.locator.flags,
+        envelope.len(),
+        packet.body.len(),
+        crc32c(&envelope),
+        packet.locator.nonce,
+        limits,
+    )
+    .unwrap();
+    packet.encode(limits).unwrap()
+}
+
+#[test]
+fn packet_reports_preserve_exact_u64_metadata() {
+    let limits = DecodeLimits::default();
+    for timestamp in [9_007_199_254_740_993, u64::MAX] {
+        let mut packet =
+            GenericPacket::decode(&encoded_packet(b"exact metadata", 4), &limits).unwrap();
+        packet.envelope.created_at_unix = Some(timestamp);
+        let encoded = encode_modified_packet(packet, &limits);
+        let decoded = packet_decode(encoded.clone(), None).unwrap();
+        // Exercise the JSON-string transport that the JS bindings use.
+        let decoded: Value = serde_json::from_str(&decoded.to_string()).unwrap();
+        assert_eq!(decoded["schema"], PACKET_REPORT_SCHEMA);
+        assert_eq!(decoded["created_at_unix"], timestamp.to_string());
+        assert_eq!(decoded["original_len"], "14");
+        let (carrier, _) = embed_rgb(vec![0x7f; encoded.len() * 2], &encoded, 4).unwrap();
+        let extracted = extract_rgb(&carrier, 4, None).unwrap();
+        assert_eq!(extracted["created_at_unix"], timestamp.to_string());
+        assert_eq!(extracted["original_len"], decoded["original_len"]);
+    }
+    assert!(packet_decode(encoded_packet(b"x", 1), None).unwrap()["created_at_unix"].is_null());
+}
+
+#[test]
+fn raised_envelope_limits_round_trip_rgb_and_pcm() {
+    let defaults = DecodeLimits::default();
+    let filename = "f".repeat(defaults.max_envelope_len + 1);
+    let limits = DecodeLimits {
+        max_filename_len: filename.len(),
+        max_field_len: filename.len(),
+        max_envelope_len: filename.len() + 8192,
+        ..defaults
+    };
+    let mut packet =
+        GenericPacket::decode(&encoded_packet(b"raised limits", 4), &defaults).unwrap();
+    packet.envelope.filename = Some(filename.clone());
+    let encoded = encode_modified_packet(packet, &limits);
+    assert!(packet_decode(encoded.clone(), None).is_err());
+    assert_eq!(
+        packet_decode(encoded.clone(), Some(limits)).unwrap()["filename"],
+        filename
+    );
+    let (rgb, _) = embed_rgb(vec![0x7f; encoded.len() * 2], &encoded, 4).unwrap();
+    assert!(extract_rgb(&rgb, 4, None).is_err());
+    let report = extract_rgb(&rgb, 4, Some(limits)).unwrap();
+    assert_eq!(body_of(&report), b"raised limits");
+    assert_eq!(report["filename"], filename);
+    let (pcm, _) = embed_pcm_s16le(vec![0x7f; encoded.len() * 4], &encoded, 4).unwrap();
+    assert!(extract_pcm_s16le(&pcm, 4, None).is_err());
+    let report = extract_pcm_s16le(&pcm, 4, Some(limits)).unwrap();
+    assert_eq!(body_of(&report), b"raised limits");
+    assert_eq!(report["filename"], filename);
+}
+
+#[test]
+fn raised_body_limit_round_trips_above_default_ceiling() {
+    let defaults = DecodeLimits::default();
+    let len = defaults.max_body_len + 1;
+    let limits = DecodeLimits {
+        max_body_len: len,
+        max_original_len: len,
+        max_packet_len: defaults.max_packet_len + 1,
+        ..defaults
+    };
+    let packet =
+        packet_encode(vec![0xa5; len], 1, vec![0; 16], vec![0; 8], 4, Some(limits)).unwrap();
+    assert!(packet_decode(packet.clone(), None).is_err());
+    let carrier = vec![0x7f; packet.len() * 2];
+    let capacity = capacity_rgb(&carrier, 4).unwrap();
+    assert_eq!(capacity["max_packet_bytes"], packet.len());
+    let (carrier, _) = embed_rgb(carrier, &packet, 4).unwrap();
+    assert!(extract_rgb(&carrier, 4, None).is_err());
+    let report = extract_rgb(&carrier, 4, Some(limits)).unwrap();
+    let body = report["body"].as_array().unwrap();
+    assert_eq!(body.len(), len);
+    assert!(body.iter().all(|byte| byte.as_u64() == Some(0xa5)));
+    assert_eq!(report["original_len"], len.to_string());
+}
+
+#[test]
+fn forensic_reports_preserve_container_evidence_and_completeness() {
+    let report =
+        forensic_scan(b"%PDF-1.7\n1 0 obj\n<< /Type /EmbeddedFile /Length 0 >>\nendobj\n%%EOF\n");
+    assert_eq!(report["container_detected"], true);
+    assert_eq!(report["detected"], true);
+    let evidence = report["container_findings"].as_array().unwrap();
+    assert!(
+        evidence.iter().any(|finding| {
+            finding["family"] == "DOC-004"
+                && finding["path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                && finding["detail"]
+                    .as_str()
+                    .is_some_and(|detail| !detail.is_empty())
+        }),
+        "missing container evidence: {report}"
+    );
+    assert!(report["incomplete"].is_boolean());
+    assert!(report["incomplete_reasons"].is_array());
+
+    let report = forensic_scan(&vec![
+        b'a';
+        steganographer_core::unicode_text::MAX_TEXT_SCAN_BYTES
+            + 1
+    ]);
+    assert_eq!(report["incomplete"], true);
+    assert!(report["incomplete_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "text_byte_limit"));
+}
+
+#[test]
+fn invalid_decode_limit_shapes_and_platform_overflow_are_rejected() {
+    for value in [
+        json!([]),
+        json!("limits"),
+        json!({"max_body_len": 1.5}),
+        json!({"max_body_len": -1}),
+        json!({"max_body_len": "1024"}),
+    ] {
+        assert!(decode_limits_from_json(Some(&value)).is_err());
+    }
+    assert_eq!(
+        decode_limits_from_json(Some(&Value::Null)).unwrap(),
+        DecodeLimits::default()
+    );
+    let width_boundary = decode_limits_from_json(Some(&json!({"max_body_len": 4_294_967_296u64})));
+    if usize::BITS == 32 {
+        assert!(width_boundary.is_err());
+    } else {
+        assert_eq!(
+            width_boundary.unwrap().max_body_len,
+            4_294_967_296u64 as usize
+        );
+    }
 }

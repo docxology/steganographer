@@ -1,331 +1,113 @@
 # Threat Model
 
-Comprehensive threat analysis for the Steganographer cryptographic watermarking system. This document defines the adversary model, enumerates threats, maps countermeasures, and explains the security boundaries of the system.
+## Scope: version 0.8
 
-> For implementation details, see [Security](security.md). For cryptographic primitives, see [Cryptography](cryptography.md).
+This is an implementation-bounded threat model for generic packets, legacy signed media, native/dashboard delivery, CLI processing and forensic inspection. It is not an exhaustive security assessment. See [Cryptography](cryptography.md) for exact authenticated bytes and migration rules, and [Security](security.md) for operational controls and status codes.
 
----
+The primary goal is **tamper evidence under an expected key and a defined binding**, not tamper prevention, truth detection, invisibility or guaranteed watermark survival. A valid signature can authenticate fabricated content if an authorized signer signs it.
 
-## System Overview
+## Assets and trusted inputs
 
-Steganographer provides **tamper-evident** (not tamper-proof) cryptographic watermarking. Every video frame and audio chunk is:
-
-1. **Hashed** — BLAKE3 (256-bit) over raw pixel/sample data
-2. **Signed** — Ed25519 or Ethereum secp256k1 digital signature over the hash
-3. **Embedded** — Signature hidden in Least Significant Bits (LSB) of the media
-4. **Overlaid** — Optional visible QR data matrix encoding the hash + signature metadata
-
-```mermaid
-flowchart LR
-    A["📷 Raw Frame\n(pixels)"] --> B["🔑 BLAKE3\nHash (256-bit)"]
-    B --> C["✍️ Sign\n(Ed25519/secp256k1)"]
-    C --> D["📦 LSB Embed\n(hidden)"]
-    D --> E["📊 QR Overlay\n(visible)"]
-    style A fill:#333,stroke:#e53935,color:#e0e0e0
-    style B fill:#333,stroke:#e53935,color:#e0e0e0
-    style C fill:#333,stroke:#e53935,color:#e0e0e0
-    style D fill:#333,stroke:#e53935,color:#e0e0e0
-    style E fill:#333,stroke:#e53935,color:#e0e0e0
-```
-
----
-
-## Adversary Model
-
-### Who Are the Adversaries?
-
-| Adversary | Goal | Capability |
-| --------- | ---- | ---------- |
-| **Content Forger** | Pass off fabricated media as authentic | Can generate synthetic video/audio (deepfakes, voice cloning) |
-| **Tamperer** | Modify signed media without detection | Can edit pixel values, cut/splice frames, alter audio samples |
-| **Impersonator** | Claim authorship of another's signed media | Can strip and re-sign with a different key |
-| **Steganalyst** | Detect or remove the hidden watermark | Has statistical analysis tools (RS analysis, chi-square, ML detectors) |
-| **Man-in-the-Middle** | Intercept and alter media streams in transit | Can modify network traffic between encoder and verifier |
-| **Insider** | Leak signed media while denying involvement | Has access to signing keys and raw media |
-
-### What the Adversary Cannot Do
-
-- **Break BLAKE3** — 256-bit pre-image resistance (2²⁵⁶ operations)
-- **Forge Ed25519** — 128-bit security level (EUF-CMA secure)
-- **Forge secp256k1** — 128-bit security under ECDLP hardness
-- **Read the private key** — Keys never leave the signing process
-
----
-
-## Threat Catalog
-
-### T1: Deepfake Injection
-
-| Property | Value |
-| -------- | ----- |
-| **Threat** | AI-generated video is inserted into a supposedly authentic stream |
-| **Impact** | High — could be used for disinformation, fraud, or legal deception |
-| **Countermeasure** | Every frame carries a cryptographic signature. A deepfake frame lacks the correct Ed25519/Ethereum signature for the claimed identity |
-| **Detection** | Verification extracts LSB data → parses signature → checks against known public key. Deepfake frames will have NO valid signature or a DIFFERENT signer |
-| **Residual Risk** | If the deepfake generator has the private key, they can sign fake frames |
-
-### T2: Frame Tampering
-
-| Property | Value |
-| -------- | ----- |
-| **Threat** | Individual pixels or regions of a signed frame are modified |
-| **Impact** | Medium — subtle edits could alter evidence (timestamps, faces, text) |
-| **Countermeasure** | BLAKE3 hash covers the ENTIRE raw RGB/PCM buffer. ANY modification to even 1 byte invalidates the hash, which invalidates the signature |
-| **Detection** | Extract hash from LSB → recompute BLAKE3 over current frame → compare. Mismatch = tampered |
-| **Residual Risk** | Minimal for tampering itself — the cryptographic hash guarantees any byte-level modification is detected. However, T2 only covers modification *detection*, not prevention: an adversary who strips the entire signature (see T4) removes the ability to detect tampering at all. The system is tamper-*evident*, not tamper-*proof*. |
-
-### T3: Frame Splice/Reorder
-
-| Property | Value |
+| Asset or input | Required trust / responsibility |
 | --- | --- |
-| **Threat** | Frames from different times or sessions are rearranged |
-| **Impact** | Medium — timeline manipulation for legal evidence |
-| **Countermeasure** | Each signed frame includes a frame index counter in the payload. The QR overlay also encodes timestamps. Gaps or reversals in the sequence reveal splicing |
-| **Detection** | Compare sequential frame indices. Missing numbers or non-monotonic sequences indicate tampering |
-| **Residual Risk** | Frame reordering within a single signature interval (between signed frames) may not be detected |
+| Signing secret and signer process | Protect from disclosure and unauthorized signing; the application cannot distinguish legitimate capture from synthetic input supplied to its signer |
+| Encryption key / master / password | High entropy or suitable password derivation, separate key roles, controlled storage and caller-memory lifetimes |
+| Expected public key | Obtain out-of-band and pin the full key; an embedded or server-advertised key is not independent identity evidence |
+| Extraction/binding context | Preserve kernel, bit depth, dimensions, hash algorithm, indices, audio embedding key and format as needed; not all context is signed |
+| Sequence/session policy | Independently define expected start/end, order, session and freshness requirements |
+| Exact artifacts and custody records | Retain delivered bytes, manifests and exact-file digests; media signatures do not cover every container byte |
+| Timestamp provider configuration | Trust configured calendar for availability/upgrades and Esplora for canonical-height selection; neither is a person-identity authority |
+| Local filesystem/configuration | Use trusted parent directories, effective decode budgets and protected configuration/revocation data |
 
-### T4: Signature Stripping
+Cryptographic assumptions include the hardness of forging the selected signature and finding relevant hash collisions, adequate OS randomness and correct dependency behavior. Strict Ed25519 verification and weak imported-key rejection are implemented controls, not proof that host compromise or side channels are impossible. Owned-buffer zeroization does not erase borrowed caller passwords, exported keys or copies outside those buffers.
 
-| Property | Value |
-| --- | --- |
-| **Threat** | Adversary removes all steganographic data from the media |
-| **Impact** | Loss of provenance — media becomes "unsigned" |
-| **Countermeasure** | (a) The QR overlay is visible and cannot be removed without visible damage. (b) LSB data removal would require changing bit values, altering the visual/audio output |
-| **Detection** | Absence of extractable signature = media has no integrity guarantee |
-| **Residual Risk** | If only LSB data is targeted, a sophisticated adversary could zero the least significant bits. The visible QR overlay defends against this second-layer attack |
+## Adversaries
 
-### T5: Re-signing Attack
+An adversary may read or replace files/packets, edit media or metadata, strip/re-embed/re-sign watermarks, replay valid old artifacts, supply malicious containers and unauthenticated descriptors, exhaust resources, or send browser/network requests to a dashboard. A steganalyst may know the algorithms and use statistical or learned detectors. Algorithm secrecy is not a security assumption.
 
-| Property | Value |
-| --- | --- |
-| **Threat** | Adversary strips the original signature and re-signs with their own key |
-| **Impact** | High — claim of authorship is transferred to the adversary |
-| **Countermeasure** | Public key distribution. The original signer's public key is distributed out-of-band (published, registered, or verified via Ethereum address on-chain) |
-| **Detection** | Signature verification against the EXPECTED public key fails if a different key signed |
-| **Residual Risk** | Requires trust in the public key infrastructure (PKI or blockchain identity) |
+Key theft, malicious capture inputs, a compromised signing host and a dishonest trusted chain provider are explicit residual risks, not capabilities dismissed as impossible. Protection of the operating system, camera/microphone source, browser and native codec stack is outside the cryptographic payload contract.
 
-### T6: Audio Manipulation
+## Threats, controls and residual risks
 
-| Property | Value |
-| --- | --- |
-| **Threat** | Audio samples are modified to change spoken words or add/remove sounds |
-| **Impact** | High — voice evidence alteration for legal, journalistic, or financial fraud |
-| **Countermeasure** | Audio LSB steganography embeds BLAKE3 + Ed25519 signatures in PCM sample LSBs, keyed with PRNG permutation for scatter-embedding |
-| **Detection** | Extract audio signature → verify against hash of current audio chunk |
-| **Residual Risk** | Very short clips (< 1 signature interval) may not have signatures embedded |
-
-### T7: Compression/Transcoding Attack
-
-| Property | Value |
-| --- | --- |
-| **Threat** | Media is re-encoded (JPEG, H.264, MP3) which destroys LSB data |
-| **Impact** | LSB signature is lost; QR overlay may be degraded but survives |
-| **Countermeasure** | (a) QR overlays survive lossy compression. (b) DCT-domain embedding (`dct_video`) places signatures in frequency coefficients that survive JPEG/H.264 re-encoding. (c) Spread-spectrum embedding (`spread_spectrum_video`) disperses the signal across a wide band, surviving noise and moderate compression. (d) WAV recordings from the dashboard preserve LSB data |
-| **Detection** | LSB verification failure after transcoding is expected; DCT-domain and spread-spectrum modules provide fallback robustness |
-| **Residual Risk** | Pure LSB steganography is inherently fragile to aggressive lossy compression — DCT and spread-spectrum reduce but do not eliminate this risk |
-
-### T8: Side-Channel Leakage
-
-| Property | Value |
-| --- | --- |
-| **Threat** | Signing timing or patterns reveal information about the private key |
-| **Impact** | Low — potential key compromise via timing analysis |
-| **Countermeasure** | Ed25519 uses constant-time operations. BLAKE3 is designed for constant-time execution |
-| **Detection** | N/A — prevented by algorithmic design |
-| **Residual Risk** | Hardware-level side channels theoretically possible but impractical |
-
-### T9: Partial LSB Corruption
-
-| Property | Value |
-| --- | --- |
-| **Threat** | Noise or minor corruption damages some LSB-embedded bytes, causing extraction failure |
-| **Impact** | Medium — signature may be partially unrecoverable |
-| **Countermeasure** | Reed-Solomon error correction codes (GF(2⁸)) add redundancy to the embedded payload, enabling recovery from partial corruption |
-| **Detection** | Error correction decoder attempts to recover the original payload; success/failure reported |
-| **Residual Risk** | If corruption exceeds the error correction capacity (number of redundant symbols), recovery fails |
-
-### T10: Payload Interception
-
-| Property | Value |
-| --- | --- |
-| **Threat** | Adversary extracts the LSB-embedded payload and reads the signature/hash data |
-| **Impact** | Low — signature and hash are not secret, but payload metadata may reveal signer identity |
-| **Countermeasure** | ChaCha20-Poly1305 AEAD encryption (`encrypt` in `PayloadConfig`) encrypts the payload before embedding. Only holders of the encryption key can decrypt |
-| **Detection** | Without the encryption key, extracted data appears as random noise |
-| **Residual Risk** | If the encryption key is compromised, the payload is readable |
-
----
-
-## Security Boundaries
-
-### What Steganographer Guarantees
-
-| Guarantee | Mechanism |
-| --- | --- |
-| **Integrity** | BLAKE3 hash detects any byte-level modification |
-| **Authenticity** | Ed25519/secp256k1 signature proves the signer's identity |
-| **Non-repudiation** | A valid signature proves the holder of the private key created it |
-| **Tamper evidence** | Any modification to signed data invalidates verification |
-| **Visual deterrence** | QR overlay and text watermarks discourage unauthorized use |
-| **Payload confidentiality** | Optional ChaCha20-Poly1305 encryption hides signer identity in embedded data |
-
-### What Steganographer Does NOT Guarantee
-
-| Non-guarantee | Reason |
-| --- | --- |
-| **Tamper prevention** | Media can still be modified — modifications are just detectable |
-| **Covert channels** | LSB embedding is detectable by statistical steganalysis at high bit counts — note that the project's own `scan` statistical detectors (chi-squared, sample-pairs, RS) are *observations* with documented false-positive limits (`detector_registry()`, FOR-001); only content-derived evidence (inline magic, Unicode/text findings, DOC-002 WordprocessingML concealment) sets the `detected` verdict. Container/OOXML findings (`ZIP_TOPOLOGY`, DOC-001, DOC-002) surface package-level concealment within bounded hostile-input budgets |
-| **Compression survival (LSB)** | Pure LSB data is destroyed by lossy compression (JPEG, H.264, MP3) — DCT and spread-spectrum modules improve robustness |
-| **Key management** | The system generates keys but does not manage their lifecycle |
-
----
-
-## Dashboard Security Controls
-
-The web GUI exposes several security-relevant controls:
-
-### Video Tab — Encode Panel
-
-| Control | Security Impact |
-| --- | --- |
-| **LSB Bits** (1–4) | Higher = more capacity but more detectable. Use 1 for best covertness |
-| **Sign Backend** | Ed25519 or Ethereum — determines which key signs each frame |
-| **Sign Rate** | Frames/second receiving signatures. Higher = more frames verified |
-| **QR Scale** | Larger QR = more readable by scanners, but more visually intrusive |
-| **Overlay Text** | Visible classification label (e.g., CONFIDENTIAL, EVIDENCE) |
-| **Resolution** | Higher resolution = more pixels for embedding = more capacity |
-
-### Video Tab — Verify Panel
-
-| Field | Meaning |
-| --- | --- |
-| **Frame Index** | Sequential counter — gaps indicate potential splicing |
-| **BLAKE3 Hash** | The hash extracted from LSB data — must match recomputed hash |
-| **Backend** | Which signature algorithm was used to sign |
-| **Verify Latency** | Time to extract + verify — should be consistent |
-| **✅ Verified / ❌ Failed** | Running count of successful and failed verifications |
-
-### Audio Tab
-
-| Control | Security Impact |
-| --- | --- |
-| **LSB Bits** | Same as video — lower = more covert |
-| **Sign Backend** | Determines audio chunk signature algorithm |
-| **Sign Rate** | Audio chunks per second receiving signatures |
-
-### MetaMask Integration
-
-| Feature | Security Impact |
-| --- | --- |
-| **Connect Wallet** | Links Ethereum address as the signing identity |
-| **On-chain identity** | Signatures can be verified against a public Ethereum address |
-| **EIP-191** | Standard personal message signing — widely supported |
-
-### Keyboard Shortcuts
-
-| Shortcut | Action | Security Impact |
+| Threat | Implemented control / required workflow | Residual risk |
 | --- | --- | --- |
-| **Space** | Toggle camera on/off | Controls whether signing is active |
-| **R** | Toggle recording | Creates persistent evidence artifacts |
-| **E** | Export session report | Exports config, metrics, and identity as downloadable JSON |
-| **H** | Toggle help overlay | No security impact — informational only |
+| Fabricated/deepfake media presented as authentic | Verify against the independently pinned expected key and required binding | An authorized or compromised signer can sign synthetic media; unsigned media is not necessarily fake |
+| Signature forgery / weak-key acceptance | Strict Ed25519 verification and rejection of weak imported public keys | Depends on crypto assumptions and host/key security; does not establish a human identity |
+| Content edits | Recompute version-framed canonical-media hash or verify logical-payload signature, depending on API | Kernel-owned exclusions and unsigned metadata remain editable; generic signatures do not authenticate arbitrary carrier pixels |
+| Ambiguous video/audio partition or absent/empty audio | Legacy v4 domain, explicit media lengths and audio-presence framing | Old v2/v3 signatures/carriers require re-encoding; no silent historical verification fallback |
+| Re-signing under attacker's own key | Reject a signature not matching the trusted key; generic `--trusted-signer` rejects unsigned/mismatched packets | Self-supplied keys verify mathematically without proving expected authorship |
+| Envelope/filename/MIME manipulation | Validate framing, limits and critical descriptors; AEAD binds packet ID, payload kind and original length | Payload signature alone does not authorize every semantic envelope field; CRC/unkeyed digest can be recomputed by an attacker |
+| Audio/video substitution | Verify each actual delivered carrier with its correct context | Separate signatures do not establish audiovisual synchronization, capture time or complete track coverage |
+| Frame/chunk splice, omission, reorder or replay | Enforce an external expected sequence/session policy in addition to signed indices; use trusted chain roots where applicable | A valid isolated frame can be replayed; unsigned gaps, whole-session replay and truncation need external expectations |
+| Signature stripping or destructive transcoding | Retain lossless originals; classify missing payload separately from authentication failure | Watermarks can be removed with small perceptual changes; no availability guarantee |
+| Payload interception | Optional ChaCha20-Poly1305 with separate encryption key; fresh packet IDs for raw calls | Carrier remains visible; unencrypted metadata and traffic can leak information; placement is not confidentiality |
+| AEAD nonce misuse | Legacy versioned `STGE` wrapper generates a fresh random 128-bit ID; raw callers must supply a fresh ID for every encryption under a key | Repeated raw IDs, including retry reuse, are unsafe with only the four-byte random salt; historical zero-ID ciphertext has no fallback |
+| Partial corruption | Supported offline ECC/sharding can recover within their actual redundancy/placement limits | Not arbitrary edit resistance; unsupported live/kernel compositions reject rather than imply protection |
+| Malicious config/revocation input | Fallible validated explicit config and revocation parsing; effective decode limits | Trusted local policy can still choose unsuitable limits/keys; no silent invalid-policy fallback is acceptable |
+| Output overwrite / alias damage | Offline output helpers use private temporary files, no-clobber publication and atomic replacement where force is supported | Trusted parent directories remain required; multi-file output is not one transaction; not a blanket native-writer sandbox |
+| Parser/resource attacks | Bounded packet, nesting, KDF, proof, ZIP/inflate/XML and PDF processing; incomplete coverage is explicit | Bounds can cause inconclusive results, not absence evidence; native codecs/OS remain separate surfaces |
+| Forged timestamp / pending receipt sold as confirmed | Verify exact expected digest, proof operations, Merkle/root/header/hash/PoW and trusted provider's height lookup | Pending is not verified; configured provider's canonical-chain view is trusted, not independently full-node validated |
+| Foreign-origin dashboard mutation / WebSocket hijacking | Configured bearer-token checks and browser Origin gates | Tokenless mode is local-only policy, not general access control; missing-Origin non-browser clients and host compromise require network/OS controls |
 
-### Session Export (`GET /api/session`)
+## Binding boundaries that change the conclusion
 
-| Field | Security Consideration |
-| --- | --- |
-| **identity** | Exposes the signer's public key fingerprint — this is public information by design |
-| **config** | Reveals current signing backend, LSB bits, and overlay text |
-| **metrics** | Shows frame counts, verification rates, and latencies |
-| **uptime_secs** | Reveals session duration |
+### Canonical media versus every rendered bit
 
-> ⚠️ The session export endpoint is available to any client on the local network. In production deployments, consider restricting access via firewall rules or authentication middleware.
+Supported signed-media workflows canonicalize logical packed pixels or complete PCM samples. Selected low bits or larger kernel-owned regions are excluded so embedding does not invalidate its own signature. Row padding is not logical video content. This means:
 
-### Docs Tab
+- A successful media verification is not a guarantee that every pixel/sample bit is unchanged.
+- DCT/spread-spectrum exclusions can cover larger regions than the payload's individual bits.
+- Headers, sample-rate/geometry interpretation, display metadata, filename and container packaging are not automatically authenticated.
+- A copied valid payload must still be checked against the actual delivered carrier's canonical bytes; a pre-embed self-check is insufficient.
 
-| Feature | Security Impact |
-| --- | --- |
-| **In-app documentation viewer** | No security impact — serves read-only embedded markdown files |
-| **`GET /api/docs`** | Returns list of documentation filenames |
-| **`GET /api/docs/:name`** | Returns markdown content; only serves files from the compile-time embedded set — no filesystem access |
+OTS CLI `SHA256(file)` is an **exact file-byte commitment**, not this canonical binding. It detects repackaging changes but does not provide author identity or verify media semantics. Preserve both commitments when both meanings matter.
 
----
+### Logical payload versus metadata
 
-## Use Case Threat Scenarios
+Generic protocol-1.0 signatures authenticate recovered logical bytes. An application that needs filename, MIME, timestamp, session ID or carrier descriptors to carry signer-authorized meaning must encode that meaning inside its signed logical content and validate it under its own schema. Neither canonical TLV encoding nor CRC32C is a substitute for authentication.
 
-### Scenario 1: Courtroom Evidence
+The historically frozen `STG3` protocol-v1 packet/carrier fixtures, raw AEAD layout and signature/AAD bytes are unchanged by the legacy v4 cutover. Their fixed salts and documented keys exist for reproducibility, not production use. See the [cryptography guide](cryptography.md#frozen-protocol-v1-vectors).
 
-**Situation**: Body camera footage is submitted as evidence.
+### Ordering and chains
 
-**Threats**: T1 (deepfake), T2 (pixel edit), T3 (splice), T4 (strip signatures)
+A signed frame index binds that index to the supplied media bytes, not to a wall clock, unique capture session or externally expected stream length. Consumers must decide whether missing, repeated or unexpected indices are acceptable. Per-frame verification alone does not enforce continuity.
 
-**Mitigation**:
+`HashChain::verify_chain(root, frames, previous_hash)` requires a **trusted root and predecessor**; zero is the predecessor for segment zero only. Later-segment verification cannot restart from zero. Frame start/order/count are checked, but the historical leaf domain does not independently bind the exact segment ordinal: retain that ordinal as trusted external context. A Merkle root provided by the same untrusted party as the frames is not an authentication anchor.
 
-- Camera runs the Steganographer pipeline, signing every frame
-- Officer's Ed25519 public key is registered with the department
-- QR overlay provides quick visual verification
-- Chain of custody: every frame has a cryptographic proof of origin
+## Transport, recording and unsupported compositions
 
-### Scenario 2: Journalism in Conflict Zones
+Preserve the actual signed delivery representation. Native exact file output uses RGB Matroska and PCM WAV. Dashboard records a bounded stored-ZIP archive of signed PNG snapshots or signed PCM WAV chunks and extraction metadata, not continuous signed WebM. The manifest helps recover indices, bit depth, public key and audio placement context; its presence alone does not authenticate that context or identify an organization.
 
-**Situation**: Reporter captures footage of events under dispute.
+The dashboard's public identity is the actual server-runtime Ed25519 key. A server can correctly verify its own output without proving to a remote consumer who operates that server. Independently pin the key and verify retained artifacts. Preview opacity/disabled visual-overlay controls do not provide a second signed channel. There is no dashboard MetaMask/wallet signing or automatic blockchain identity registration.
 
-**Threats**: T1 (deepfake counter-claims), T5 (impersonation), T6 (audio manipulation)
+Live signed paths require a single supported invisible kernel and reject ignored encryption/ECC/spreading or invisible-plus-visible-overlay combinations. Native trait spread-spectrum signing is unsupported because its channel mapping differs from offline scalar binding. Offline generic sharding is RGB LSB only (2–8 shards); audio/SS/DCT sharding rejects. A library backend or rendering API being available does not make these compositions supported.
 
-**Mitigation**:
+LSB is fragile under JPEG, H.264, MP3, resampling and other lossy transformations. DCT, spread-spectrum, redundancy or visible marks may have different failure modes, but none is a universal transcoding fallback. Successful preservation requires testing the actual delivery path, not assuming a kernel name guarantees robustness. Extraction absence after transport can reflect stripping, corruption, an unsupported representation, a wrong extraction key or genuinely unsigned content; it does not uniquely attribute an attack.
 
-- Reporter signs with their personal Ed25519 key
-- News organization can verify any frame against the reporter's published public key
-- Audio and video both carry independent signatures
-- QR metadata includes timestamps for timeline reconstruction
+## Forensic detection is scoped evidence
 
-### Scenario 3: Supply Chain Inspection
+Forensics separates content-derived findings from observations and completeness. `detected` can stay true when display evidence is capped or later analysis is incomplete. ZIP inventory, topology anomalies, entropy and statistical scores do not alone establish concealment. Magic strings and Unicode findings may also have benign explanations; investigate them rather than equating them with a recovered authenticated message or malicious intent.
 
-**Situation**: Remote video inspection of manufacturing processes.
+ZIP/OOXML examination checks supported structure, bounded inflate/CRC and selected decoded XML/text parts. Unsupported archive features, entities/encodings and resource cutoffs constrain coverage. PDF inspection is lexical and bounded, not full rendering, arbitrary filter/object-stream execution, CMap/glyph interpretation or every invisible-text mechanism. `incomplete_reasons` must travel with the result. A budget-limited negative, unreadable file or unavailable estimator is not a clean bill of health.
 
-**Threats**: T2 (edit defects out), T3 (show old footage), T7 (lossy compression strips proofs)
+Chi-squared scores describe pair-equalization compatibility; sample-pairs is a heuristic; RS estimates random-LSB replacement rate only on suitable correlated samples with an admissible fit. `confidence` is not a calibrated posterior probability of steganography. Synthetic controls and frozen historical fixtures do not calibrate natural-image accuracy. No “one bit is undetectable,” low-KL-divergence bound, false-positive-free detector or exhaustive scanner claim is made.
 
-**Mitigation**:
+## Deployment examples with qualified conclusions
 
-- Inspection device signs all frames with facility-specific key
-- Dashboard recording saves raw WebM (preserving QR overlays)
-- Audio PCM saved as WAV (preserving LSB signatures)
-- Missing frame indices reveal if footage is truncated
+### Journalism or evidence retention
 
-### Scenario 4: Whistleblower Protection
+Pin the source key through an editorial/organizational channel, retain lossless signed artifacts and extraction manifests, verify independently, and record exact-file digests plus custody history. A verified artifact supports “these authenticated bytes were signed by this key,” not “this scene is true,” “all frames were retained” or automatic courtroom admissibility.
 
-**Situation**: Internal recordings need to prove authenticity without revealing the source.
+### Remote inspection or broadcast
 
-**Threats**: T5 (re-signing by adversary), T8 (key leakage), T4 (signature stripping)
+Protect the signing device and transport, retain an original lossless branch, and define session/sequence expectations separately. A transcoded broadcast copy may lose extractability. A signed inspection image does not prove that the physical inspection occurred or that the camera input was honest.
 
-**Mitigation**:
+### Confidential or pseudonymous material
 
-- Use Ethereum signing with a pseudonymous wallet
-- QR overlay burns proof into the visible video
-- Even if LSB data is stripped, the QR overlay persists in recordings
-- Verification requires only the public key, protecting the whistleblower's identity
+Encrypt the logical payload if its contents are confidential; do not confuse a pseudonymous public key with anonymity. The visible carrier, traffic, metadata, identity pinning channel and endpoint compromise can reveal the source. Signed media is not, by itself, whistleblower protection or a regulatory-compliance guarantee.
 
----
+## Residual risk and assurance limits
 
-## Residual Risks Summary
+Key compromise, authorized false signing, excluded-region edits, replay without session policy, lossy destruction, hostile filesystem parents, endpoint compromise and dishonest trusted-provider chain selection remain live risks. Tests, regression smokes and dependency-advisory tools are evidence for specific exercised behaviors, not proofs that all attacks are excluded. No unobserved performance, exhaustive coverage or final release-count claim is made here.
 
-| Risk | Severity | Mitigation Path |
-| --- | --- | --- |
-| Private key compromise | Critical | Hardware security modules (HSMs), key rotation |
-| Encryption key compromise | High | Separate key management, key rotation, HSM storage |
-| Lossy compression destroying LSB | Medium | DCT-domain embedding, spread-spectrum, QR overlay as fallback |
-| Steganalysis detecting LSB at high bit depths | Low | Use 1-bit LSB (below RS analysis threshold) |
-| Partial corruption exceeding ECC capacity | Low | Increase Reed-Solomon redundancy symbols |
-| Frame reordering between signed frames | Low | Multi-frame spreading, sign at maximum rate |
-| Quantum computing breaking Ed25519 | Future | ML-DSA (post-quantum) backend planned in roadmap |
-
----
-
-## Further Reading
-
-- [Security](security.md) — Security model, Cachin's framework, deployment guidance
-- [Cryptography](cryptography.md) — BLAKE3, Ed25519, Ethereum signing details
-- [Algorithms](algorithms.md) — LSB embedding, QR overlay, info bar implementations
-- [Steganography Theory](steganography-theory.md) — Information-theoretic foundations
-- [Configuration](configuration.md) — TOML settings for security parameters
-- [Roadmap](roadmap.md) — Post-quantum and DCT-domain planned features
+Further reading: [Security](security.md), [Cryptography](cryptography.md), [OpenTimestamps](ots-integration.md), [CLI Reference](cli-reference.md), and [Steganography Theory](steganography-theory.md).

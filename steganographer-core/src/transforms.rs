@@ -1,7 +1,7 @@
 //! Transform pipeline for opt-in generic packets.
 //!
 //! The packet envelope records an ordered list of
-//! [`TransformDescriptor`](crate::packet::TransformDescriptor)s and the locator
+//! [`TransformDescriptor`]s and the locator
 //! flags mirror them. This module owns the *meaning* of those descriptors: it
 //! applies transforms to a logical payload (producing the encoded body) and
 //! reverses them (recovering and re-verifying the logical payload).
@@ -13,22 +13,29 @@
 //!    key and signature so a decoder can attribute the payload to an identity.
 //! 2. **Compression** — DEFLATE via `flate2`, recorded only when it actually
 //!    shrinks the payload.
-//! 3. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
+//! 3. **Password KDF** — optional Argon2id key derivation, admitted under the
+//!    same bounded cost policy on writing and reading; it must feed AEAD.
+//! 4. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
 //!    [`crate::encryption`]. The ciphertext is bound to the packet identity
 //!    (packet id + payload kind + original length) as associated data. The
 //!    AEAD nonce is derived from the 16-byte packet identifier plus a fresh
 //!    per-invocation salt, so it never depends on public transport data and a
 //!    fresh packet never reuses a nonce.
-//! 4. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
+//! 5. **Error correction** — chunked Reed-Solomon over GF(2⁸) via
 //!    [`crate::error_correction`], so payloads larger than the 255-symbol RS
 //!    codeword ceiling are covered by independent per-chunk codewords.
+//!
+//! Readers structurally preflight the entire chain before allocating a body,
+//! validating credentials, deriving keys, or running any transform. Each
+//! supported stage occurs at most once, in this order, with descriptor version 1.
 //!
 //! A decoder that meets an unknown *critical* transform fails closed with
 //! [`TransformError::UnsupportedTransform`].
 
 use std::io::{Read, Write};
 
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
+use zeroize::Zeroizing;
 
 use crate::encryption::{self, EncryptionKey};
 use crate::error_correction;
@@ -59,12 +66,13 @@ pub const KDF_ARGON2ID_SALT_LEN: usize = 16;
 /// Pinned KDF output length: the derived master secret *is* the 32-byte
 /// ChaCha20-Poly1305 key.
 pub const KDF_ARGON2ID_OUTPUT_LEN: u16 = 32;
-/// DoS ceiling on the unauthenticated `memory_kib` descriptor field (1 GiB):
-/// a hostile descriptor must not direct a decoder to spend attacker-chosen
-/// memory per decode attempt.
-pub const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
+/// DoS ceiling on the unauthenticated `memory_kib` descriptor field (64 MiB).
+/// Writers and readers enforce the same admission policy.
+pub const MAX_KDF_MEMORY_KIB: u32 = 64 * 1024;
 /// DoS ceiling on the unauthenticated iteration count.
-pub const MAX_KDF_ITERATIONS: u32 = 1024;
+pub const MAX_KDF_ITERATIONS: u32 = 10;
+/// Combined unauthenticated Argon2id work ceiling, in KiB-passes.
+pub const MAX_KDF_MEMORY_PASSES: u64 = 256 * 1024;
 
 /// Serialized size of the Ed25519 sign-transform parameters
 /// (`public_key || signature`).
@@ -90,11 +98,11 @@ pub struct TransformContext<'a> {
 
 impl TransformContext<'_> {
     /// Associated data binding the ciphertext to the packet identity.
-    fn aad(&self) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(16 + 2 + 8);
-        aad.extend_from_slice(self.packet_id);
-        aad.extend_from_slice(&self.payload_kind.to_be_bytes());
-        aad.extend_from_slice(&self.original_len.to_be_bytes());
+    fn aad(&self) -> [u8; 26] {
+        let mut aad = [0u8; 26];
+        aad[..16].copy_from_slice(self.packet_id);
+        aad[16..18].copy_from_slice(&self.payload_kind.to_be_bytes());
+        aad[18..].copy_from_slice(&self.original_len.to_be_bytes());
         aad
     }
 }
@@ -161,10 +169,9 @@ pub struct Argon2idKdfParams {
     pub lanes: u8,
 }
 
-/// Validate the Argon2id parameter bounds a decoder will spend: the
-/// algorithmic floor from [`Argon2Params::validate`] plus hard DoS ceilings
-/// ([`MAX_KDF_MEMORY_KIB`], [`MAX_KDF_ITERATIONS`]) because the descriptor is
-/// unauthenticated.
+/// Validate the Argon2id algorithmic floor and shared writer/reader DoS
+/// ceilings, including combined memory-times-iterations work. Descriptor
+/// preflight must remain allocation-free even on invalid inputs.
 fn validate_kdf_bounds(memory_kib: u32, iterations: u32, lanes: u8) -> Result<(), TransformError> {
     if memory_kib == 0 || memory_kib > MAX_KDF_MEMORY_KIB {
         return Err(TransformError::InvalidDescriptor(
@@ -176,14 +183,17 @@ fn validate_kdf_bounds(memory_kib: u32, iterations: u32, lanes: u8) -> Result<()
             "Argon2id iteration count is zero or exceeds the decode ceiling",
         ));
     }
-    Argon2Params {
-        memory_kib,
-        iterations,
-        parallelism: u32::from(lanes),
-        output_len: usize::from(KDF_ARGON2ID_OUTPUT_LEN),
+    if u64::from(memory_kib) * u64::from(iterations) > MAX_KDF_MEMORY_PASSES {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id memory times iterations exceeds the work ceiling",
+        ));
     }
-    .validate()
-    .map_err(|e| TransformError::KdfFailed(e.to_string()))
+    if lanes == 0 || memory_kib < 8 * u32::from(lanes) {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id requires nonzero lanes and at least 8 KiB per lane",
+        ));
+    }
+    Ok(())
 }
 
 /// Serialize the Argon2id KDF descriptor parameters, pinned layout:
@@ -265,6 +275,21 @@ pub fn apply_with_password(
     if password.is_some() && encrypt_key.is_some() {
         return Err(TransformError::AmbiguousKeySource);
     }
+    if ecc_parity > 0 {
+        validate_ecc_params(ecc_parity, ecc_chunk_len)?;
+    }
+    if let Some(credentials) = password {
+        let params = credentials.params;
+        if params.output_len != usize::from(KDF_ARGON2ID_OUTPUT_LEN) {
+            return Err(TransformError::InvalidDescriptor(
+                "Argon2id KDF output length must be 32 bytes to feed the AEAD key",
+            ));
+        }
+        let lanes = u8::try_from(params.parallelism).map_err(|_| {
+            TransformError::InvalidDescriptor("Argon2id lane count must fit in one byte")
+        })?;
+        validate_kdf_bounds(params.memory_kib, params.iterations, lanes)?;
+    }
     let mut body = payload.to_vec();
     let mut transforms = Vec::with_capacity(5);
     let mut flags = 0u16;
@@ -308,20 +333,11 @@ pub fn apply_with_password(
     let mut derived_key = None;
     if let Some(credentials) = password {
         let params = credentials.params;
-        if params.output_len != usize::from(KDF_ARGON2ID_OUTPUT_LEN) {
-            return Err(TransformError::InvalidDescriptor(
-                "Argon2id KDF output length must be 32 bytes to feed the AEAD key",
-            ));
-        }
-        params
-            .validate()
-            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
-        u8::try_from(params.parallelism).map_err(|_| {
-            TransformError::InvalidDescriptor("Argon2id lane count must fit in one byte")
-        })?;
         let salt = password::generate_salt();
-        let master = password::derive_master_from_password(credentials.password, &salt, &params)
-            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
+        let master = Zeroizing::new(
+            password::derive_master_from_password(credentials.password, &salt, &params)
+                .map_err(|e| TransformError::KdfFailed(e.to_string()))?,
+        );
         transforms.push(TransformDescriptor {
             algorithm: TRANSFORM_KDF_ARGON2ID,
             version: 1,
@@ -382,6 +398,91 @@ pub fn reverse(
     )
 }
 
+/// A fully validated, allocation-free execution plan for the fixed pipeline.
+#[derive(Default)]
+struct ValidatedTransforms {
+    signature: Option<(VerifyingKey, Signature)>,
+    compress: bool,
+    kdf: Option<Argon2idKdfParams>,
+    aead: bool,
+    ecc: Option<(usize, usize, usize)>,
+}
+
+fn preflight_transforms(
+    transforms: &[TransformDescriptor],
+    encoded_len: usize,
+    original_len: u64,
+) -> Result<ValidatedTransforms, TransformError> {
+    let mut validated = ValidatedTransforms::default();
+    let mut previous_stage = 0;
+    for transform in transforms {
+        let stage = match transform.algorithm {
+            TRANSFORM_PAYLOAD_SIGN_ED25519 => 1,
+            TRANSFORM_COMPRESS_DEFLATE => 2,
+            TRANSFORM_KDF_ARGON2ID => 3,
+            TRANSFORM_AEAD_CHACHA20_POLY1305 => 4,
+            TRANSFORM_ECC_REED_SOLOMON => 5,
+            other => {
+                return Err(if transform.critical {
+                    TransformError::UnsupportedTransform(other)
+                } else {
+                    TransformError::UnknownTransform(other)
+                });
+            }
+        };
+        if transform.version != 1 {
+            return Err(TransformError::UnsupportedTransform(transform.algorithm));
+        }
+        if stage <= previous_stage {
+            return Err(TransformError::InvalidDescriptor(
+                "transforms must be unique and ordered signature, compression, KDF, AEAD, ECC",
+            ));
+        }
+        previous_stage = stage;
+        match transform.algorithm {
+            TRANSFORM_PAYLOAD_SIGN_ED25519 => {
+                validated.signature = Some(parse_ed25519_signature(&transform.parameters)?);
+            }
+            TRANSFORM_COMPRESS_DEFLATE => {
+                if !transform.parameters.is_empty() {
+                    return Err(TransformError::InvalidDescriptor(
+                        "DEFLATE transform must not have parameters",
+                    ));
+                }
+                if original_len > MAX_DECOMPRESS_OUTPUT as u64 {
+                    return Err(TransformError::InvalidDescriptor(
+                        "declared decompressed length exceeds the transform output ceiling",
+                    ));
+                }
+                validated.compress = true;
+            }
+            TRANSFORM_KDF_ARGON2ID => {
+                validated.kdf = Some(parse_kdf_argon2id_params(&transform.parameters)?);
+            }
+            TRANSFORM_AEAD_CHACHA20_POLY1305 => {
+                if !transform.parameters.is_empty() {
+                    return Err(TransformError::InvalidDescriptor(
+                        "ChaCha20-Poly1305 transform must not have parameters",
+                    ));
+                }
+                validated.aead = true;
+            }
+            TRANSFORM_ECC_REED_SOLOMON => {
+                let (parity, data_len, chunk_len) = parse_ecc_params(&transform.parameters)?;
+                validate_ecc_geometry(encoded_len, data_len, parity, chunk_len)?;
+                validated.ecc = Some((parity, data_len, chunk_len));
+            }
+            _ => unreachable!("algorithm checked above"),
+        }
+    }
+    if validated.kdf.is_some() && !validated.aead {
+        return Err(TransformError::InvalidDescriptor(
+            "Argon2id KDF transform requires a ChaCha20-Poly1305 AEAD transform",
+        ));
+    }
+    Ok(validated)
+}
+
 /// [`reverse`] with the PKT-007 password path: when the envelope records a
 /// [`TRANSFORM_KDF_ARGON2ID`] descriptor, `password` re-derives the AEAD key
 /// from the descriptor's salt and Argon2 parameters and hands it to the AEAD
@@ -394,27 +495,17 @@ pub fn reverse_with_password(
     transforms: &[TransformDescriptor],
     original_len: u64,
 ) -> Result<Vec<u8>, TransformError> {
-    // The KDF descriptor is applied before (and therefore reversed after) the
-    // AEAD descriptor it feeds, so the key must be re-derived before the
-    // reverse loop reaches AEAD.
+    // No cloning, credential validation, derivation, or transform execution
+    // is allowed until every descriptor has passed structural preflight.
+    let validated = preflight_transforms(transforms, encoded_body.len(), original_len)?;
     let mut derived_key = None;
-    let mut kdf_seen = false;
-    for transform in transforms {
-        if transform.algorithm == TRANSFORM_KDF_ARGON2ID {
-            if kdf_seen {
-                return Err(TransformError::InvalidDescriptor(
-                    "duplicate Argon2id KDF transform",
-                ));
-            }
-            kdf_seen = true;
-            let kdf = parse_kdf_argon2id_params(&transform.parameters)?;
-            // Fail closed before any Argon2 work on ambiguous or absent
-            // credentials.
-            if encrypt_key.is_some() {
-                return Err(TransformError::AmbiguousKeySource);
-            }
-            let password = password.ok_or(TransformError::MissingKey { what: "password" })?;
-            let master = password::derive_master_from_password(
+    if let Some(kdf) = validated.kdf {
+        if encrypt_key.is_some() {
+            return Err(TransformError::AmbiguousKeySource);
+        }
+        let password = password.ok_or(TransformError::MissingKey { what: "password" })?;
+        let master = Zeroizing::new(
+            password::derive_master_from_password(
                 password,
                 &kdf.salt,
                 &Argon2Params {
@@ -424,66 +515,34 @@ pub fn reverse_with_password(
                     output_len: usize::from(KDF_ARGON2ID_OUTPUT_LEN),
                 },
             )
-            .map_err(|e| TransformError::KdfFailed(e.to_string()))?;
-            derived_key = Some(EncryptionKey::from_bytes(
-                master.as_slice().try_into().expect("pinned output length"),
-            ));
-        }
-    }
-    if kdf_seen
-        && !transforms
-            .iter()
-            .any(|t| t.algorithm == TRANSFORM_AEAD_CHACHA20_POLY1305)
-    {
-        return Err(TransformError::InvalidDescriptor(
-            "Argon2id KDF transform requires a ChaCha20-Poly1305 AEAD transform",
+            .map_err(|e| TransformError::KdfFailed(e.to_string()))?,
+        );
+        derived_key = Some(EncryptionKey::from_bytes(
+            master.as_slice().try_into().expect("pinned output length"),
         ));
     }
     let effective_key = derived_key.as_ref().or(encrypt_key);
 
+    if validated.aead && effective_key.is_none() {
+        return Err(TransformError::MissingKey { what: "decryption" });
+    }
     let mut body = encoded_body.to_vec();
-
-    // Reverse transforms in the opposite order they were applied. ECC and
-    // encryption are commutative with nothing here, but we preserve the
-    // canonical order so future non-commutative transforms stay correct.
-    for transform in transforms.iter().rev() {
-        match transform.algorithm {
-            TRANSFORM_KDF_ARGON2ID => {
-                // Key material was re-derived before the loop (this descriptor
-                // is applied before, and reversed after, the AEAD transform it
-                // feeds); it transforms no bytes. Bounds were already checked
-                // in the pre-scan.
-                parse_kdf_argon2id_params(&transform.parameters)?;
-            }
-            TRANSFORM_AEAD_CHACHA20_POLY1305 => {
-                let key = effective_key.ok_or(TransformError::MissingKey { what: "decryption" })?;
-                body = encryption::decrypt(key, context.packet_id, &body, Some(&context.aad()))
-                    .map_err(|e| TransformError::DecryptionFailed(e.to_string()))?;
-            }
-            TRANSFORM_ECC_REED_SOLOMON => {
-                let (parity, data_len, chunk_len) = parse_ecc_params(&transform.parameters)?;
-                body = ecc_decode(&body, data_len, parity, chunk_len)?;
-            }
-            TRANSFORM_COMPRESS_DEFLATE => {
-                // Compression is the first transform applied, so decompression
-                // is the last reversed; its output length must equal the
-                // logical payload length. `original_len + 1` bounds the read
-                // to reject a decompression bomb.
-                body = deflate_decompress(&body, original_len as usize)?;
-            }
-            TRANSFORM_PAYLOAD_SIGN_ED25519 => {
-                // Signing is the innermost transform, so by the time we reach
-                // it the recovered body is the logical payload that was signed.
-                verify_ed25519_signature(&body, &transform.parameters)?;
-            }
-            other => {
-                return Err(if transform.critical {
-                    TransformError::UnsupportedTransform(other)
-                } else {
-                    TransformError::UnknownTransform(other)
-                });
-            }
-        }
+    if let Some((parity, data_len, chunk_len)) = validated.ecc {
+        body = ecc_decode(&body, data_len, parity, chunk_len)?;
+    }
+    if validated.aead {
+        let key = effective_key.expect("AEAD key checked above");
+        body = encryption::decrypt(key, context.packet_id, &body, Some(&context.aad()))
+            .map_err(|e| TransformError::DecryptionFailed(e.to_string()))?;
+    }
+    if validated.compress {
+        // Preflight bounded original_len to MAX_DECOMPRESS_OUTPUT.
+        body = deflate_decompress(&body, original_len as usize)?;
+    }
+    if let Some((public_key, signature)) = validated.signature {
+        public_key
+            .verify_strict(&body, &signature)
+            .map_err(|_| TransformError::SignatureInvalid)?;
     }
 
     let actual = body.len() as u64;
@@ -497,9 +556,9 @@ pub fn reverse_with_password(
 }
 
 /// Chunked Reed-Solomon encode: each chunk is an independent codeword, so
-/// payloads larger than the 255-symbol ceiling remain covered.
+/// payloads larger than the 255-symbol ceiling remain covered. The writer
+/// validates parity and chunk bounds before entering the pipeline.
 fn ecc_encode(body: &[u8], parity: usize, chunk_len: usize) -> Result<Vec<u8>, TransformError> {
-    validate_ecc_params(parity, chunk_len)?;
     if body.is_empty() {
         return Ok(Vec::new());
     }
@@ -517,8 +576,8 @@ fn ecc_encode(body: &[u8], parity: usize, chunk_len: usize) -> Result<Vec<u8>, T
 /// `chunk_len` the per-chunk data ceiling, both recorded in the transform
 /// descriptor.
 ///
-/// The descriptor is unauthenticated, so before ANY allocation the claimed
-/// geometry must account for every byte of the codeword stream exactly:
+/// The descriptor is unauthenticated, so preflight validates parity and chunk
+/// bounds and proves this exact geometry before allocation or execution:
 ///
 /// `full_chunks * (chunk_len + parity) + trailing(last_len + parity) ==
 /// encoded.len()`
@@ -532,19 +591,8 @@ fn ecc_decode(
     parity: usize,
     chunk_len: usize,
 ) -> Result<Vec<u8>, TransformError> {
-    validate_ecc_params(parity, chunk_len)?;
-
     let full_chunks = data_len / chunk_len;
     let last_len = data_len % chunk_len;
-    let expected_codeword_len = full_chunks
-        .checked_mul(chunk_len + parity)
-        .and_then(|total| total.checked_add(if last_len > 0 { last_len + parity } else { 0 }))
-        .ok_or(TransformError::LengthOverflow)?;
-    if expected_codeword_len != encoded.len() {
-        return Err(TransformError::InvalidDescriptor(
-            "ECC descriptor geometry is inconsistent with the codeword stream",
-        ));
-    }
     if parity == 0 {
         return Ok(encoded[..data_len].to_vec());
     }
@@ -574,9 +622,29 @@ fn ecc_decode(
     Ok(output)
 }
 
-/// Verify an Ed25519 signature recorded in the sign-transform parameters
-/// (`public_key || signature`) over the recovered logical payload.
-fn verify_ed25519_signature(body: &[u8], parameters: &[u8]) -> Result<(), TransformError> {
+/// Check exact stream geometry after the parity and chunk bounds are known.
+fn validate_ecc_geometry(
+    encoded_len: usize,
+    data_len: usize,
+    parity: usize,
+    chunk_len: usize,
+) -> Result<(), TransformError> {
+    let full_chunks = data_len / chunk_len;
+    let last_len = data_len % chunk_len;
+    let expected_codeword_len = full_chunks
+        .checked_mul(chunk_len + parity)
+        .and_then(|total| total.checked_add(if last_len > 0 { last_len + parity } else { 0 }))
+        .ok_or(TransformError::LengthOverflow)?;
+    if expected_codeword_len != encoded_len {
+        return Err(TransformError::InvalidDescriptor(
+            "ECC descriptor geometry is inconsistent with the codeword stream",
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the fixed Ed25519 public-key/signature layout during preflight.
+fn parse_ed25519_signature(parameters: &[u8]) -> Result<(VerifyingKey, Signature), TransformError> {
     if parameters.len() != SIGN_PARAMS_SIZE {
         return Err(TransformError::InvalidDescriptor(
             "Ed25519 sign transform parameters must be 96 bytes (pubkey || signature)",
@@ -585,10 +653,11 @@ fn verify_ed25519_signature(body: &[u8], parameters: &[u8]) -> Result<(), Transf
     let public_key =
         VerifyingKey::from_bytes(&parameters[..32].try_into().expect("fixed slice"))
             .map_err(|_| TransformError::InvalidDescriptor("invalid Ed25519 public key"))?;
+    if public_key.is_weak() {
+        return Err(TransformError::InvalidDescriptor("weak Ed25519 public key"));
+    }
     let signature = Signature::from_bytes(&parameters[32..].try_into().expect("fixed slice"));
-    public_key
-        .verify(body, &signature)
-        .map_err(|_| TransformError::SignatureInvalid)
+    Ok((public_key, signature))
 }
 
 /// DEFLATE-compress a byte slice.
@@ -639,7 +708,7 @@ fn validate_ecc_params(parity: usize, chunk_len: usize) -> Result<(), TransformE
             "Reed-Solomon parity exceeds the supported maximum",
         ));
     }
-    if chunk_len == 0 || chunk_len + parity > 255 {
+    if chunk_len == 0 || chunk_len > 255 - parity {
         return Err(TransformError::InvalidDescriptor(
             "Reed-Solomon chunk length + parity must not exceed 255 symbols",
         ));
@@ -952,7 +1021,13 @@ mod tests {
         // Signature was over the original payload; verifying over the tampered
         // body must fail.
         assert!(matches!(
-            verify_ed25519_signature(&tampered, &bad_transforms[0].parameters),
+            reverse(
+                &tampered,
+                &ctx,
+                None,
+                &bad_transforms,
+                tampered.len() as u64
+            ),
             Err(TransformError::SignatureInvalid)
         ));
 
@@ -1123,27 +1198,31 @@ mod tests {
             ),
             Err(TransformError::InvalidDescriptor(_))
         ));
-
-        // Same rejection directly at the decode layer.
-        assert!(matches!(
-            ecc_decode(&[0u8; 32], 0xFFFF_FFFF, 1, DEFAULT_ECC_CHUNK_LEN),
-            Err(TransformError::InvalidDescriptor(_))
-        ));
     }
 
     #[test]
     fn ecc_geometry_mismatch_is_rejected() {
+        let ctx = TransformContext {
+            original_len: 8,
+            ..preflight_test_context()
+        };
+        let transforms = [TransformDescriptor {
+            algorithm: TRANSFORM_ECC_REED_SOLOMON,
+            version: 1,
+            critical: true,
+            parameters: ecc_params(1, 8, DEFAULT_ECC_CHUNK_LEN),
+        }];
         // data_len + parity overhead must equal the stream length exactly.
         // 8 data bytes + 1 parity = 9 expected, but 10 provided.
         assert!(matches!(
-            ecc_decode(&[0u8; 10], 8, 1, DEFAULT_ECC_CHUNK_LEN),
+            reverse(&[0u8; 10], &ctx, None, &transforms, 8),
             Err(TransformError::InvalidDescriptor(_))
         ));
         // Consistent geometry still decodes.
         let body = b"abcdefgh";
         let codeword = error_correction::encode(body, 1).unwrap();
         assert_eq!(
-            ecc_decode(&codeword, body.len(), 1, DEFAULT_ECC_CHUNK_LEN).unwrap(),
+            reverse(&codeword, &ctx, None, &transforms, 8).unwrap(),
             body
         );
     }
@@ -1344,7 +1423,7 @@ mod tests {
         tiny[24] = 2;
         assert!(matches!(
             parse_kdf_argon2id_params(&tiny),
-            Err(TransformError::KdfFailed(_))
+            Err(TransformError::InvalidDescriptor(_))
         ));
     }
 
@@ -1420,15 +1499,266 @@ mod tests {
             critical: true,
             parameters: descriptor,
         }];
-        // A KDF descriptor with nothing to feed is a protocol violation.
+        // Structural rejection precedes even empty-password validation.
         assert!(matches!(
-            reverse_with_password(b"ciphertext", &ctx, None, Some(b"pw"), &transforms, 7),
+            reverse_with_password(b"ciphertext", &ctx, None, Some(b""), &transforms, 7),
             Err(TransformError::InvalidDescriptor(_))
         ));
-        // The legacy password-less reverse fails closed with a missing key.
+        // Omitting credentials cannot hide the structural violation either.
         assert!(matches!(
             reverse(b"ciphertext", &ctx, None, &transforms, 7),
-            Err(TransformError::MissingKey { what: "password" })
+            Err(TransformError::InvalidDescriptor(_))
         ));
+    }
+
+    fn preflight_test_context() -> TransformContext<'static> {
+        TransformContext {
+            packet_id: b"0123456789abcdef",
+            payload_kind: crate::packet::PayloadKind::Bytes as u16,
+            original_len: 1024,
+        }
+    }
+
+    fn preflight_test_chain() -> (Vec<u8>, Vec<TransformDescriptor>) {
+        let credentials = PasswordKdfCredentials {
+            password: b"pw",
+            params: Argon2Params::fast(),
+        };
+        let (body, transforms, _) = apply_with_password(
+            &[b'a'; 1024],
+            &preflight_test_context(),
+            Some(&SigningKey::from_bytes(&[7; 32])),
+            true,
+            Some(&credentials),
+            None,
+            8,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        assert_eq!(transforms.len(), 5);
+        (body, transforms)
+    }
+
+    #[test]
+    fn all_stage_versions_and_parameter_layouts_are_preflighted() {
+        let (body, transforms) = preflight_test_chain();
+        let ctx = preflight_test_context();
+        for index in 0..transforms.len() {
+            for version in [0, 2, 255] {
+                for critical in [false, true] {
+                    let mut malformed = transforms.clone();
+                    malformed[index].version = version;
+                    malformed[index].critical = critical;
+                    assert_eq!(
+                        reverse_with_password(&body, &ctx, None, Some(b""), &malformed, 1024),
+                        Err(TransformError::UnsupportedTransform(
+                            transforms[index].algorithm
+                        ))
+                    );
+                }
+            }
+            let mut too_long = transforms.clone();
+            too_long[index].parameters.push(0);
+            assert!(matches!(
+                reverse_with_password(&body, &ctx, None, Some(b""), &too_long, 1024),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+            if !transforms[index].parameters.is_empty() {
+                let mut too_short = transforms.clone();
+                too_short[index].parameters.pop();
+                assert!(matches!(
+                    reverse_with_password(&body, &ctx, None, Some(b""), &too_short, 1024),
+                    Err(TransformError::InvalidDescriptor(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn whole_chain_order_duplicates_and_unknown_stages_precede_kdf_work() {
+        let (body, transforms) = preflight_test_chain();
+        let ctx = preflight_test_context();
+        for index in 0..transforms.len() {
+            let mut duplicate = transforms.clone();
+            duplicate.insert(index, transforms[index].clone());
+            assert!(matches!(
+                reverse_with_password(&body, &ctx, None, Some(b""), &duplicate, 1024),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+        }
+        for index in 0..transforms.len() - 1 {
+            let mut reordered = transforms.clone();
+            reordered.swap(index, index + 1);
+            assert!(matches!(
+                reverse_with_password(&body, &ctx, None, Some(b""), &reordered, 1024),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+        }
+        for critical in [false, true] {
+            let mut unknown = transforms.clone();
+            unknown.push(TransformDescriptor {
+                algorithm: 9999,
+                version: 1,
+                critical,
+                parameters: Vec::new(),
+            });
+            assert_eq!(
+                reverse_with_password(&body, &ctx, None, Some(b""), &unknown, 1024),
+                Err(if critical {
+                    TransformError::UnsupportedTransform(9999)
+                } else {
+                    TransformError::UnknownTransform(9999)
+                })
+            );
+        }
+        // ECC's complete geometry must also pass before password validation.
+        let mut bad_geometry = transforms.clone();
+        bad_geometry.last_mut().unwrap().parameters = ecc_params(8, 0, DEFAULT_ECC_CHUNK_LEN);
+        assert!(matches!(
+            reverse_with_password(&body, &ctx, None, Some(b""), &bad_geometry, 1024),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+    }
+
+    #[test]
+    fn signature_over_compressed_bytes_cannot_sign_the_returned_payload() {
+        let payload = [b'a'; 1024];
+        let compressed = deflate_compress(&payload).unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let (_, signature_stage, _) = apply(
+            &compressed,
+            &preflight_test_context(),
+            Some(&key),
+            false,
+            None,
+            0,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        let transforms = [
+            TransformDescriptor {
+                algorithm: TRANSFORM_COMPRESS_DEFLATE,
+                version: 1,
+                critical: true,
+                parameters: Vec::new(),
+            },
+            signature_stage[0].clone(),
+        ];
+        assert!(matches!(
+            reverse(
+                &compressed,
+                &preflight_test_context(),
+                None,
+                &transforms,
+                1024
+            ),
+            Err(TransformError::InvalidDescriptor(_))
+        ));
+    }
+
+    #[test]
+    fn kdf_cost_admission_is_symmetric_without_executing_high_cost_parameters() {
+        let salt = [0; KDF_ARGON2ID_SALT_LEN];
+        // Accepted boundaries are parser-only: never spend these costs in a test.
+        for (memory_kib, iterations) in [(19456, 2), (64 * 1024, 4), (8, 10)] {
+            let params = Argon2Params {
+                memory_kib,
+                iterations,
+                ..Argon2Params::fast()
+            };
+            assert!(parse_kdf_argon2id_params(&kdf_argon2id_params(&salt, &params)).is_ok());
+        }
+        for (memory_kib, iterations) in [
+            (64 * 1024 + 1, 1),
+            (8, 11),
+            (64 * 1024, 5),
+            (32 * 1024, 9),
+            (1024 * 1024, 1024),
+            (u32::MAX, u32::MAX),
+        ] {
+            let params = Argon2Params {
+                memory_kib,
+                iterations,
+                ..Argon2Params::fast()
+            };
+            let descriptors = [
+                TransformDescriptor {
+                    algorithm: TRANSFORM_KDF_ARGON2ID,
+                    version: 1,
+                    critical: true,
+                    parameters: kdf_argon2id_params(&salt, &params),
+                },
+                TransformDescriptor {
+                    algorithm: TRANSFORM_AEAD_CHACHA20_POLY1305,
+                    version: 1,
+                    critical: true,
+                    parameters: Vec::new(),
+                },
+            ];
+            assert!(matches!(
+                reverse_with_password(
+                    b"",
+                    &preflight_test_context(),
+                    None,
+                    Some(b""),
+                    &descriptors,
+                    1024,
+                ),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+            let credentials = PasswordKdfCredentials {
+                password: b"",
+                params,
+            };
+            assert!(matches!(
+                apply_with_password(
+                    b"",
+                    &preflight_test_context(),
+                    Some(&SigningKey::from_bytes(&[7; 32])),
+                    true,
+                    Some(&credentials),
+                    None,
+                    0,
+                    DEFAULT_ECC_CHUNK_LEN,
+                ),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn writer_ecc_geometry_is_validated_before_password_work_even_for_empty_bodies() {
+        let ctx = TransformContext {
+            original_len: 0,
+            ..preflight_test_context()
+        };
+        let credentials = PasswordKdfCredentials {
+            password: b"",
+            params: Argon2Params::fast(),
+        };
+        for (parity, chunk_len) in [(1, usize::MAX), (16, 240), (17, 239), (1, 0)] {
+            assert!(matches!(
+                apply(b"", &ctx, None, false, None, parity, chunk_len),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+            assert!(matches!(
+                apply_with_password(
+                    b"",
+                    &ctx,
+                    Some(&SigningKey::from_bytes(&[7; 32])),
+                    true,
+                    Some(&credentials),
+                    None,
+                    parity,
+                    chunk_len,
+                ),
+                Err(TransformError::InvalidDescriptor(_))
+            ));
+        }
+        for (parity, chunk_len) in [(16, 239), (0, 255)] {
+            let (body, transforms, _) =
+                apply(b"", &ctx, None, false, None, parity, chunk_len).unwrap();
+            assert_eq!(reverse(&body, &ctx, None, &transforms, 0).unwrap(), b"");
+        }
     }
 }

@@ -3,9 +3,9 @@
 //! Pulls video frames from an AppSink, processes them through a
 //! [`VideoStegoModule`], and pushes the modified frames via AppSrc.
 
+use crate::{BridgeOutput, BridgeSource, SigningKernel};
 use anyhow::Context;
-use gstreamer::prelude::*;
-use gstreamer_app::{AppSink, AppSrc};
+use gstreamer_video::VideoFrameExt;
 use steganographer_core::crypto::{SignaturePayload, Signer};
 use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
@@ -45,472 +45,380 @@ impl Drop for AutoReleasePool {
     }
 }
 
-/// Configuration for the video filter pipeline.
+/// Endpoint-free launch fragments and the actual embedding kernel's binding.
+#[derive(Clone)]
 pub struct VideoFilterConfig {
-    /// GStreamer source pipeline string (e.g., "videotestsrc ! videoconvert ! video/x-raw,format=RGB")
     pub source_pipeline: String,
-    /// GStreamer sink pipeline string (e.g., "videoconvert ! autovideosink")
+    /// Caller-owned output chain. Later verification requires exact pixels;
+    /// lossy encoding or color conversion after the bridge can destroy them.
     pub sink_pipeline: String,
+    /// Required when signing. Must describe the module actually embedding.
+    pub signing_kernel: Option<SigningKernel>,
 }
 
-/// Run a video filter pipeline using AppSink/AppSrc.
-///
-/// This function:
-/// 1. Creates a source pipeline ending in an AppSink
-/// 2. Creates a sink pipeline starting from an AppSrc
-/// 3. Pulls frames from the AppSink, processes them, and pushes to AppSrc
-///
-/// # Arguments
-/// * `config` — Pipeline configuration
-/// * `stego` — The steganography module to apply
-/// * `signer` — Optional signer for generating frame signatures
-/// * `max_frames` — Optional limit on frames to process (None = unlimited)
+/// Process packed RGB/BGRA pixels, preserving padding and buffer timing.
+/// Signed modules must permit extraction and canonical verification of their
+/// actual output; unsupported compositions fail rather than claiming success.
+/// Verification here checks module output before AppSrc, not arbitrary sink
+/// encoders. Use `process_video_file` for an exact-pixel file output chain.
+/// Headless pipelines run on the calling thread. On macOS, applications using
+/// camera or GUI elements must arrange their Cocoa main loop at application
+/// entry; this library never creates or runs NSApplication.
 pub fn run_video_filter(
     config: &VideoFilterConfig,
-    stego: Box<dyn VideoStegoModule>,
+    mut stego: Box<dyn VideoStegoModule>,
     signer: Option<&Signer>,
     max_frames: Option<u64>,
 ) -> anyhow::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        // On macOS, ALL GStreamer pipeline construction and state management
-        // MUST happen inside gstreamer::macos_main(). This function:
-        //   1. Runs the closure on the main thread
-        //   2. Starts the NSRunLoop on the main thread
-        // avfvideosrc and osxvideosink require an active NSRunLoop to function.
-        let config_clone = VideoFilterConfig {
-            source_pipeline: config.source_pipeline.clone(),
-            sink_pipeline: config.sink_pipeline.clone(),
-        };
-        let signer_clone = signer.map(|s| Signer::from_bytes(&s.signing_key_bytes()));
-        let stego_box = stego;
-
-        gstreamer::macos_main(move || {
-            if let Err(e) = run_video_filter_internal(
-                &config_clone,
-                stego_box,
-                signer_clone.as_ref(),
-                max_frames,
-            ) {
-                log::error!("Pipeline error: {}", e);
+    if let Some(signer) = signer {
+        steganographer_core::revocation::check_known_revocations(
+            signer.verifying_key().as_bytes(),
+        )?;
+        match config
+            .signing_kernel
+            .context("video signing requires signing_kernel")?
+        {
+            SigningKernel::Lsb { bits } => {
+                anyhow::ensure!((1..=4).contains(&bits), "LSB signing bits must be 1-4")
             }
-        });
-
-        #[allow(clippy::needless_return)]
-        return Ok(());
+            SigningKernel::Dct => {}
+            SigningKernel::SpreadSpectrum => anyhow::bail!(
+                "spread-spectrum video signing has no supported canonical trait binding"
+            ),
+        }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        run_video_filter_internal(config, stego, signer, max_frames)
-    }
-}
-
-fn run_video_filter_internal(
-    config: &VideoFilterConfig,
-    stego: Box<dyn VideoStegoModule>,
-    signer: Option<&Signer>,
-    max_frames: Option<u64>,
-) -> anyhow::Result<()> {
-    log::info!("Starting video filter pipeline");
-    log::info!("  Source: {}", config.source_pipeline);
-    log::info!("  Sink:   {}", config.sink_pipeline);
-
-    // Build source pipeline with appsink
-    // emit-signals=false, we will use try_pull_sample directly (no callbacks)
-    let full_source_str = format!(
-        "{} ! queue max-size-buffers=10 ! appsink name=sink emit-signals=false sync=false max-buffers=5 drop=true",
-        config.source_pipeline
-    );
-    log::info!("  Full source: {}", full_source_str);
-
-    let source_pipeline =
-        gstreamer::parse::launch(&full_source_str).context("Failed to create source pipeline")?;
-    let source_bin = source_pipeline
-        .downcast::<gstreamer::Bin>()
-        .map_err(|_| anyhow::anyhow!("Source pipeline is not a Bin"))?;
-    let appsink = source_bin
-        .by_name("sink")
-        .ok_or_else(|| anyhow::anyhow!("Could not find appsink"))?
-        .downcast::<AppSink>()
-        .map_err(|_| anyhow::anyhow!("Not an AppSink"))?;
-
-    // Build sink pipeline with appsrc
-    let full_sink_str = format!(
-        "appsrc name=src format=time is-live=true ! queue max-size-buffers=10 ! {}",
-        config.sink_pipeline
-    );
-    log::info!("  Full sink: {}", full_sink_str);
-
-    let sink_pipeline =
-        gstreamer::parse::launch(&full_sink_str).context("Failed to create sink pipeline")?;
-    let sink_bin = sink_pipeline
-        .downcast::<gstreamer::Bin>()
-        .map_err(|_| anyhow::anyhow!("Sink pipeline is not a Bin"))?;
-    let appsrc = sink_bin
-        .by_name("src")
-        .ok_or_else(|| anyhow::anyhow!("Could not find appsrc"))?
-        .downcast::<AppSrc>()
-        .map_err(|_| anyhow::anyhow!("Not an AppSrc"))?;
-
-    appsrc.set_format(gstreamer::Format::Time);
-
-    // Start sink pipeline first so it's ready to receive
-    log::info!("Starting sink pipeline...");
-    sink_bin
-        .set_state(gstreamer::State::Playing)
-        .context("Failed to set sink pipeline to Playing")?;
-
-    // Start source pipeline
-    log::info!("Starting source pipeline...");
-    source_bin
-        .set_state(gstreamer::State::Playing)
-        .context("Failed to set source pipeline to Playing")?;
-
-    log::info!("Pipelines started. Entering pull-based processing loop...");
-
-    // ── Direct pull-based processing loop ──
-    // We use try_pull_sample directly on this thread — NO callbacks, NO channels.
-    // This avoids blocking the GStreamer streaming thread, which is critical on macOS
-    // because avfvideosrc's CVPixelBuffer pool gets exhausted if we hold references.
-    let mut stego = stego;
-    let mut frame_index: u64 = 0;
-    let mut consecutive_misses: u32 = 0;
-    let mut skipped_frames: u64 = 0;
-    let mut unsupported_format_warned = false;
-
-    loop {
-        // macOS autorelease pool for Objective-C objects created by AVFoundation
+    let source = BridgeSource::new(&config.source_pipeline)?;
+    let output = BridgeOutput::new(&config.sink_pipeline)?;
+    output.start()?;
+    source.start()?;
+    let mut index = 0;
+    while max_frames.is_none_or(|max| index < max) {
         let _pool = AutoReleasePool::new();
-
-        if let Some(max) = max_frames {
-            if frame_index >= max {
-                log::info!("Reached max frame count: {}", max);
-                break;
-            }
-        }
-
-        // Check source bus for errors/EOS
-        if let Some(bus) = source_bin.bus() {
-            while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
-                use gstreamer::MessageView;
-                match msg.view() {
-                    MessageView::Error(err) => {
-                        let src_name = err.src().map(|s| s.name().to_string()).unwrap_or_default();
-                        log::error!(
-                            "GStreamer error from '{}': {} (debug: {:?})",
-                            src_name,
-                            err.error(),
-                            err.debug()
-                        );
-                        source_bin.set_state(gstreamer::State::Null).ok();
-                        sink_bin.set_state(gstreamer::State::Null).ok();
-                        anyhow::bail!("Pipeline error: {}", err.error());
-                    }
-                    MessageView::Eos(_) => {
-                        log::info!("End of stream");
-                        source_bin.set_state(gstreamer::State::Null).ok();
-                        sink_bin.set_state(gstreamer::State::Null).ok();
-                        log::info!(
-                            "Video filter complete: {} frames processed ({} passed through unembedded)",
-                            frame_index,
-                            skipped_frames
-                        );
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Pull sample directly — this is the KEY difference from the callback approach.
-        // try_pull_sample returns immediately (with timeout) so we don't block the streaming thread.
-        let pull_timeout = if frame_index == 0 {
-            // Longer timeout for first frame: camera needs time to start
-            gstreamer::ClockTime::from_seconds(10)
-        } else {
-            gstreamer::ClockTime::from_mseconds(500)
+        let Some(sample) = source.pull(Some(&output))? else {
+            break;
         };
-
-        let sample = match appsink.try_pull_sample(pull_timeout) {
-            Some(sample) => {
-                consecutive_misses = 0;
-                sample
-            }
-            None => {
-                consecutive_misses += 1;
-                if consecutive_misses >= 6 {
-                    log::warn!("No frames after {} attempts. Stopping.", consecutive_misses);
-                    break;
-                }
-                if frame_index == 0 {
-                    log::warn!(
-                        "Waiting for first frame (attempt {})...",
-                        consecutive_misses
-                    );
-                }
-                continue;
-            }
-        };
-
-        // Extract what we need from the sample, then DROP it immediately
-        // to release the CVPixelBuffer back to the avfvideosrc pool.
-        let buffer = sample
+        let caps = sample.caps().context("video sample has no caps")?;
+        let info = gstreamer_video::VideoInfo::from_caps(caps).context("invalid video caps")?;
+        let (format, row_bytes) = packed_format(&info)?;
+        let mut buffer = sample
             .buffer()
-            .ok_or_else(|| anyhow::anyhow!("Sample has no buffer"))?;
-        let caps = sample
-            .caps()
-            .ok_or_else(|| anyhow::anyhow!("Sample has no caps"))?;
-        let video_info = gstreamer_video::VideoInfo::from_caps(caps)
-            .map_err(|_| anyhow::anyhow!("Could not parse video caps"))?;
-
-        // Copy the buffer data so we can release the original immediately
-        let mut buffer_copy = buffer.copy();
-        let caps_owned = caps.to_owned();
-
-        // CRITICAL: Drop the sample NOW to release the CVPixelBuffer
-        drop(sample);
-
-        if frame_index == 0 {
-            log::info!(
-                "First frame received! {} bytes, {:?} {}x{}",
-                buffer_copy.size(),
-                video_info.format(),
-                video_info.width(),
-                video_info.height()
-            );
-            appsrc.set_caps(Some(&caps_owned));
-        }
-
-        // Unsupported formats pass through unembedded (matching the
-        // BaseTransform sibling); the frame counter still advances so
-        // max_frames terminates on all-unsupported streams. The format check
-        // runs before the writable map so discarded frames are never copied.
-        let format = match video_info.format() {
-            gstreamer_video::VideoFormat::Rgb => VideoFormat::Rgb8,
-            gstreamer_video::VideoFormat::Bgra => VideoFormat::Bgra8,
-            other => {
-                if !unsupported_format_warned {
-                    log::warn!(
-                        "Unsupported video format {other:?}; passing frames through unembedded"
-                    );
-                    unsupported_format_warned = true;
-                }
-                skipped_frames += 1;
-                match appsrc.push_buffer(buffer_copy) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!("Failed to push buffer: {:?}", e);
-                        break;
-                    }
-                }
-                frame_index += 1;
-                continue;
+            .context("video sample has no buffer")?
+            .copy();
+        {
+            let mut mapped =
+                gstreamer_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &info)
+                    .context("mapping video frame")?;
+            let stride = checked_stride(mapped.plane_stride()[0], row_bytes, info.height())?;
+            let plane = mapped
+                .plane_data_mut(0)
+                .context("mapping video pixel plane")?;
+            // Tight frames can be processed in place; gather only when the
+            // native layout contains padding that is not carrier content.
+            let mut packed = if stride == row_bytes {
+                None
+            } else {
+                Some(gather_pixels(plane, stride, row_bytes, info.height())?)
+            };
+            let pixels = match packed.as_mut() {
+                Some(pixels) => pixels.as_mut_slice(),
+                None => plane
+                    .get_mut(..row_bytes * info.height() as usize)
+                    .context("video plane is shorter than its pixel layout")?,
+            };
+            let signature = if let Some(signer) = signer {
+                let kernel = config
+                    .signing_kernel
+                    .context("video signing requires signing_kernel")?;
+                anyhow::ensure!(
+                    format == VideoFormat::Rgb8 || matches!(kernel, SigningKernel::Lsb { .. }),
+                    "DCT and spread-spectrum video signing require RGB pixels"
+                );
+                Some(signer.sign_frame(
+                    index,
+                    &kernel.video_binding(pixels, info.width(), info.height())?,
+                    None,
+                ))
+            } else {
+                None
+            };
+            let mut frame = VideoFrame {
+                width: info.width(),
+                height: info.height(),
+                stride: row_bytes as u32,
+                format,
+                data: pixels,
+                frame_index: index,
+            };
+            stego
+                .embed(&mut frame, signature.as_ref())
+                .context("video stego embed failed")?;
+            if let Some(signer) = signer {
+                let extracted = stego
+                    .extract(&frame)
+                    .context("extracting actual signed video output")?
+                    .context("module did not embed an extractable video signature")?;
+                let binding = config
+                    .signing_kernel
+                    .context("missing signing kernel")?
+                    .video_binding(frame.data, info.width(), info.height())?;
+                let verifier = steganographer_core::crypto::Verifier::with_hash_algorithm(
+                    signer.verifying_key(),
+                    signer.hash_algorithm(),
+                );
+                anyhow::ensure!(
+                    extracted.frame_index == index && verifier.verify(&extracted, &binding, None),
+                    "video module output is incompatible with its signing binding"
+                );
             }
-        };
-
-        // Sign and embed steganography
-        let mut map = buffer_copy
-            .make_mut()
-            .map_writable()
-            .map_err(|_| anyhow::anyhow!("Could not map buffer writable"))?;
-
-        let sig = signer.map(|s| s.sign_frame(frame_index, map.as_ref(), None));
-        let mut core_frame = VideoFrame {
-            width: video_info.width(),
-            height: video_info.height(),
-            stride: video_info.stride()[0] as u32,
-            format,
-            data: map.as_mut(),
-            frame_index,
-        };
-
-        stego
-            .embed(&mut core_frame, sig.as_ref())
-            .context("Stego embed failed")?;
-
-        drop(map);
-
-        // Push processed frame to output
-        match appsrc.push_buffer(buffer_copy) {
-            Ok(_) => {}
-            Err(e) => {
-                log::warn!("Failed to push buffer: {:?}", e);
-                break;
+            if let Some(pixels) = packed {
+                scatter_pixels(plane, stride, row_bytes, &pixels);
             }
         }
-
-        frame_index += 1;
-        if frame_index.is_multiple_of(30) {
-            log::info!("Processed {} frames", frame_index);
-        }
+        output.push(&source, &sample, &buffer)?;
+        index += 1;
     }
-
-    // Cleanup
-    log::info!("Shutting down pipelines...");
-    source_bin.set_state(gstreamer::State::Null)?;
-    sink_bin.set_state(gstreamer::State::Null)?;
-    log::info!(
-        "Video filter complete: {} frames processed ({} passed through unembedded)",
-        frame_index,
-        skipped_frames
-    );
-
-    Ok(())
+    output.finish(&source)
 }
 
-/// Extract signatures from a video source pipeline.
-///
-/// Pulls frames and extracts embedded signature payloads for verification.
+fn packed_format(info: &gstreamer_video::VideoInfo) -> anyhow::Result<(VideoFormat, usize)> {
+    let (format, bpp) = match info.format() {
+        gstreamer_video::VideoFormat::Rgb => (VideoFormat::Rgb8, 3usize),
+        gstreamer_video::VideoFormat::Bgra => (VideoFormat::Bgra8, 4usize),
+        other => anyhow::bail!("video bridge requires packed RGB or BGRA; got {other:?}"),
+    };
+    anyhow::ensure!(
+        info.width() > 0 && info.height() > 0,
+        "empty video dimensions"
+    );
+    let row = (info.width() as usize)
+        .checked_mul(bpp)
+        .context("video row length overflow")?;
+    anyhow::ensure!(
+        u32::try_from(row).is_ok(),
+        "video row length exceeds core stride"
+    );
+    Ok((format, row))
+}
+
+fn checked_stride(stride: i32, row: usize, height: u32) -> anyhow::Result<usize> {
+    let stride = usize::try_from(stride).context("negative video stride is unsupported")?;
+    anyhow::ensure!(stride >= row, "video stride is smaller than packed row");
+    let size = stride
+        .checked_mul(height as usize)
+        .context("video plane size overflow")?;
+    // gstreamer-video's plane_data accessor computes this extent as u32.
+    anyhow::ensure!(
+        size <= u32::MAX as usize,
+        "video plane exceeds supported map extent"
+    );
+    Ok(stride)
+}
+
+fn gather_pixels(plane: &[u8], stride: usize, row: usize, height: u32) -> anyhow::Result<Vec<u8>> {
+    let required = (height as usize - 1)
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(row))
+        .context("video pixel extent overflow")?;
+    anyhow::ensure!(
+        plane.len() >= required,
+        "video plane is shorter than its pixel layout"
+    );
+    let mut pixels = Vec::with_capacity(
+        row.checked_mul(height as usize)
+            .context("pixel size overflow")?,
+    );
+    for y in 0..height as usize {
+        pixels.extend_from_slice(&plane[y * stride..y * stride + row]);
+    }
+    Ok(pixels)
+}
+
+fn scatter_pixels(plane: &mut [u8], stride: usize, row: usize, pixels: &[u8]) {
+    for (y, packed_row) in pixels.chunks_exact(row).enumerate() {
+        plane[y * stride..y * stride + row].copy_from_slice(packed_row);
+    }
+}
+
+/// Extract from packed pixels only. Timeouts and source errors are failures,
+/// not a successful empty/partial extraction.
 pub fn extract_from_source(
     source_pipeline_str: &str,
     stego: &dyn VideoStegoModule,
     max_frames: Option<u64>,
 ) -> anyhow::Result<Vec<(u64, Option<SignaturePayload>)>> {
-    let source_str = format!("{} ! appsink name=sink", source_pipeline_str);
-    let source_pipeline = gstreamer::parse::launch(&source_str)?;
-    let source_bin = source_pipeline
-        .downcast::<gstreamer::Bin>()
-        .map_err(|_| anyhow::anyhow!("Not a Bin"))?;
-    let appsink = source_bin
-        .by_name("sink")
-        .ok_or_else(|| anyhow::anyhow!("No appsink"))?
-        .downcast::<AppSink>()
-        .map_err(|_| anyhow::anyhow!("Not AppSink"))?;
-
-    source_bin.set_state(gstreamer::State::Playing)?;
-
+    let source = BridgeSource::new(source_pipeline_str)?;
+    source.start()?;
     let mut results = Vec::new();
-    let mut frame_index: u64 = 0;
-
-    loop {
-        if let Some(max) = max_frames {
-            if frame_index >= max {
-                break;
-            }
-        }
-
-        let sample = match appsink.try_pull_sample(gstreamer::ClockTime::from_seconds(5)) {
-            Some(s) => s,
-            None => break,
+    let mut index = 0;
+    while max_frames.is_none_or(|max| index < max) {
+        let Some(sample) = source.pull(None)? else {
+            break;
         };
-
-        let buffer = sample
-            .buffer()
-            .ok_or_else(|| anyhow::anyhow!("No buffer"))?;
-        let map = buffer
-            .map_readable()
-            .map_err(|_| anyhow::anyhow!("Cannot map"))?;
-
-        let caps = sample.caps().ok_or_else(|| anyhow::anyhow!("No caps"))?;
-        let video_info =
-            gstreamer_video::VideoInfo::from_caps(caps).map_err(|_| anyhow::anyhow!("Bad caps"))?;
-
-        let format = match video_info.format() {
-            gstreamer_video::VideoFormat::Rgb => VideoFormat::Rgb8,
-            gstreamer_video::VideoFormat::Bgra => VideoFormat::Bgra8,
-            _ => {
-                frame_index += 1;
-                continue;
-            }
-        };
-
-        // We need a non-mutable reference for extraction, so create a temporary
-        // copy of the data to work with VideoFrame (which requires &mut for data).
-        let mut data_copy = map.as_ref().to_vec();
+        let caps = sample.caps().context("video sample has no caps")?;
+        let info = gstreamer_video::VideoInfo::from_caps(caps).context("invalid video caps")?;
+        let (format, row_bytes) = packed_format(&info)?;
+        let mapped = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(
+            sample.buffer().context("video sample has no buffer")?,
+            &info,
+        )
+        .context("mapping video frame")?;
+        let stride = checked_stride(mapped.plane_stride()[0], row_bytes, info.height())?;
+        let mut pixels = gather_pixels(mapped.plane_data(0)?, stride, row_bytes, info.height())?;
         let frame = VideoFrame {
-            width: video_info.width(),
-            height: video_info.height(),
-            stride: video_info.stride()[0] as u32,
+            width: info.width(),
+            height: info.height(),
+            stride: row_bytes as u32,
             format,
-            data: &mut data_copy,
-            frame_index,
+            data: &mut pixels,
+            frame_index: index,
         };
-
-        let payload = stego.extract(&frame)?;
-        results.push((frame_index, payload));
-
-        frame_index += 1;
+        results.push((index, stego.extract(&frame)?));
+        index += 1;
     }
-
-    source_bin.set_state(gstreamer::State::Null)?;
     Ok(results)
 }
 
-/// Process a video container file (MP4, MKV, AVI) through steganography.
-///
-/// Uses `decodebin` to automatically detect the container format and decode
-/// to raw RGB frames, processes them through the stego module, then re-encodes
-/// with `encodebin` or writes as raw frames.
-///
-/// # Arguments
-/// * `input_path` — Path to input video file (MP4, MKV, AVI, etc.)
-/// * `output_path` — Path to output file
-/// * `stego` — The steganography module to apply
-/// * `signer` — Optional signer for generating frame signatures
-/// * `max_frames` — Optional limit on frames to process
+/// Decode input to RGB and write exact processed pixels as raw-RGB Matroska.
+/// Only `.mkv` output is supported: lossy/color-converted output destroys LSBs.
+/// `signing_kernel` must describe `stego` when a signer is supplied.
 pub fn process_video_file(
     input_path: &str,
     output_path: &str,
     stego: Box<dyn VideoStegoModule>,
     signer: Option<&Signer>,
+    signing_kernel: Option<SigningKernel>,
     max_frames: Option<u64>,
 ) -> anyhow::Result<()> {
-    log::info!("Processing video file: {} -> {}", input_path, output_path);
-
-    // Use decodebin for automatic format detection
-    let source_str = format!(
-        "filesrc location={} ! decodebin ! videoconvert ! video/x-raw,format=RGB ! queue max-size-buffers=10 ! appsink name=sink emit-signals=false sync=false max-buffers=5 drop=true",
-        input_path
-    );
-
-    // For output, use encodebin or filesink with raw
-    let sink_str = format!(
-        "appsrc name=src format=time is-live=true ! queue max-size-buffers=10 ! videoconvert ! x264enc ! mp4mux ! filesink location={}",
-        output_path
-    );
-
+    require_extension(
+        output_path,
+        "mkv",
+        "video file output requires .mkv (exact raw RGB Matroska)",
+    )?;
     let config = VideoFilterConfig {
-        source_pipeline: source_str,
-        sink_pipeline: sink_str,
+        source_pipeline: format!(
+            "filesrc location={} ! decodebin ! videoconvert ! video/x-raw,format=RGB",
+            crate::quote_location(input_path)?,
+        ),
+        sink_pipeline: format!(
+            "matroskamux ! filesink location={}",
+            crate::quote_location(output_path)?,
+        ),
+        signing_kernel,
     };
-
-    // Reuse the existing filter pipeline
-    run_video_filter(&config, stego, signer, max_frames)?;
-
-    log::info!("Video file processing complete");
-    Ok(())
+    run_video_filter(&config, stego, signer, max_frames)
 }
 
-/// Process an audio container file (WAV, MP3, FLAC) through steganography.
-///
-/// Uses `decodebin` for automatic format detection and decodes to
-/// raw S16LE PCM samples.
+/// Decode to interleaved S16LE and write exact processed PCM to `.wav`.
+/// No resampling or conversion occurs after embedding.
+/// Selected decoded PCM is one logical frame at index zero, bounded to 64 MiB.
+/// `max_buffers` explicitly limits input collection; absent means the complete
+/// file. Extract the signature from the whole delivered PCM, not decoder chunks.
 pub fn process_audio_file(
     input_path: &str,
     output_path: &str,
     stego: &mut dyn steganographer_core::audio::AudioStegoModule,
     signer: Option<&Signer>,
+    signing_kernel: Option<SigningKernel>,
     max_buffers: Option<u64>,
 ) -> anyhow::Result<()> {
-    log::info!("Processing audio file: {} -> {}", input_path, output_path);
-
-    let source_str = format!(
-        "filesrc location={} ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,channels=1,rate=44100 ! queue ! appsink name=sink",
-        input_path
-    );
-    let sink_str = format!(
-        "appsrc name=src ! queue ! audioconvert ! wavenc ! filesink location={}",
-        output_path
-    );
-
+    require_extension(
+        output_path,
+        "wav",
+        "audio file output requires .wav (exact S16LE PCM)",
+    )?;
     let config = crate::audio_filter::AudioFilterConfig {
-        source_pipeline: source_str,
-        sink_pipeline: sink_str,
+        source_pipeline: format!(
+            "filesrc location={} ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,layout=interleaved",
+            crate::quote_location(input_path)?,
+        ),
+        sink_pipeline: format!("wavenc ! filesink location={}", crate::quote_location(output_path)?),
+        signing_kernel,
     };
+    crate::audio_filter::run_audio_file(&config, stego, signer, max_buffers)
+}
 
-    crate::audio_filter::run_audio_filter(&config, stego, signer, max_buffers)?;
-
-    log::info!("Audio file processing complete");
+fn require_extension(path: &str, extension: &str, message: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| v.eq_ignore_ascii_case(extension)),
+        "{message}"
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use steganographer_core::lsb_video::LsbVideo;
+
+    #[test]
+    fn metadata_offsets_and_padding_are_not_signed_or_embedded() {
+        gstreamer::init().unwrap();
+        let width = 62u32;
+        let height = 8u32;
+        let row = width as usize * 3;
+        let offset = 37usize;
+        let stride = 200usize;
+        let before = vec![0xff; offset + stride * height as usize + 19];
+        let mut buffer = gstreamer::Buffer::from_mut_slice(before.clone());
+        gstreamer_video::VideoMeta::add_full(
+            buffer.get_mut().unwrap(),
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::Rgb,
+            width,
+            height,
+            &[offset],
+            &[stride as i32],
+        )
+        .unwrap();
+        let info =
+            gstreamer_video::VideoInfo::builder(gstreamer_video::VideoFormat::Rgb, width, height)
+                .build()
+                .unwrap();
+        let signer = Signer::from_bytes(&[0x42; 32]);
+        let module = &mut LsbVideo::new(1);
+        {
+            let mut mapped =
+                gstreamer_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &info)
+                    .unwrap();
+            assert_eq!(mapped.plane_stride()[0] as usize, stride);
+            let plane = mapped.plane_data_mut(0).unwrap();
+            let mut pixels = gather_pixels(plane, stride, row, height).unwrap();
+            let binding = SigningKernel::Lsb { bits: 1 }
+                .video_binding(&pixels, width, height)
+                .unwrap();
+            let signature = signer.sign_frame(0, &binding, None);
+            let mut frame = VideoFrame {
+                width,
+                height,
+                stride: row as u32,
+                format: VideoFormat::Rgb8,
+                data: &mut pixels,
+                frame_index: 0,
+            };
+            module.embed(&mut frame, Some(&signature)).unwrap();
+            let extracted = module.extract(&frame).unwrap().unwrap();
+            let delivered_binding = SigningKernel::Lsb { bits: 1 }
+                .video_binding(frame.data, width, height)
+                .unwrap();
+            assert!(
+                steganographer_core::crypto::Verifier::new(signer.verifying_key()).verify(
+                    &extracted,
+                    &delivered_binding,
+                    None
+                )
+            );
+            scatter_pixels(plane, stride, row, &pixels);
+        }
+        let map = buffer.map_readable().unwrap();
+        for (i, expected) in before.iter().enumerate() {
+            let is_pixel =
+                i >= offset && i < offset + stride * height as usize && (i - offset) % stride < row;
+            if !is_pixel {
+                assert_eq!(map.as_ref()[i], *expected, "nonpixel byte {i} changed");
+            }
+        }
+    }
 }

@@ -1,11 +1,15 @@
-//! Canonical carrier hashing for offline embed/verify workflows.
+//! Canonical carrier hashing for offline and native embed/verify workflows.
 //!
 //! Embedding necessarily changes a carrier. Signing the exact pre-embedding
 //! bytes therefore cannot be verified from the encoded output. These helpers
 //! remove the locations owned by the selected kernel before hashing, producing
 //! the same binding bytes before and after embedding.
+//!
+//! Inputs are packed logical carrier bytes, never row padding. The
+//! spread-spectrum case is the CLI scalar-bitstream format with its 32-bit
+//! prefix and spread factor 64; it is not the green-only trait-video format.
 
-use steganographer_core::crypto::SignaturePayload;
+use crate::crypto::SignaturePayload;
 
 pub fn canonicalize(
     data: &[u8],
@@ -19,11 +23,36 @@ pub fn canonicalize(
     match stego_type {
         "lsb_video" => {
             let mask = lsb_clear_mask(bits)?;
-            for byte in &mut canonical {
-                *byte &= mask;
+            let bpp = if width == 0 && height == 0 {
+                // Dimensionless byte streams retain the original RGB contract.
+                3
+            } else {
+                anyhow::ensure!(
+                    width > 0 && height > 0,
+                    "Video binding dimensions must be positive"
+                );
+                let pixels = (width as usize)
+                    .checked_mul(height as usize)
+                    .ok_or_else(|| anyhow::anyhow!("Video binding geometry overflow"))?;
+                if pixels.checked_mul(3) == Some(canonical.len()) {
+                    3
+                } else if pixels.checked_mul(4) == Some(canonical.len()) {
+                    4
+                } else {
+                    anyhow::bail!("Video binding requires packed RGB or BGRA pixels");
+                }
+            };
+            for (index, byte) in canonical.iter_mut().enumerate() {
+                if bpp != 4 || index % 4 != 3 {
+                    *byte &= mask;
+                }
             }
         }
         "lsb_audio" => {
+            anyhow::ensure!(
+                canonical.len().is_multiple_of(2),
+                "LSB audio binding requires complete S16LE samples"
+            );
             let mask = !((1i16 << validate_bits(bits)?) - 1);
             let (sample_chunks, _remainder) = canonical.as_chunks_mut::<2>();
             for sample in sample_chunks.iter_mut() {
@@ -51,7 +80,7 @@ pub fn canonicalize(
         "dct_video" => {
             canonicalize_dct_regions(&mut canonical, width, height)?;
         }
-        _ => {}
+        _ => anyhow::bail!("Unsupported carrier binding kernel: {}", stego_type),
     }
     Ok(canonical)
 }
@@ -68,6 +97,14 @@ fn lsb_clear_mask(bits: u8) -> anyhow::Result<u8> {
 }
 
 fn canonicalize_dct_regions(data: &mut [u8], width: u32, height: u32) -> anyhow::Result<()> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| anyhow::anyhow!("DCT binding geometry overflow"))?;
+    anyhow::ensure!(
+        width > 0 && height > 0 && data.len() == expected_len,
+        "DCT binding requires a complete packed RGB frame"
+    );
     let blocks_x = width as usize / 8;
     let blocks_y = height as usize / 8;
     let required_blocks = SignaturePayload::SERIALIZED_SIZE * 8;
@@ -83,7 +120,9 @@ fn canonicalize_dct_regions(data: &mut [u8], width: u32, height: u32) -> anyhow:
         );
     }
 
-    let stride = width as usize * 3;
+    let stride = (width as usize)
+        .checked_mul(3)
+        .ok_or_else(|| anyhow::anyhow!("DCT binding stride overflow"))?;
     for payload_bit in 0..required_blocks {
         let block_x = (payload_bit % blocks_x) * 8;
         let block_y = (payload_bit / blocks_x) * 8;
@@ -110,6 +149,48 @@ fn canonicalize_dct_regions(data: &mut [u8], width: u32, height: u32) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bgra_alpha_is_authenticated_and_row_padding_is_not_accepted() {
+        let pixels = [0xff, 0xfe, 0xfd, 0xfb];
+        assert_eq!(
+            canonicalize(&pixels, "lsb_video", 2, 1, 1, 109).unwrap(),
+            [0xfc, 0xfc, 0xfc, 0xfb]
+        );
+        assert!(canonicalize(&[0; 5], "lsb_video", 2, 1, 1, 109).is_err());
+    }
+
+    #[test]
+    fn verifies_actual_delivered_lsb_pixels() {
+        use crate::{Signer, Verifier, VideoFormat, VideoFrame, VideoStegoModule};
+        let signer = Signer::generate();
+        let verifier = Verifier::new(signer.verifying_key());
+        let mut pixels = vec![0xff; 32 * 32 * 3];
+        let before = canonicalize(&pixels, "lsb_video", 2, 32, 32, 109).unwrap();
+        let payload = signer.sign_frame(9, &before, None);
+        let mut kernel = crate::lsb_video::LsbVideo::new(2);
+        let mut frame = VideoFrame {
+            width: 32,
+            height: 32,
+            stride: 96,
+            format: VideoFormat::Rgb8,
+            data: &mut pixels,
+            frame_index: 9,
+        };
+        kernel.embed(&mut frame, Some(&payload)).unwrap();
+        let extracted = kernel.extract(&frame).unwrap().unwrap();
+        let delivered = canonicalize(frame.data, "lsb_video", 2, 32, 32, 109).unwrap();
+        assert!(verifier.verify(&extracted, &delivered, None));
+        frame.data[2000] ^= 0x40;
+        let tampered = canonicalize(frame.data, "lsb_video", 2, 32, 32, 109).unwrap();
+        assert!(!verifier.verify(&extracted, &tampered, None));
+    }
+
+    #[test]
+    fn unsupported_or_truncated_bindings_are_errors() {
+        assert!(canonicalize(&[1], "lsb_audio", 1, 0, 0, 109).is_err());
+        assert!(canonicalize(&[], "unknown", 1, 0, 0, 109).is_err());
+        assert!(canonicalize(&[0; 3], "dct_video", 1, u32::MAX, u32::MAX, 109).is_err());
+    }
 
     #[test]
     fn video_lsb_binding_ignores_selected_low_bits() {

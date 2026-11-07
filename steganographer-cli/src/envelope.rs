@@ -27,7 +27,7 @@
 //!
 //! | Code | Meaning |
 //! | ---: | --- |
-//! | 0 | Success (verify valid/valid_revoked/no_signature/not_verified; scan clean) |
+//! | 0 | Success (verify valid/not_verified/extracted; scan clean) |
 //! | 1 | User/configuration/format error (unknown args, bad flag values, config errors) |
 //! | 2 | Packet not found / decode unavailable |
 //! | 3 | Authentication/signature verification failed |
@@ -45,7 +45,7 @@ pub const SCHEMA: &str = "steganographer.cli/v1";
 
 /// User/configuration/format error (exit 1).
 pub const USAGE_ERROR: &str = "usage_error";
-/// No valid generic packet found in the carrier (exit 2).
+/// No valid generic packet or media signature found (exit 2).
 pub const PACKET_NOT_FOUND: &str = "packet_not_found";
 /// Signature verification failed (exit 3).
 pub const VERIFICATION_FAILED: &str = "verification_failed";
@@ -95,17 +95,6 @@ pub fn success(command: &str, result: serde_json::Value) -> Envelope {
         timing: serde_json::json!({}),
         tool: tool_info(),
     }
-}
-
-/// Success envelope with non-fatal warnings attached.
-pub fn success_with_warnings(
-    command: &str,
-    result: serde_json::Value,
-    warnings: Vec<String>,
-) -> Envelope {
-    let mut envelope = success(command, result);
-    envelope.warnings = warnings;
-    envelope
 }
 
 /// `partial` envelope: the operation completed but is inconclusive
@@ -183,6 +172,41 @@ pub fn current_json_command() -> Option<String> {
     JSON_COMMAND.lock().ok().and_then(|slot| slot.clone())
 }
 
+/// Explicit authentication failure, kept typed through anyhow contexts.
+#[derive(Debug)]
+pub(crate) struct AuthenticationError(pub String);
+
+impl std::fmt::Display for AuthenticationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AuthenticationError {}
+
+/// Invalid caller input, even when an underlying I/O error is retained.
+#[derive(Debug)]
+pub(crate) struct UsageError(pub String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// The command already emitted an evidence-bearing partial result.
+#[derive(Debug)]
+pub(crate) struct InconclusiveError;
+
+impl std::fmt::Display for InconclusiveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("analysis is inconclusive")
+    }
+}
+
+impl std::error::Error for InconclusiveError {}
 // ─── Exit-code classification ───────────────────────────────────────
 
 /// Classify a terminal error into `(exit code, stable error code)` per the
@@ -196,7 +220,76 @@ pub fn current_json_command() -> Option<String> {
 /// `serde_json::Error` in the anyhow chain) and by the stable phrasing of
 /// mapped `map_err` messages, so wrapped failures classify identically.
 pub fn classify_exit(message: &str, error: Option<&anyhow::Error>) -> (i32, &'static str) {
-    if message.contains("no valid generic packet found") {
+    if let Some(error) = error {
+        if error.downcast_ref::<UsageError>().is_some() {
+            return (1, USAGE_ERROR);
+        }
+        if error.downcast_ref::<AuthenticationError>().is_some() {
+            return (3, VERIFICATION_FAILED);
+        }
+        for cause in error.chain() {
+            if cause.downcast_ref::<InconclusiveError>().is_some() {
+                return (5, "inconclusive");
+            }
+            if let Some(ots) = cause.downcast_ref::<steganographer_core::OTSError>() {
+                use steganographer_core::OTSError;
+                return match ots {
+                    OTSError::InvalidProof(_) | OTSError::VerificationFailed(_) => {
+                        (3, VERIFICATION_FAILED)
+                    }
+                    OTSError::Configuration(_) => (1, USAGE_ERROR),
+                    _ => (6, INTERNAL_ERROR),
+                };
+            }
+            if cause.downcast_ref::<AuthenticationError>().is_some()
+                || cause
+                    .downcast_ref::<steganographer_core::revocation::RevokedKey>()
+                    .is_some()
+            {
+                return (3, VERIFICATION_FAILED);
+            }
+            if let Some(transform) =
+                cause.downcast_ref::<steganographer_core::transforms::TransformError>()
+            {
+                use steganographer_core::transforms::TransformError;
+                if matches!(
+                    transform,
+                    TransformError::SignatureInvalid
+                        | TransformError::DecryptionFailed(_)
+                        | TransformError::DigestMismatch
+                        | TransformError::LengthMismatch { .. }
+                        | TransformError::ErrorCorrectionFailed(_)
+                ) {
+                    return (3, VERIFICATION_FAILED);
+                }
+            }
+            if let Some(packet) = cause.downcast_ref::<steganographer_core::packet::PacketError>() {
+                use steganographer_core::packet::PacketError;
+                if matches!(
+                    packet,
+                    PacketError::EnvelopeChecksum
+                        | PacketError::DigestMismatch
+                        | PacketError::BodyLengthMismatch
+                        | PacketError::Truncated { .. }
+                        | PacketError::NonCanonicalOrder { .. }
+                        | PacketError::DuplicateField { .. }
+                        | PacketError::MissingField { .. }
+                        | PacketError::InvalidField { .. }
+                        | PacketError::InvalidUtf8 { .. }
+                ) {
+                    return (3, VERIFICATION_FAILED);
+                }
+            }
+        }
+    }
+    if error.is_some_and(|error| {
+        error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<steganographer_core::CarrierError>(),
+                Some(steganographer_core::CarrierError::NoPacket)
+            )
+        })
+    }) {
         return (2, PACKET_NOT_FOUND);
     }
     if is_runtime_failure(message, error) {
@@ -235,4 +328,46 @@ pub fn fail_json(command: &str, code: &str, message: &str, exit_code: i32) -> ! 
     print(&error(command, code, message));
     eprintln!("Error: {message}");
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_authentication_survives_context() {
+        let error =
+            anyhow::Error::new(steganographer_core::transforms::TransformError::SignatureInvalid)
+                .context("packet decode failed");
+        assert_eq!(
+            classify_exit(&error.to_string(), Some(&error)),
+            (3, VERIFICATION_FAILED)
+        );
+        let error = anyhow::Error::new(steganographer_core::OTSError::InvalidProof(
+            "digest mismatch".into(),
+        ))
+        .context("timestamp verification");
+        assert_eq!(
+            classify_exit(&error.to_string(), Some(&error)),
+            (3, VERIFICATION_FAILED)
+        );
+    }
+
+    #[test]
+    fn resource_limits_and_runtime_errors_are_not_absence() {
+        let error = anyhow::Error::new(steganographer_core::packet::PacketError::LimitExceeded {
+            what: "body",
+            actual: 2,
+            maximum: 1,
+        });
+        assert_eq!(
+            classify_exit(&error.to_string(), Some(&error)),
+            (1, USAGE_ERROR)
+        );
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            classify_exit(&error.to_string(), Some(&error)),
+            (6, INTERNAL_ERROR)
+        );
+    }
 }

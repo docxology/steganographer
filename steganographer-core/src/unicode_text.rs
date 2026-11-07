@@ -89,15 +89,17 @@ pub fn analyze_text(input: &str) -> Vec<TextFinding> {
     findings
 }
 
-/// Bytes-level entry point: validates UTF-8 and delegates to [`analyze_text`].
-///
-/// Non-UTF-8 buffers are not text and are handled gracefully per the
-/// forensics convention (probes never fail; they report what they can
-/// observe): they yield no findings. Byte-offset evidence for binary probes
-/// is the domain of [`crate::forensics`].
+/// Bytes-level entry point: validates only the bounded UTF-8 scan window.
+/// A partial final code point at the budget boundary is excluded. Invalid
+/// bytes within the window are not treated as decoded text.
 pub fn analyze_bytes(input: &[u8]) -> Vec<TextFinding> {
-    match std::str::from_utf8(input) {
+    let prefix = &input[..input.len().min(MAX_TEXT_SCAN_BYTES)];
+    match std::str::from_utf8(prefix) {
         Ok(text) => analyze_text(text),
+        Err(error) if input.len() > prefix.len() && error.error_len().is_none() => {
+            // valid_up_to is a verified UTF-8 boundary.
+            analyze_text(std::str::from_utf8(&prefix[..error.valid_up_to()]).unwrap())
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -376,6 +378,8 @@ fn detect_whitespace_anomaly(text: &str) -> Option<TextFinding> {
     let mut line_start = 0usize;
 
     for line in text.split('\n') {
+        let original_chars = line.chars().count();
+        let line = line.strip_suffix('\r').unwrap_or(line);
         let mut trailing_run = 0usize;
         for (ci, c) in line.chars().enumerate() {
             if let Some(name) = non_ascii_whitespace_name(c) {
@@ -393,7 +397,7 @@ fn detect_whitespace_anomaly(text: &str) -> Option<TextFinding> {
             max_trailing = max_trailing.max(trailing_run);
             offsets.push(line_start + line.chars().count() - trailing_run);
         }
-        line_start += line.chars().count() + 1; // +1 for the '\n' separator
+        line_start += original_chars + 1; // preserve CRLF's two original characters
     }
 
     if offsets.is_empty() {
@@ -692,6 +696,32 @@ mod tests {
         let findings = analyze_text(&text);
         let f = finding(&findings, ZERO_WIDTH).unwrap();
         assert_eq!(f.offsets, vec![MAX_TEXT_SCAN_BYTES - 3]);
+    }
+
+    #[test]
+    fn crlf_preserves_trailing_whitespace_and_original_offsets() {
+        for (text, expected) in [
+            ("x  \n", vec![1]),
+            ("x  \r\n", vec![1]),
+            ("é  \r\nz  \r\n", vec![1, 6]),
+        ] {
+            let findings = analyze_text(text);
+            assert_eq!(
+                finding(&findings, WHITESPACE_ANOMALY).unwrap().offsets,
+                expected
+            );
+        }
+        assert!(finding(&analyze_text("x \r\n"), WHITESPACE_ANOMALY).is_none());
+    }
+
+    #[test]
+    fn suffix_outside_byte_window_cannot_erase_prefix_evidence() {
+        let mut bytes = "\u{202e}".as_bytes().to_vec();
+        bytes.resize(MAX_TEXT_SCAN_BYTES - 1, b'x');
+        bytes.extend_from_slice("é".as_bytes());
+        bytes.push(0xff);
+        let findings = analyze_bytes(&bytes);
+        assert_eq!(finding(&findings, BIDI_CONTROLS).unwrap().offsets, vec![0]);
     }
 
     #[test]

@@ -16,8 +16,8 @@
 //! version number, allowing future format evolution and preventing
 //! misinterpretation of non-steganographic data as a payload.
 
+use ed25519_dalek::Signer as DalekSigner;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use ed25519_dalek::{Signer as DalekSigner, Verifier as DalekVerifier};
 use rand::rngs::OsRng;
 use sha2::Digest;
 use subtle::ConstantTimeEq;
@@ -31,6 +31,7 @@ pub const MAGIC: [u8; 4] = *b"STEG";
 ///
 /// - `2` — Reed-Solomon codewords generated with `ALPHA = 2`.
 /// - `3` — Reed-Solomon codewords generated with `ALPHA = 3`.
+/// - `4` — domain-separated frame hashing with explicit media lengths and audio presence.
 ///
 /// `ALPHA` had to change because `2` is **not** a primitive element of GF(2⁸)
 /// under the AES polynomial `0x11B` (its multiplicative order is 51, not 255),
@@ -44,7 +45,7 @@ pub const MAGIC: [u8; 4] = *b"STEG";
 /// [`SignaturePayload::from_bytes`] instead of being accepted and misdecoded.
 ///
 /// There is no in-place migration path; re-encode from the source media.
-pub const FORMAT_VERSION: u8 = 3;
+pub const FORMAT_VERSION: u8 = 4;
 
 /// Configurable hash algorithm for frame data.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -66,39 +67,42 @@ impl HashAlgorithm {
         video_bytes: &[u8],
         audio_bytes: Option<&[u8]>,
     ) -> [u8; 32] {
+        let index = frame_index.to_le_bytes();
+        let video_len = (video_bytes.len() as u64).to_le_bytes();
+        let audio_present = [u8::from(audio_bytes.is_some())];
+        let audio = audio_bytes.unwrap_or_default();
+        let audio_len = (audio.len() as u64).to_le_bytes();
+        let parts: [&[u8]; 8] = [
+            b"steganographer-frame-v4\0",
+            &index,
+            &video_len,
+            video_bytes,
+            &audio_present,
+            &audio_len,
+            audio,
+            b"\0end",
+        ];
         match self {
             HashAlgorithm::Blake3 => {
                 let mut hasher = blake3::Hasher::new();
-                hasher.update(&frame_index.to_le_bytes());
-                hasher.update(video_bytes);
-                if let Some(a) = audio_bytes {
-                    hasher.update(a);
+                for part in parts {
+                    hasher.update(part);
                 }
                 *hasher.finalize().as_bytes()
             }
             HashAlgorithm::Sha256 => {
                 let mut hasher = sha2::Sha256::new();
-                hasher.update(frame_index.to_le_bytes());
-                hasher.update(video_bytes);
-                if let Some(a) = audio_bytes {
-                    hasher.update(a);
+                for part in parts {
+                    hasher.update(part);
                 }
-                let result = hasher.finalize();
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&result);
-                hash
+                hasher.finalize().into()
             }
             HashAlgorithm::Sha3_256 => {
                 let mut hasher = sha3::Sha3_256::new();
-                hasher.update(frame_index.to_le_bytes());
-                hasher.update(video_bytes);
-                if let Some(a) = audio_bytes {
-                    hasher.update(a);
+                for part in parts {
+                    hasher.update(part);
                 }
-                let result = hasher.finalize();
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&result);
-                hash
+                hasher.finalize().into()
             }
         }
     }
@@ -264,7 +268,7 @@ impl Signer {
 
     /// Hash frame data with the configured algorithm and sign the hash with Ed25519.
     ///
-    /// The hash covers: `frame_index || video_bytes || audio_bytes (optional)`.
+    /// The versioned hash binds the frame index, media lengths, and audio presence.
     pub fn sign_frame(
         &self,
         frame_index: u64,
@@ -309,6 +313,7 @@ impl Verifier {
     /// Import a verifying key from raw bytes.
     pub fn from_bytes(bytes: &[u8; 32]) -> anyhow::Result<Self> {
         let verifying_key = VerifyingKey::from_bytes(bytes)?;
+        anyhow::ensure!(!verifying_key.is_weak(), "Weak Ed25519 public key");
         Ok(Self {
             verifying_key,
             hash_algorithm: HashAlgorithm::default(),
@@ -318,10 +323,19 @@ impl Verifier {
     /// Import a verifying key with a specific hash algorithm.
     pub fn from_bytes_with_algo(bytes: &[u8; 32], algo: HashAlgorithm) -> anyhow::Result<Self> {
         let verifying_key = VerifyingKey::from_bytes(bytes)?;
+        anyhow::ensure!(!verifying_key.is_weak(), "Weak Ed25519 public key");
         Ok(Self {
             verifying_key,
             hash_algorithm: algo,
         })
+    }
+
+    /// The full public identity used for verification.
+    ///
+    /// Reporting this identity does not establish authorship: callers must compare
+    /// it with a separately trusted key, not a key supplied by the same payload.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.verifying_key
     }
 
     /// Set the hash algorithm.
@@ -360,40 +374,85 @@ impl Verifier {
 
         // Verify Ed25519 signature over the hash
         self.verifying_key
-            .verify(&computed_hash, &payload.signature)
+            .verify_strict(&computed_hash, &payload.signature)
             .is_ok()
     }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode ASCII hexadecimal without indexing UTF-8 strings at byte boundaries.
+///
+/// Whitespace and non-ASCII characters are rejected. Both letter cases are accepted.
+pub fn decode_hex(hex: &str) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        hex.len().is_multiple_of(2),
+        "Hex string must have even length"
+    );
+    // Validate before allocating so invalid key input never leaves a partial secret.
+    anyhow::ensure!(
+        hex.bytes().all(|byte| hex_nibble(byte).is_some()),
+        "Invalid hex character"
+    );
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().as_chunks::<2>().0 {
+        bytes.push((hex_nibble(pair[0]).unwrap() << 4) | hex_nibble(pair[1]).unwrap());
+    }
+    Ok(bytes)
+}
+
+/// Decode an exact-sized hexadecimal value without allocating or copying a vector.
+///
+/// All input is validated before constructing the result, including non-ASCII input.
+pub fn decode_hex_array<const N: usize>(hex: &str) -> anyhow::Result<[u8; N]> {
+    anyhow::ensure!(
+        hex.len().is_multiple_of(2) && hex.len() / 2 == N,
+        "Hex value must encode exactly {N} bytes"
+    );
+    anyhow::ensure!(
+        hex.bytes().all(|byte| hex_nibble(byte).is_some()),
+        "Invalid hex character"
+    );
+    let mut bytes = [0; N];
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
+        *byte = (hex_nibble(pair[0]).unwrap() << 4) | hex_nibble(pair[1]).unwrap();
+    }
+    Ok(bytes)
+}
+
+/// Encode bytes as lowercase ASCII hexadecimal with one allocation.
+pub fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        hex.push(DIGITS[(byte >> 4) as usize] as char);
+        hex.push(DIGITS[(byte & 0xf) as usize] as char);
+    }
+    hex
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A payload written by an older build must be *rejected*, not silently
-    /// misdecoded.
-    ///
-    /// `FORMAT_VERSION` was bumped 2 → 3 alongside the Reed-Solomon `ALPHA`
-    /// 2 → 3 change. That change alters the RS evaluation points, so a v2
-    /// codeword decodes to garbage under the current code. If the version
-    /// constant is ever reverted or left behind while the wire format moves,
-    /// `has_valid_magic` would start accepting incompatible payloads again —
-    /// this test is the tripwire for that.
+    /// Old hash domains must not be interpreted as current authenticated media.
     #[test]
     fn stale_format_version_payload_is_rejected() {
-        let mut buf = [0u8; SignaturePayload::SERIALIZED_SIZE];
-        buf[0..4].copy_from_slice(&MAGIC);
-        buf[4] = 2; // previous format version
-
-        assert!(
-            !SignaturePayload::has_valid_magic(&buf),
-            "a FORMAT_VERSION=2 payload must not be accepted by a \
-             FORMAT_VERSION={FORMAT_VERSION} build — the RS wire format \
-             changed with ALPHA, so accepting it means silent corruption"
-        );
-        assert!(
-            SignaturePayload::from_bytes(&buf).is_err(),
-            "parsing a stale-version payload must fail loudly"
-        );
+        let mut buf = Signer::from_bytes(&[7; 32])
+            .sign_frame(0, b"frame", None)
+            .to_bytes();
+        for old_version in [2, 3] {
+            buf[4] = old_version;
+            assert!(!SignaturePayload::has_valid_magic(&buf));
+            assert!(SignaturePayload::from_bytes(&buf).is_err());
+        }
     }
 
     /// The current version stamp round-trips through `has_valid_magic`.

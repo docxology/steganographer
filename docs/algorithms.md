@@ -2,17 +2,18 @@
 
 ## Overview
 
-Steganographer implements three categories of watermarking algorithms, each serving a distinct purpose:
+Steganographer exposes data-hiding kernels and separate visible rendering APIs. Availability in core does not imply availability in a signed native pipeline or the dashboard.
 
-| Algorithm | Type | Visibility | Extractable | Module |
-| --- | --- | --- | --- | --- |
-| LSB Video | Data hiding | Invisible | ✅ Yes | `lsb_video.rs` |
-| LSB Audio | Data hiding | Inaudible | ✅ Yes | `lsb_audio.rs` |
-| Spread Spectrum | Data hiding | Invisible | ✅ Yes | `spread_spectrum.rs` |
-| DCT Video | Data hiding | Invisible | ✅ Yes | `dct_video.rs` |
-| Text Overlay | Visual mark | Visible | ❌ No | `overlay.rs` |
-| Info Bar | Visual + Machine | Visible | ✅ Yes (scan) | `info_bar.rs` |
-| QR Data Matrix | Visual metadata | Visible | ✅ Yes (scan) | `app.js` (client-side) |
+| Algorithm | Carrier | Extraction | Module |
+| --- | --- | --- | --- |
+| LSB Video | Pixel low bits | Legacy signatures / separate generic packet path | `lsb_video.rs`, `carrier.rs` |
+| LSB Audio | PCM low bits | Keyed legacy signatures / separate generic packet path | `lsb_audio.rs`, `carrier.rs` |
+| Spread Spectrum | Keyed integer residue/QIM | Majority-decoded legacy signature | `spread_spectrum.rs` |
+| DCT Video | 8×8 transform coefficients | Legacy signature | `dct_video.rs` |
+| Learned | Keyed DCT chips | Short payload and decoder score, not identity proof | `learned/mod.rs` (opt-in) |
+| Text Overlay / Info Bar | Visible pixels | Rendering, not independent signature verification | `overlay.rs`, `info_bar.rs` |
+
+The dashboard supports Ed25519/BLAKE3/LSB only. Its signed visual overlays, QR, MetaMask and Ethereum modes are unavailable. Signed native pipelines accept one compatible invisible kernel, not mixed rendering chains.
 
 ---
 
@@ -20,7 +21,7 @@ Steganographer implements three categories of watermarking algorithms, each serv
 
 ### Principle
 
-Least Significant Bit (LSB) replacement modifies the lowest-order bits of pixel values to encode data. Since the LSBs contribute the least to the pixel's visual appearance, changes are imperceptible to the human eye.
+Least Significant Bit (LSB) replacement modifies the lowest-order bits of pixel values to encode data. Small changes may be hard to see, but perceptual invisibility is content/display dependent and is not statistical undetectability.
 
 ```mermaid
 flowchart LR
@@ -77,14 +78,7 @@ If the length prefix doesn't match 872, extraction returns `None` (no payload fo
 
 ### Visual Impact
 
-| Bits | Max Pixel Change | SNR Impact | Perceptibility |
-| --- | --- | --- | --- |
-| 1 | ±1 value | ~48 dB | Imperceptible |
-| 2 | ±3 values | ~42 dB | Imperceptible |
-| 3 | ±7 values | ~36 dB | Barely perceptible |
-| 4 | ±15 values | ~30 dB | Noticeable in smooth areas |
-
-**Recommendation**: Use 1 bit for maximum stealth, 2 bits for a good balance.
+The maximum change is `2^N - 1` integer levels per modified byte. One or two bits generally causes less distortion than higher bit depths; smooth areas, alpha and subsequent processing can make changes more apparent. There is no fixed SNR or universal perceptual guarantee.
 
 ### Supported Formats
 
@@ -100,38 +94,9 @@ If the length prefix doesn't match 872, extraction returns `None` (no payload fo
 
 ### Principle
 
-Similar to video LSB, but operates on 16-bit PCM audio samples. The key difference is that audio uses **pseudo-random index selection** via a keyed PRNG, making the embedding pattern unpredictable without the key.
+The legacy module modifies 16-bit PCM samples at keyed, frame-dependent permuted indices. The current mapping uses a Feistel permutation with cycle walking rather than allocating a Fisher–Yates shuffle. Extraction needs the same key, frame index, sample count and bit depth.
 
-### Why Pseudo-Random Indices?
-
-Sequential embedding in audio is more detectable than in video because:
-
-1. Audio analysis tools can detect statistical anomalies in sequential LSBs
-2. Audio is often subject to spectral analysis that reveals patterns
-3. Human hearing is sensitive to regular patterns in noise
-
-By permuting sample indices with a secret key, the embedded bits are scattered throughout the buffer, defeating statistical steganalysis.
-
-### Key-Derived Permutation
-
-```rust
-// Derive per-frame seed from key ⊕ frame_index
-let mut seed = [0u8; 32];
-for (i, byte) in key.iter().enumerate() {
-    seed[i] = byte ^ frame_index_bytes[i % 8];
-}
-let mut rng = StdRng::from_seed(seed);  // ChaCha8-based PRNG
-
-// Fisher-Yates shuffle
-let mut indices: Vec<usize> = (0..sample_count).collect();
-indices.shuffle(&mut rng);
-```
-
-**Properties**:
-
-- Same key + same frame_index → same permutation (deterministic)
-- Different frame_index → different permutation (prevents cross-frame analysis)
-- Without the key, the permutation is computationally infeasible to recover
+The format-4 mapping changed; older legacy artifacts must be re-encoded. Scattering positions does not encrypt payload bytes or defeat all statistical analysis.
 
 ### Embedding Protocol
 
@@ -152,16 +117,11 @@ The `mask` clears the lowest `N` bits: `mask = !((1 << N) - 1)`
 | 100 ms | 4,410 | 4,410 bits (551 bytes) | 8,820 bits |
 | 1 sec | 44,100 | 44,100 bits (5.4 KB) | 88,200 bits |
 
-The 109-byte payload needs 872 bits → only **872 samples** minimum (≈20 ms at 44.1 kHz).
+Including the 32-bit length prefix, a 109-byte signature needs 904 one-bit samples (about 20.5 ms at 44.1 kHz), not just the 872 payload bits.
 
 ### Audibility Impact
 
-| Bits | Max Sample Change | SNR Impact | Audibility |
-| --- | --- | --- | --- |
-| 1 | ±1 (out of 32,768) | ~90 dB | Completely inaudible |
-| 2 | ±3 | ~84 dB | Inaudible |
-| 3 | ±7 | ~78 dB | Inaudible in music/speech |
-| 4 | ±15 | ~72 dB | Barely audible in silence |
+The maximum change is `2^N - 1` integer sample levels. This is small relative to full-scale PCM but audibility depends on signal level, silence, playback gain and content. No universal inaudibility or fixed SNR is established.
 
 ---
 
@@ -205,7 +165,7 @@ flowchart TD
 | `scale` | 2 (16×16 px chars) | 1–8 |
 | `font_size` | 16 | Maps to scale via `scale = font_size / 8` |
 
-> **Dynamic Substitution**: Template placeholders like `{timestamp}` and `{frame_index}` are expanded at embed-time on every frame, so each frame gets a fresh UTC timestamp and its own frame number burned into the overlay.
+Template placeholders such as `{timestamp}` and `{frame_index}` expand during rendering. These visible strings are not independently authenticated provenance.
 
 ### Supported Formats
 
@@ -221,7 +181,7 @@ flowchart TD
 
 ### Principle
 
-Unlike steganography (which hides data) or simple text overlays, the Info Bar provides an **exoteric** (publicly visible and machine-readable) proof of encoding. It burns a high-contrast bar at the bottom of the video frame containing cryptographic and contextual data.
+The Info Bar is a separate visible rendering API for a high-contrast metadata bar. Printed hashes, barcodes or QR content do not themselves verify a signature or establish a trusted signer. It is not supported as part of the signed live invisible-kernel pipeline.
 
 ### Components
 
@@ -242,59 +202,22 @@ The Info Bar dynamically generates and renders four components per frame:
 
 ### Purpose
 
-- **Immediate Verifiable Proof**: Allows a viewer with a smartphone to instantly scan the screen and verify the cryptographic signature without requiring raw video extraction.
-- **Deterrence**: Visibly asserts that the stream is cryptographically monitored and signed.
-- **Machine Readability**: The barcodes survive screencasts and lossy compression much better than LSB steganography.
-
----
-
-## QR Data Matrix Overlay (Dashboard)
-
-### Principle
-
-The dashboard renders a client-side **QR-style data matrix** overlay on every video frame. Unlike the server-side Info Bar, this is rendered in JavaScript within the browser canvas and is controlled by the Overlay Opacity slider.
-
-### Encoded Data (20 bytes)
-
-| Field | Bytes | Encoding |
-| --- | --- | --- |
-| Local frame counter | 4 | Little-endian u32 |
-| Server frame index | 4 | Little-endian u32 |
-| BLAKE3 hash prefix | 8 | First 8 bytes of 32-byte hash |
-| Timestamp (seconds) | 2 | UTC seconds mod 65536 |
-| Backend ID | 1 | 0 = Ed25519, 1 = Ethereum |
-| Verification status | 1 | 0 = Unverified, 1 = Verified |
-
-### Rendering
-
-1. **Encode** 20 bytes → 160 bits → 13×13 cell grid (with 9 padding bits)
-2. **Add finder pattern**: 3×3 filled square in top-left corner (like QR alignment)
-3. **Draw cells**: Each cell is a colored square — **red** for 1, **black** for 0
-4. **Apply opacity**: `ctx.globalAlpha = opacitySlider.value`
-5. **Position**: Bottom-right corner of the video canvas
-6. **Label**: Text line above the grid showing `F:<count> | <BACKEND>` and overlay text (e.g., "CONFIDENTIAL")
-
-### Opacity Control
-
-The Overlay Opacity slider (0.0–1.0) directly controls the `globalAlpha` of the canvas context when drawing the QR overlay, allowing smooth fading from fully visible to fully transparent.
-
-![QR overlay at full opacity](images/dashboard-qr-overlay.png)
-
-![QR overlay at reduced opacity](images/dashboard-opacity-70.png)
+- Visible text/codes may help inspection, but optical readability depends on rendering and capture conditions.
+- Verification still needs actual extracted data, a cryptographic check and a trusted public key.
+- The dashboard does not implement signed QR/visual overlays. Preview opacity changes display only, never the downloaded signed carrier.
 
 ---
 
 ## Algorithm Comparison
 
-| Property | LSB Video | LSB Audio | Spread Spectrum | DCT Video | Text Overlay | Info Bar |
-| --- | --- | --- | --- | --- | --- | --- |
-| Visibility | Invisible | Inaudible | Invisible | Invisible | Visible | V. Visible |
-| Extractable | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ (Optical) |
-| Index selection | Sequential | Pseudo-random | Keyed PRNG | Block-based | N/A | N/A |
-| Survives transcoding | ❌ | ❌ | ✅ Partially | ✅ (JPEG) | Partially | ✅ (Optical) |
-| Survives screenshots | ❌ | N/A | ❌ | ❌ | ✅ | ✅ |
-| Payload size | 109 bytes | 109 bytes | 109 bytes | 109 bytes | N/A | ~100 bytes |
-| Configurable bits | 1–4 per byte | 1–4 per sample | Amplitude+spread | Coef+quant | N/A | N/A |
+| Property | LSB Video/Audio | Spread Spectrum | DCT Video | Learned | Visible rendering |
+| --- | --- | --- | --- | --- | --- |
+| Placement | Low bits | Keyed residue classes | Block coefficients | Keyed coefficient chips | Visible pixels |
+| Decode | Exact low bits | Majority votes | Coefficient decision | Trained decoder | Optical inspection |
+| Compression guarantee | None | None | None | None | No cryptographic guarantee |
+| Signed payload | Legacy / separate generic path | Legacy | Legacy | Not an identity signature | Not standalone proof |
+
+Lossless preservation is the supported evidence path. Noise and codec results require measurements on the actual carrier, settings and delivery path.
 
 ---
 
@@ -302,45 +225,30 @@ The Overlay Opacity slider (0.0–1.0) directly controls the `globalAlpha` of th
 
 ### Principle
 
-Spread-spectrum embedding modulates payload bits onto a pseudo-noise (PN) sequence and adds it to pixel/sample values. Unlike LSB replacement, each payload bit is spread across many pixels, making it robust against local noise and compression artifacts.
+The implemented method is **keyed integer residue quantization (QIM) with repeated PN chips**, not additive direct-sequence spread spectrum. It avoids host-texture interference without averaging neighboring pixels or flattening PCM.
 
 ### Algorithm
 
-For each payload bit `b`:
+For integer amplitude `a`, let `s = floor((a + 1) / 2)`. Each payload bit is XORed with a keyed PN chip and projected to the nearest valid integer lattice of that class, with period `2s`. The detector reads `floor(value / s) mod 2` (Euclidean division for signed PCM), removes the keyed chip and majority-votes over `spread_factor` units. Ties decode as zero.
 
-1. **Generate** a PN sequence `pn[i] ∈ {-1, +1}` of length `spread_factor` using a keyed PRNG (seed = `key ⊕ frame_index ⊕ bit_position`)
-2. **Embed**: `pixel[i] += pn[i] * amplitude * (2*b - 1)` (clamped to 0–255)
-3. **Extract**: compute `correlation = Σ(pixel[i] - 128) * pn[i]`. If correlation > 0 → bit = 1, else bit = 0
+Projection stays within amplitude of the original scalar, including unsigned-byte and signed-PCM extrema. Because the decision uses residue class rather than host magnitude, ordinary nonuniform/gradient texture does not overwhelm clean recovery. This is a clean-carrier recovery property, not a codec/noise or natural-image stealth guarantee.
 
-### Parameters
+### Parameters and Capacity
 
-| Parameter | Default | Range | Effect |
-| --- | --- | --- | --- |
-| `key` | (required) | 32 bytes | Secret key for PN sequence — without it, extraction is impossible |
-| `amplitude` | 3 | 1–5 | Higher = more robust to noise but more visible |
-| `spread_factor` | 64 | 8–256 | Higher = more robust but lower capacity |
+The default amplitude is 3 and spread factor is 64. Checked `try_new` constructors validate amplitude, minimum spread and arithmetic bounds; convenience `new` constructors panic on invalid parameters. Video amplitude is 1–255, PCM amplitude 1–32767, and spread must be at least 8. CLI policy may be narrower than the library.
 
-### Capacity
+For a 109-byte legacy payload, capacity requires `872 × spread_factor` eligible units (55,808 at the default):
 
-Capacity = `data_length / spread_factor`. For a 109-byte payload (872 bits) at default spread_factor=64:
-
-- **Video**: needs 872 × 64 = 55,808 pixel bytes (easily fits in 640×480 RGB = 921,600 bytes)
-- **Audio**: needs 872 × 64 = 55,808 samples (≈1.3 sec at 44.1 kHz)
-
-### Noise Resistance
-
-Spread-spectrum is significantly more robust than LSB against:
-- Additive Gaussian noise (correlation detection survives SNR > 10 dB)
-- JPEG compression at moderate quality settings
-- Partial pixel/sample corruption (only affects local correlation)
-
-### Supported Formats
-
-| Format | Module | Notes |
+| Interface | Eligible unit | Mapping |
 | --- | --- | --- |
-| RGB8 | `SpreadSpectrumVideo` | Operates on raw pixel bytes |
-| BGRA8 | `SpreadSpectrumVideo` | Operates on raw pixel bytes |
-| PCM16 | `SpreadSpectrumAudio` | Operates on i16 samples |
+| `SpreadSpectrumVideo` media trait | One pixel | Green only in RGB/BGRA; excludes alpha and row padding |
+| `SpreadSpectrumAudio` media trait | One PCM frame | First channel only; other channels unchanged |
+| Video raw bit helpers / offline scalar path | One `u8` | Supplied scalar byte slice |
+| Audio raw bit helpers / offline scalar path | One `i16` | Supplied scalar sample slice |
+
+Raw `embed_bit` and `extract_bit` are fallible and retain `Result`; capacity/range failure is not a successful bit. Offline scalar placement and native trait placement must not be interchanged. Native trait SS signing currently rejects because its mapping differs from the offline canonical binding.
+
+Earlier additive or host-averaging SS artifacts are incompatible: **re-embed from the original media**. Repeated chips may tolerate some changes, but no Gaussian-SNR, JPEG or geometric-attack guarantee is established.
 
 ---
 
@@ -348,7 +256,7 @@ Spread-spectrum is significantly more robust than LSB against:
 
 ### Principle
 
-Embeds payload bits into mid-frequency DCT (Discrete Cosine Transform) coefficients of 8×8 pixel blocks. Since JPEG compression operates in the DCT domain, this method survives JPEG re-encoding far better than spatial-domain LSB.
+Embeds payload bits into mid-frequency DCT coefficients of 8×8 pixel blocks. Working in the same transform family as JPEG does not guarantee survival of JPEG, H.264, colorspace conversion or other processing.
 
 ### Algorithm
 
@@ -358,26 +266,27 @@ Embeds payload bits into mid-frequency DCT (Discrete Cosine Transform) coefficie
    - Round the coefficient to the nearest `quant_step` boundary
    - If bit=1, move to the upper half of the quantization cell
    - If bit=0, move to the lower half
-4. **Apply** the inverse DCT to reconstruct the block
-5. **Extract**: apply DCT, read the coefficient, determine which half of the quantization cell it falls in
+4. **Reconstruct and check** the actual rounded/clamped integer block, re-transform it, and verify the intended decision before committing writes
+5. **Reject atomically** if reconstruction changes a decision (including unstable saturation); do not return success with a corrupt payload
+6. **Extract**: apply DCT, read the coefficient, determine which half of the quantization cell it falls in
 
 ### Parameters
 
 | Parameter | Default | Range | Effect |
 | --- | --- | --- | --- |
 | `coef_index` | 20 | 1–63 (zigzag) | Which DCT coefficient to modify (mid-frequencies recommended) |
-| `quant_step` | 16 | 8–32 | Quantization step size — higher = more robust but more visible |
-| `channel` | 1 (green) | 0, 1, 2 | Color channel to embed in (green is least perceptible) |
+| `quant_step` | 16 | Embedding requires ≥8 | Larger steps alter distortion/decision margin; successful reconstruction is still checked |
+| `channel` | 1 (green) | 0, 1, 2 | Selected packed color channel; no universal perceptual ranking |
 
 ### Capacity
 
 Each 8×8 block holds one payload bit. For a 109-byte payload (872 bits):
-- Need 872 blocks = ~30×30 blocks = 240×240 pixel minimum
+- Need 872 complete 8×8 blocks; a 240×240 image has 900 blocks
 - A 640×480 frame has 80×60 = 4,800 blocks — far more than needed
 
-### JPEG Resistance
+### Reconstruction and Codec Limits
 
-DCT embedding survives JPEG compression because the data lives in the same frequency domain that JPEG operates on. At moderate quality (Q=75+), extraction remains reliable.
+Even an uncompressed cover can fail the reconstruction check, notably saturated content. Errors must propagate to the caller. Any claim about JPEG or other codec survival needs an explicit encode/decode experiment; no universal quality-factor threshold is supported.
 
 ### Supported Formats
 
@@ -391,7 +300,7 @@ DCT embedding survives JPEG compression because the data lives in the same frequ
 
 ## Learned Watermarking (opt-in `learned` feature)
 
-A DCT-domain chip embedder whose decoder is a tiny trained neural network instead of a hard threshold. Everything except the 4161 MLP parameters is fixed algorithm code; the trained weights are committed at `steganographer-core/src/learned/weights.bin` and are the shipped artifact — tests pass without retraining.
+A DCT-domain chip embedder whose decoder is a small trained neural network instead of a hard threshold. The committed `weights.bin` is loaded and validated without retraining. It embeds a short `u64` payload, not a cryptographic signer identity.
 
 ### Architecture
 
@@ -411,34 +320,23 @@ A DCT-domain chip embedder whose decoder is a tiny trained neural network instea
 
 ### Training
 
-`cargo run --release -p steganographer-core --features learned --example train_learned`. Fully deterministic: master seed `0x4C45_4152_4E45_4400` ("LEARNED\0", init salt `0x0B7E_11E8_53D4_F1A5`) drives synthetic covers (gradients + curves + smoothed value noise; no downloads, no external datasets), embedding, augmentations (gaussian σ {2,4,8}; 1% salt-and-pepper; simulated CRF28 DCT quantization; 2× downscale/upscale blur + block-aligned shift), and the hand-rolled Adam optimizer (25 epochs × 192 views × 64 bits). Re-running reproduces `weights.bin` byte-for-byte (verified: consecutive runs yield identical SHA-256).
+`cargo run --release -p steganographer-core --features learned --example train_learned` trains on synthetic covers (gradients, curves and smoothed noise), not a licensed natural-image corpus. The training augmentations include Gaussian/salt-and-pepper noise, simulated coefficient quantization, blur and block-aligned circular shifts.
 
-The simulated CRF28 quantization step is `step(u,v) = round(16 · (1 + (u+v)/12))` for 2D frequency `(u,v)` — i.e. 16 for DC/low frequencies growing to ≈27 at mid frequencies — consistent with libx264 CRF 28 quantization of mid-frequency transform coefficients on 640×480 I-frames at default AQ. Crop/shift robustness is **block-aligned (multiples of 8, circular within the frame) by scope**.
+Simulated “CRF28” quantization is an RGB-domain training approximation, **not** a faithful libx264 roundtrip or an equivalence to a particular encoder setting. Block-aligned circular shifts do not establish arbitrary-crop robustness.
 
-### Measured results (shipped weights, chip strength 16.0)
+### Evaluation Scope
 
-Trainer eval: 256 fresh 384×384 synthetic patches per corruption:
+The shipped model's synthetic evaluation exercises the same family of covers/augmentations used by training. It does not establish natural-image performance, generalization or real-codec resilience. Recorded real H.264 experiments did not recover the watermark reliably; simulated quantization success cannot be substituted for that failure.
 
-| Corruption | BER (MLP) | BER (majority) |
-| --- | --- | --- |
-| Clean | 0.00000 | 0.00000 |
-| Gaussian σ=2 | 0.00000 | 0.00000 |
-| Gaussian σ=4 | 0.00000 | 0.00000 |
-| Gaussian σ=8 | 0.00000 | 0.00000 |
-| Salt-and-pepper 1% | 0.00000 | 0.00000 |
-| Simulated CRF28 quantization | 0.00000 | 0.00000 |
-| Blur (2×) + block-aligned shift | 0.00000 | 0.00000 |
-
-Timing (release, RGB8): 640×480 embed ≈ 7–11 ms + extract ≈ 14–22 ms; 1280×720 embed ≈ 7–11 ms + extract ≈ 33–55 ms. Per-frame PSNR: 42.78 dB (640×480), 47.55 dB (1280×720) — above the 30 dB visibility gate.
-
-**Real H.264 (libx264 CRF 28, measured, not asserted)**: BER ≈ 0.44–0.50 at chip strength 16 (PSNR 42.9 dB), and still ≈ 0.44 at strength 32 (PSNR 36.9 dB). **Gap:** the shipped model does NOT survive a real H.264 encode/decode roundtrip. The failure is structural, not a strength frontier: RGB→YUV colorspace conversion (with limited-range clamping) and libx264's residual integer transform destroy the green-channel DCT coefficient grid that the fixed carrier depends on — the simulated CRF28 gate quantizes in the same RGB domain the embedder uses, so it is a necessary but not sufficient analog. Closing the gap requires either embedding in a luma-computed channel, 4:4:4 encode paths, or codec-in-the-loop training — out of scope here (dataset licensing + model budget are owner-gated). The in-repo acceptance gate (`sim_quantization_crf28` test, BER < 5%) passes deterministically without ffmpeg.
+Timing, distortion and BER depend on carrier dimensions, configuration and environment. Use the opt-in evaluation tools for a reproducible workload rather than treating fixed numbers as a throughput or robustness guarantee.
 
 ### Honest limits
 
-- Tiny model (4161 parameters) trained on synthetic covers only; the eval set is same-distribution synthetic data, so the 0.0 BERs measure schedule robustness, not real-world generalization.
-- Real-codec robustness is NOT achieved (see measured gap above).
-- Crop/shift robustness is block-aligned and circular only; arbitrary crops, scaling, and rotation are out of scope.
-- API: `LearnedConfig`, `LearnedWatermarker::built_in()`, `embed(&mut VideoFrame, u64)`, `extract(&VideoFrame) -> Option<(u64, f32)>`; RGB8/BGRA8 only, pure CPU, deterministic given the weights.
+- Small model trained on synthetic covers only; same-distribution recovery is not natural-image calibration.
+- Real-codec robustness is not established; measured H.264 failure is a known limitation.
+- Crop/shift evaluation is block-aligned and circular, not arbitrary cropping, scaling or rotation.
+- `built_in()`, `with_config()` and `with_model()` return `Result`; configuration requires 64 bits, nonzero redundancy and finite positive strength. Nondefault settings are not the shipped model's validated operating point.
+- `embed(&mut VideoFrame, u64) -> Result<()>` validates format/layout/capacity. `extract(&VideoFrame) -> Option<(u64, f32)>` returns a decoder score, not a calibrated authenticity probability. RGB8/BGRA8 only.
 
 ---
 
@@ -446,50 +344,25 @@ Timing (release, RGB8): 640×480 embed ≈ 7–11 ms + extract ≈ 14–22 ms; 1
 
 ### Video Seal Integration (Planned)
 
-Wrap Meta's Video Seal (MIT-licensed) as a `VideoStegoModule` for neural-network-based robust watermarking that survives aggressive transcoding.
+Video Seal integration is not implemented. Published neural-watermarking results elsewhere do not establish robustness for Steganographer's current kernels.
 
 ---
 
 ## Steganalysis Resistance
 
-### LSB Video (Sequential)
+### Implemented Kernels
 
-Sequential LSB replacement is vulnerable to classical steganalysis attacks. However, Steganographer's extremely low embedding rate (~109 bytes in a 921,600-byte frame = 0.09%) provides significant inherent resistance:
+Sequential LSB replacement is susceptible to chi-squared, RS and other steganalysis. Keyed placement changes positions but does not prove statistical indistinguishability. Low payload utilization can reduce exposure in some settings; it is not a calibrated detection-rate claim. QIM and DCT also introduce structure and must not be labeled inherently undetectable or indistinguishable from sensor noise.
 
-| Attack | Applicability | Notes |
-| --- | --- | --- |
-| Chi-squared (Westfeld & Pfitzmann) | Medium | Detects pairs-of-values equalization, but requires high embedding rate to be effective |
-| RS Analysis (Fridrich et al.) | Low | Embedding rate too low for reliable detection |
-| Sample Pair Analysis | Low | Extremely low payload-to-carrier ratio |
-| Deep learning (SRNet, YeNet) | Very Low | Training requires examples at similar low embedding rates |
+### Statistical Availability and Forensic Completeness
 
-### LSB Audio (Keyed PRNG)
+The RS estimator has synthetic replacement controls; chi-squared and related outputs depend on sufficient usable input and model assumptions. Neither these controls nor the detector corpus establishes accuracy or probabilities on natural images. Unavailable/degenerate statistical results are **not clean results**.
 
-Keyed permutation provides significantly better steganalysis resistance than sequential embedding:
-
-1. **Scattered indices** — Bits are spread pseudo-randomly across the buffer, defeating sequential analysis
-2. **Key-dependent** — Different keys produce completely different index patterns
-3. **Frame-varying** — Each frame's permutation changes (seed = key ⊕ frame_index)
-
-### Spread-Spectrum
-
-Spread-spectrum embedding provides strong steganalysis resistance:
-
-1. **Below noise floor** — The PN-sequence modulation is spread across many pixels at low amplitude, making it statistically indistinguishable from sensor noise
-2. **Key-dependent** — The PN sequence is derived from a secret key, so without it, the signal cannot be detected or removed
-3. **Correlation detection** — Only a verifier with the key can extract the payload via correlation
-
-### DCT-Domain
-
-DCT embedding is inherently less detectable than LSB:
-
-1. **Frequency domain** — Modifications are in the DCT domain, which is less visible per-pixel than spatial LSB
-2. **Mid-frequency** — Embedding in mid-frequencies avoids both the DC component (too visible) and high frequencies (too easily destroyed)
-3. **Block-based** — Each 8×8 block carries one bit, making statistical analysis harder
+Structural forensics is separate: bounded ZIP/OOXML analysis checks local/central structure, CRC/deflate and XML-related evidence; PDF analysis is bounded lexical inspection, not a full PDF interpreter; Unicode detection is heuristic and encoding-sensitive. Reports distinguish evidence, `detected`, completeness and resource/parse limitations. A latched positive remains positive when evidence is capped; an incomplete negative leaves uncertainty.
 
 ### Overlay Modules
 
-Text Overlay and Info Bar are *visible by design* — they are not subject to steganographic security analysis since they make no attempt at concealment.
+Text and Info Bar are visible rendering, not concealment or standalone cryptographic proof. The dashboard disables signed visual-overlay/QR controls rather than pretending these are authenticated output modes.
 
 ---
 
@@ -500,4 +373,4 @@ Text Overlay and Info Bar are *visible by design* — they are not subject to st
 - [Security](security.md) — Threat model and attack resistance
 - [Threat Model](threat-model.md) — Adversary analysis, 8 threat categories, use-case scenarios
 - [Configuration](configuration.md) — Configuring LSB bits, overlay, and pipeline parameters
-- [Roadmap](roadmap.md) — Planned DCT-domain and spread-spectrum algorithms
+- [Roadmap](roadmap.md) — Planned capabilities and extension boundaries

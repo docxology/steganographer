@@ -1,1824 +1,658 @@
-/**
- * Steganographer Dashboard — Client Application
- *
- * Architecture:
- * - LEFT:  Raw webcam via requestAnimationFrame + QR metadata overlay
- * - SERVER: Signs ~1 frame/sec via WebSocket
- * - RIGHT: Verification data + live config controls
- *
- * The QR overlay renders a data matrix on every frame with:
- *   Frame index, BLAKE3 hash prefix, timestamp, backend, overlay text
- * Opacity slider controls the QR overlay visibility (0=invisible, 1=opaque).
- */
-
-// ─── Configuration ────────────────────────────────────────────────────────────
-
+/** Dashboard client: lossless signed artifacts, explicit lifecycle and server-reported verification. */
+'use strict';
 const WS_RECONNECT_DELAY_MS = 2000;
-const WS_HEARTBEAT_INTERVAL_MS = 15000;
-let SIGN_INTERVAL_MS = 1000;
-const JPEG_QUALITY = 0.80;
 const DECODE_POLL_INTERVAL_MS = 300;
-const MAX_LOG_ENTRIES = 20;
-const QR_MODULE_SIZE = 4;     // default px per QR module (overridden by qrScale)
-const QR_MARGIN = 8;          // px margin from corner
-const QR_GRID_CELLS = 15;     // data matrix grid dimension (for 20-byte payload)
-const TOAST_DURATION_MS = 2500; // default toast auto-dismiss time
-
-// ─── Auth Token ───────────────────────────────────────────────────────────────
-// The dashboard may be started with --auth-token. The UI ingests the token
-// exactly once from ?token=<t> (stripped from the URL so it doesn't leak into
-// referrers/history), stores it in sessionStorage, and then attaches
-// `Authorization: Bearer <t>` to every mutating request and `?token=` to
-// every WebSocket URL (WS upgrades cannot carry custom headers).
-
+const TRANSPORT_STORAGE_KEY = 'stego-transport';
+const WEBRTC_CHUNK_MAGIC = 0x5354474f;
+const WEBRTC_CHUNK_HEADER_BYTES = 20;
+const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
+const SESSION_START = new Date();
+const $ = id => document.getElementById(id);
 function ingestAuthToken() {
-    const url = new URL(window.location.href);
-    const token = url.searchParams.get('token');
-    if (token) {
-        sessionStorage.setItem('auth_token', token);
-        url.searchParams.delete('token');
-        history.replaceState(null, '', url);
-    }
+    const url = new URL(location.href), token = url.searchParams.get('token');
+    if (token) sessionStorage.setItem('auth_token', token);
+    if (url.searchParams.has('token')) { url.searchParams.delete('token'); history.replaceState(null, '', url); }
 }
-
-function getAuthToken() {
-    return sessionStorage.getItem('auth_token');
-}
-
 function authHeaders() {
-    const t = getAuthToken();
-    return t ? { 'Authorization': 'Bearer ' + t } : {};
+    const token = sessionStorage.getItem('auth_token');
+    return token ? { Authorization: 'Bearer ' + token } : {};
 }
-
 function wsUrl(path) {
-    const t = getAuthToken();
-    const tokenPart = t ? `?token=${encodeURIComponent(t)}` : '';
-    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}${tokenPart}`;
+    const token = sessionStorage.getItem('auth_token');
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}${token ? '?token=' + encodeURIComponent(token) : ''}`;
+}
+function showToast(message, type = 'info') {
+    let container = $('toast-container');
+    if (!container) { container = document.createElement('div'); container.id = 'toast-container'; document.body.append(container); }
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-' + type; toast.textContent = message; container.append(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => toast.remove(), 5000);
+}
+function fmtNum(n) { return Number(n).toLocaleString(); }
+function fmtUptime(s) { return `${Math.floor(Number(s) / 60)}m ${Math.floor(Number(s) % 60)}s`; }
+function truncateIdentity(s) { return s && s.length > 20 ? s.slice(0, 10) + '…' + s.slice(-8) : s || '—'; }
+function bytesToChunks(bytes) {
+    let text = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return text;
+}
+function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-// ─── State ────────────────────────────────────────────────────────────────────
-
-let encodeWs = null;
-let decodeWs = null;
-let webcamStream = null;
-let signInterval = null;
-let decodePollInterval = null;
-let drawLoopId = null;
-let metamaskAccount = null;
-let cameraActive = false;
-let awaitingSignResponse = false;
-let frameCounter = 0;
-let selectedCameraDeviceId = '';
-
-
-// Frame diff viewer state
-let diffViewerEnabled = false;
-let diffOverlayEnabled = true;
-let lastOriginalFrameData = null;   // ImageData of frame before encoding
-let lastWatermarkedFrameData = null; // ImageData of frame after encoding (from encode canvas)
-
-// Metrics history buffer (last 60 seconds, polled every 1s)
-const METRICS_HISTORY_MAX = 60;
-let metricsHistory = [];
-
-// Last verification data from server (for QR overlay)
-let lastVerifyData = {
-    frameIndex: 0,
-    hash: '0000000000000000',
-    backend: 'ed25519',
-    verified: false,
-    signLatencyUs: 0,
-};
-
-// Live config state (mirrored to server)
-let liveConfig = {
-    opacity: 1.0,
-    lsbBits: 1,
-    signingBackend: 'ed25519',
-    overlayText: 'CONFIDENTIAL',
-    signRateMs: 1000,
-    width: 640,
-    height: 480,
-    qrScale: 10,        // % of video width (10=small corner, 100=full frame)
-    resolution: '640x480',
-    transport: 'websocket',
-};
-
-// ─── DOM References ───────────────────────────────────────────────────────────
-
-const el = {
-    statusDot: document.getElementById('status-dot'),
-    statusText: document.getElementById('status-text'),
-    identityValue: document.getElementById('identity-value'),
-    encodeOverlay: document.getElementById('encode-overlay'),
-    encodeCanvas: document.getElementById('encode-canvas'),
-    webcamVideo: document.getElementById('webcam-video'),
-    startCameraBtn: document.getElementById('start-camera-btn'),
-    metamaskBtn: document.getElementById('metamask-btn'),
-    metamaskLabel: document.getElementById('metamask-label'),
-    signIndicator: document.getElementById('sign-indicator'),
-    // Verification
-    verifyWaiting: document.getElementById('verify-waiting'),
-    verifyResult: document.getElementById('verify-result'),
-    verifyStatusBanner: document.getElementById('verify-status-banner'),
-    verifyStatusIcon: document.getElementById('verify-status-icon'),
-    verifyStatusText: document.getElementById('verify-status-text'),
-    fieldFrameIndex: document.getElementById('field-frame-index'),
-    fieldHash: document.getElementById('field-hash'),
-    fieldSigPreview: document.getElementById('field-sig-preview'),
-    fieldBackend: document.getElementById('field-backend'),
-    fieldVerifyLatency: document.getElementById('field-verify-latency'),
-    verifyLog: document.getElementById('verify-log'),
-    // Config
-    cfgOpacity: document.getElementById('cfg-opacity'),
-    cfgOpacityVal: document.getElementById('cfg-opacity-val'),
-    cfgLsbBits: document.getElementById('cfg-lsb-bits'),
-    cfgLsbBitsVal: document.getElementById('cfg-lsb-bits-val'),
-    cfgSignBackend: document.getElementById('cfg-sign-backend'),
-    cfgOverlayText: document.getElementById('cfg-overlay-text'),
-    cfgSignRate: document.getElementById('cfg-sign-rate'),
-    cfgSignRateVal: document.getElementById('cfg-sign-rate-val'),
-    cfgQrScale: document.getElementById('cfg-qr-scale'),
-    cfgQrScaleVal: document.getElementById('cfg-qr-scale-val'),
-    cfgResolution: document.getElementById('cfg-resolution'),
-    // Stego info
-    infoPayloadSize: document.getElementById('info-payload-size'),
-    infoHashAlgo: document.getElementById('info-hash-algo'),
-    infoSigAlgo: document.getElementById('info-sig-algo'),
-    infoCapacity: document.getElementById('info-capacity'),
-    infoUtilization: document.getElementById('info-utilization'),
-    // Stats
-    valFrames: document.getElementById('val-frames'),
-    valFps: document.getElementById('val-fps'),
-    valSignLatency: document.getElementById('val-sign-latency'),
-    valVerifiedOk: document.getElementById('val-verified-ok'),
-    valVerifiedFail: document.getElementById('val-verified-fail'),
-    valVerifyLatency: document.getElementById('val-verify-latency'),
-    footerBackendValue: document.getElementById('footer-backend-value'),
-    footerUptimeValue: document.getElementById('footer-uptime-value'),
-    footerResolutionValue: document.getElementById('footer-resolution-value'),
-    signingBackend: document.getElementById('signing-backend'),
-    // Camera selector
-    cameraSelect: document.getElementById('camera-select'),
-    // Diff viewer
-    diffToggleBtn: document.getElementById('diff-toggle-btn'),
-    diffViewer: document.getElementById('diff-viewer'),
-    diffOverlayToggle: document.getElementById('diff-overlay-toggle'),
-    diffOriginalCanvas: document.getElementById('diff-original-canvas'),
-    diffWatermarkedCanvas: document.getElementById('diff-watermarked-canvas'),
-    diffHeatmapCanvas: document.getElementById('diff-heatmap-canvas'),
-    // Performance panel
-    perfPanel: document.getElementById('perf-panel'),
-    perfPanelHeader: document.getElementById('perf-panel-header'),
-    perfCollapseBtn: document.getElementById('perf-collapse-btn'),
-    perfCollapseIcon: document.getElementById('perf-collapse-icon'),
-    perfPanelBody: document.getElementById('perf-panel-body'),
-    chartFps: document.getElementById('chart-fps'),
-    chartSignLatency: document.getElementById('chart-sign-latency'),
-    chartVerifyLatency: document.getElementById('chart-verify-latency'),
-    chartVerifyCounts: document.getElementById('chart-verify-counts'),
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// QR DATA MATRIX OVERLAY
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-// Encodes metadata as a visual data matrix (binary grid) on the video canvas.
-// Each "module" is a small colored square. The data encoded is:
-//   - Frame counter (local)
-//   - Server frame index (from last signing)
-//   - BLAKE3 hash prefix (first 8 bytes)
-//   - Timestamp (seconds since epoch, low 16 bits)
-//   - Backend ID (1 byte)
-//   - Verification status (1 byte)
-//
-// This is a simplified data matrix — not a full QR code — but visually
-// resembles one and is fully roundtrippable: any reader that knows the
-// format can extract the data from a screenshot.
-
-/**
- * Encode a byte array into a 2D binary grid for rendering as a data matrix.
- * Returns { grid: boolean[][], size: number }
- */
-function encodeDataMatrix(bytes) {
-    const totalBits = bytes.length * 8;
-    // Grid size = ceil(sqrt(totalBits)) + 2 for finder pattern
-    const innerSize = Math.ceil(Math.sqrt(totalBits));
-    const size = innerSize + 2; // +2 for border
-    const grid = Array.from({ length: size }, () => Array(size).fill(false));
-
-    // Finder pattern: solid border on top and left, alternating on bottom and right
-    for (let i = 0; i < size; i++) {
-        grid[0][i] = true;                     // top solid
-        grid[i][0] = true;                     // left solid
-        grid[size - 1][i] = (i % 2 === 0);    // bottom alternating
-        grid[i][size - 1] = (i % 2 === 0);    // right alternating
+// Stored ZIP: no recompression or re-encoding of the signed carrier bytes.
+const ARCHIVE_MAX_BYTES = 64 * 1024 * 1024;
+const ARCHIVE_MAX_ENTRIES = 300;
+const archiveEncoder = new TextEncoder();
+const archiveCrcTable = new Uint32Array(256);
+for (let n = 0; n < 256; n++) {
+    let crc = n;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    archiveCrcTable[n] = crc >>> 0;
+}
+function archiveCrc(bytes) {
+    let crc = 0xffffffff;
+    for (const byte of bytes) crc = (crc >>> 8) ^ archiveCrcTable[(crc ^ byte) & 255];
+    return (crc ^ 0xffffffff) >>> 0;
+}
+function decodeArchiveBase64(text) {
+    if (typeof text !== 'string' || text.length > 24 * 1024 * 1024) throw new Error('Media exceeds client byte limit');
+    return Uint8Array.from(atob(text), char => char.charCodeAt(0));
+}
+function storedZip(files) {
+    const body = [], directory = [];
+    let offset = 0, directorySize = 0;
+    for (const file of files) {
+        const name = archiveEncoder.encode(file.name), bytes = file.bytes, crc = archiveCrc(bytes);
+        const local = new Uint8Array(30 + name.length), l = new DataView(local.buffer);
+        l.setUint32(0, 0x04034b50, true); l.setUint16(4, 20, true); l.setUint16(6, 0x800, true);
+        l.setUint16(12, 33, true); // DOS date: 1980-01-01.
+        l.setUint32(14, crc, true); l.setUint32(18, bytes.length, true); l.setUint32(22, bytes.length, true);
+        l.setUint16(26, name.length, true); local.set(name, 30);
+        const central = new Uint8Array(46 + name.length), c = new DataView(central.buffer);
+        c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true);
+        c.setUint16(14, 33, true);
+        c.setUint16(8, 0x800, true); c.setUint32(16, crc, true); c.setUint32(20, bytes.length, true);
+        c.setUint32(24, bytes.length, true); c.setUint16(28, name.length, true); c.setUint32(42, offset, true);
+        central.set(name, 46); body.push(local, bytes); directory.push(central);
+        offset += local.length + bytes.length; directorySize += central.length;
     }
+    const end = new Uint8Array(22), e = new DataView(end.buffer);
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, directorySize, true); e.setUint32(16, offset, true);
+    return new Blob([...body, ...directory, end], { type: 'application/zip' });
+}
+function createSignedArchive(media) {
+    if (!serverVersion) throw new Error('Server version is not loaded; wait for dashboard initialization before recording');
+    const entries = [], files = [], seen = new Set(), created = new Date().toISOString();
+    let used = 0, finished = false;
+    return {
+        entries,
+        add(name, bytes, metadata) {
+            if (finished) return false;
+            if (seen.has(name)) return true;
+            if (!(bytes instanceof Uint8Array) || !/^[\da-f]{64}$/i.test(metadata.public_key || '') ||
+                metadata.frame_index == null || !Number.isInteger(metadata.lsb_bits)) throw new Error('Missing signed artifact metadata');
+            const meta = { ...metadata, file: name, bytes: bytes.length };
+            const cost = bytes.length + archiveEncoder.encode(JSON.stringify(meta, null, 2)).length + name.length * 2 + 512;
+            if (entries.length >= ARCHIVE_MAX_ENTRIES || used + cost > ARCHIVE_MAX_BYTES - 65536) return false;
+            files.push({ name, bytes }); entries.push(meta); seen.add(name); used += cost;
+            return true;
+        },
+        finish() {
+            if (finished) return false;
+            if (!entries.length) { showToast('No signed artifacts received during recording', 'error'); return false; }
+            const manifest = {
+                format: 'steganographer-signed-media', format_version: 1, media,
+                steganographer_version: serverVersion, created_at: created,
+                recording: 'Sampled signed artifacts only; capture gaps are not filled or authenticated.',
+                verification: 'Server results do not independently verify this archive. Verify unchanged carriers with each listed public key and extraction metadata.',
+                entries,
+            };
+            const zip = storedZip([...files, { name: 'manifest.json', bytes: archiveEncoder.encode(JSON.stringify(manifest, null, 2)) }]);
+            if (zip.size > ARCHIVE_MAX_BYTES) throw new Error('Archive exceeds byte limit');
+            downloadBlob(zip, `steganographer-${media}-${created.replace(/[:.]/g, '-')}.zip`);
+            finished = true;
+            files.length = 0;
+            return true;
+        },
+    };
+}
+function pcmWav(pcm, sampleRate, channels) {
+    if (!Number.isInteger(sampleRate) || sampleRate < 1 || !Number.isInteger(channels) || channels < 1 ||
+        channels > 8 || pcm.length % (channels * 2)) throw new Error('Invalid signed PCM format');
+    const bytes = new Uint8Array(44 + pcm.length), v = new DataView(bytes.buffer);
+    const text = (offset, s) => bytes.set(archiveEncoder.encode(s), offset);
+    text(0, 'RIFF'); v.setUint32(4, 36 + pcm.length, true); text(8, 'WAVE'); text(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, channels, true);
+    v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * channels * 2, true);
+    v.setUint16(32, channels * 2, true); v.setUint16(34, 16, true); text(36, 'data');
+    v.setUint32(40, pcm.length, true); bytes.set(pcm, 44);
+    return bytes;
+}
+window.SignedArchive = { create: createSignedArchive, decodeBase64: decodeArchiveBase64, wav: pcmWav };
 
-    // Data area: fill inner grid with bits
-    let bitIndex = 0;
-    for (let row = 1; row < size - 1 && bitIndex < totalBits; row++) {
-        for (let col = 1; col < size - 1 && bitIndex < totalBits; col++) {
-            const byteIdx = Math.floor(bitIndex / 8);
-            const bitPos = 7 - (bitIndex % 8);
-            grid[row][col] = ((bytes[byteIdx] >> bitPos) & 1) === 1;
-            bitIndex++;
+let serverVersion = null, serverTransport = 'websocket', rawMetrics = {};
+let configHydrated = false, configSaving = false, configPending = false;
+let liveConfig = {};
+const configFields = { opacity: 'opacity', lsb_bits: 'lsbBits', signing_backend: 'signingBackend',
+    overlay_text: 'overlayText', sign_rate_ms: 'signRateMs', qr_scale: 'qrScale', resolution: 'resolution',
+    stego_type: 'stegoType', hash_algorithm: 'hashAlgorithm', encrypt: 'encrypt', ecc: 'ecc', transport: 'transport' };
+function configWireSnapshot() {
+    return Object.fromEntries(Object.entries(configFields).map(([wire, local]) => [wire, liveConfig[local]]));
+}
+function renderConfigControls() {
+    $('cfg-opacity').value = liveConfig.opacity * 100; $('cfg-opacity-val').textContent = liveConfig.opacity.toFixed(2);
+    $('encode-canvas').style.opacity = String(liveConfig.opacity);
+    $('cfg-lsb-bits').value = liveConfig.lsbBits; $('cfg-lsb-bits-val').textContent = liveConfig.lsbBits;
+    $('cfg-sign-rate').value = liveConfig.signRateMs; $('cfg-sign-rate-val').textContent = (1000 / liveConfig.signRateMs).toFixed(1) + '/s';
+    $('cfg-qr-scale').value = liveConfig.qrScale; $('cfg-qr-scale-val').textContent = liveConfig.qrScale + '%';
+    $('cfg-overlay-text').value = liveConfig.overlayText;
+    if (![...$('cfg-resolution').options].some(o => o.value === liveConfig.resolution)) $('cfg-resolution').add(new Option(liveConfig.resolution, liveConfig.resolution));
+    $('cfg-resolution').value = liveConfig.resolution;
+    $('signing-backend').value = $('cfg-sign-backend').value = liveConfig.signingBackend;
+    const [w, h] = liveConfig.resolution.split('x').map(Number), capacity = w * h * 3 * liveConfig.lsbBits;
+    $('info-payload-size').textContent = '109 bytes'; $('info-hash-algo').textContent = 'BLAKE3 (256-bit)';
+    $('info-sig-algo').textContent = 'Ed25519 (512-bit)'; $('info-capacity').textContent = fmtNum(Math.floor(capacity / 8)) + ' B';
+    $('info-utilization').textContent = (87200 / capacity).toFixed(3) + '%';
+    if (cameraActive) startSigningInterval();
+}
+async function fetchConfig() {
+    const response = await fetch('/api/config', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
+    const config = await response.json();
+    for (const [wire, local] of Object.entries(configFields)) {
+        if (config[wire] === undefined) throw new Error('Incomplete server config: ' + wire);
+        liveConfig[local] = config[wire];
+    }
+    serverTransport = config.default_transport || config.transport;
+    $('identity-value').textContent = truncateIdentity(config.public_key || config.identity);
+    $('identity-value').title = config.public_key || config.identity;
+    $('footer-backend-value').textContent = config.signing_backend;
+    renderConfigControls(); configHydrated = true;
+}
+async function pushConfigToServer() {
+    if (!configHydrated) return;
+    configPending = true;
+    if (configSaving) return;
+    configSaving = true;
+    try {
+        while (configPending) {
+            configPending = false;
+            const response = await fetch('/api/config', { method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(configWireSnapshot()) });
+            if (!response.ok) throw new Error(await response.text());
         }
-    }
-
-    return { grid, size };
+        showToast('Config saved', 'success');
+    } catch (err) { showToast('Config not saved: ' + err.message, 'error'); }
+    finally { configSaving = false; }
+}
+const CONFIG_PRESETS = {
+    low: { lsbBits: 1, opacity: 0.3, signRateMs: 2000 },
+    medium: { lsbBits: 2, opacity: 0.7, signRateMs: 1000 },
+    high: { lsbBits: 4, opacity: 1, signRateMs: 500 },
+};
+function applyConfigPreset(name) {
+    if (!configHydrated || !CONFIG_PRESETS[name]) return;
+    Object.assign(liveConfig, CONFIG_PRESETS[name]); renderConfigControls(); pushConfigToServer();
+    document.querySelectorAll('.preset-btn').forEach(button => button.classList.toggle('active', button.dataset.preset === name));
+}
+function setupConfigControls() {
+    const bind = (id, field, convert, event = 'input') => $(id).addEventListener(event, () => {
+        liveConfig[field] = convert($(id).value); renderConfigControls(); pushConfigToServer();
+    });
+    bind('cfg-opacity', 'opacity', value => Number(value) / 100);
+    bind('cfg-lsb-bits', 'lsbBits', Number);
+    bind('cfg-sign-rate', 'signRateMs', Number);
+    $('cfg-resolution').addEventListener('change', () => {
+        liveConfig.resolution = $('cfg-resolution').value; renderConfigControls(); pushConfigToServer();
+        if (cameraActive) startCamera();
+    });
+    document.querySelectorAll('.preset-btn').forEach(button => button.addEventListener('click', () => applyConfigPreset(button.dataset.preset)));
 }
 
-/**
- * Build the metadata byte array for the current frame.
- * Format (20 bytes):
- *   [0..3]   Local frame counter (u32 LE)
- *   [4..7]   Server frame index (u32 LE)
- *   [8..15]  BLAKE3 hash prefix (8 bytes from hex)
- *   [16..17] Timestamp low 16 bits (u16 LE)
- *   [18]     Backend ID: 0=ed25519, 1=ethereum
- *   [19]     Status: 1=verified, 0=unverified
- */
-function buildMetadataBytes() {
-    const buf = new Uint8Array(20);
-    const view = new DataView(buf.buffer);
-
-    // Local frame counter
-    view.setUint32(0, frameCounter & 0xFFFFFFFF, true);
-
-    // Server frame index
-    view.setUint32(4, (lastVerifyData.frameIndex || 0) & 0xFFFFFFFF, true);
-
-    // BLAKE3 hash prefix (first 16 hex chars → 8 bytes)
-    const hashHex = (lastVerifyData.hash || '0000000000000000').slice(0, 16);
-    for (let i = 0; i < 8; i++) {
-        buf[8 + i] = parseInt(hashHex.slice(i * 2, i * 2 + 2), 16) || 0;
-    }
-
-    // Timestamp low 16 bits
-    view.setUint16(16, (Date.now() / 1000) & 0xFFFF, true);
-
-    // Backend ID
-    buf[18] = liveConfig.signingBackend === 'ethereum' ? 1 : 0;
-
-    // Verified flag
-    buf[19] = lastVerifyData.verified ? 1 : 0;
-
-    return buf;
+// One camera session owns every track, socket, interval and pending operation.
+let cameraActive = false, webcamStream = null, cameraGeneration = 0, transportGeneration = 0;
+let signInterval = null, signTimeout = null, awaitingSignResponse = false, pendingOriginalFrame = null;
+let signRequestId = 0;
+let encodeWs = null, decodeWs = null, transport = null, transportFallback = false;
+let webrtcPc = null, webrtcDc = null, webrtcPollTimer = null, webrtcMsgId = 0;
+const wsReconnectTimers = new Set(), socketIntervals = new Set(), webrtcPartial = new Map();
+let latestVideoFrame = null, lastVideoVerificationId = null, lastVerifyData = { verified: null };
+let diffViewerEnabled = false, diffOverlayEnabled = true, lastOriginalFrameData = null, lastWatermarkedFrameData = null;
+let videoRecording = false, videoArchive = null;
+function clearVideoVerification(text = 'Waiting for a signed frame') {
+    lastVerifyData = { verified: null, status: text };
+    $('verify-waiting').classList.add('hidden'); $('verify-result').classList.remove('hidden');
+    $('verify-status-banner').className = 'verify-status-banner status-pending';
+    $('verify-status-icon').textContent = '…'; $('verify-status-text').textContent = text;
+    ['field-frame-index', 'field-hash', 'field-sig-preview', 'field-backend', 'field-verify-latency'].forEach(id => { $(id).textContent = '—'; $(id).title = ''; });
 }
-
-/**
- * Render the data matrix QR overlay onto a canvas context.
- * Position: bottom-right corner of the video.
- */
-function renderQrOverlay(ctx, canvasW, canvasH) {
-    const opacity = liveConfig.opacity;
-    if (opacity <= 0.01) return; // Skip if fully transparent
-
-    const metaBytes = buildMetadataBytes();
-    const { grid, size } = encodeDataMatrix(metaBytes);
-
-    // Dynamic module size from qrScale (% of canvas width)
-    const targetPx = Math.max(20, (liveConfig.qrScale / 100) * canvasW);
-    const modSize = Math.max(1, Math.floor(targetPx / size));
-    const totalPx = size * modSize;
-
-    // Position: centered if large, bottom-right if small
-    let x0, y0;
-    if (liveConfig.qrScale >= 80) {
-        // Center the overlay when covering most of the frame
-        x0 = Math.floor((canvasW - totalPx) / 2);
-        y0 = Math.floor((canvasH - totalPx) / 2);
-    } else {
-        // Bottom-right corner
-        x0 = canvasW - totalPx - QR_MARGIN;
-        y0 = canvasH - totalPx - QR_MARGIN;
-    }
-
-    ctx.save();
-    ctx.globalAlpha = opacity;
-
-    // Background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.fillRect(x0 - 4, y0 - 4, totalPx + 8, totalPx + 8);
-
-    // Modules
-    for (let row = 0; row < size; row++) {
-        for (let col = 0; col < size; col++) {
-            ctx.fillStyle = grid[row][col] ? '#dc2626' : '#1a1a1a';
-            ctx.fillRect(x0 + col * modSize, y0 + row * modSize, modSize, modSize);
-        }
-    }
-
-    // Overlay text label (above QR) — scale font with QR size
-    const fontSize = Math.max(9, Math.floor(modSize * 2.5));
-    ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
-    ctx.fillStyle = '#dc2626';
-    ctx.textAlign = liveConfig.qrScale >= 80 ? 'center' : 'right';
-    const labelX = liveConfig.qrScale >= 80 ? canvasW / 2 : canvasW - QR_MARGIN;
-    ctx.fillText(liveConfig.overlayText, labelX, y0 - fontSize - 4);
-
-    // Frame counter + timestamp label
-    ctx.fillStyle = '#888';
-    const smallFontSize = Math.max(8, Math.floor(modSize * 2));
-    ctx.font = `${smallFontSize}px "JetBrains Mono", monospace`;
-    const now = new Date();
-    const ts = now.toTimeString().slice(0, 8); // HH:MM:SS
-    const ms = String(now.getMilliseconds()).padStart(3, '0');
-    const datePart = now.toISOString().slice(0, 10); // YYYY-MM-DD
-    ctx.fillText(`F:${frameCounter} | ${liveConfig.signingBackend.toUpperCase()} | ${datePart} ${ts}.${ms}`, labelX, y0 - fontSize - smallFontSize - 8);
-
-    ctx.restore();
+function clearSigningRequest() {
+    ++signRequestId;
+    awaitingSignResponse = false; clearTimeout(signTimeout); signTimeout = null; pendingOriginalFrame = null;
+    $('sign-indicator').classList.add('hidden');
 }
-
-// ─── Webcam ───────────────────────────────────────────────────────────────────
-
+function updateConnectionStatus(connected, label) {
+    $('status-dot').classList.toggle('connected', connected); $('status-dot').classList.toggle('disconnected', !connected);
+    $('status-text').textContent = label || (connected ? 'Connected' : 'Reconnecting…');
+}
+function teardownWebRtcTransport() {
+    clearInterval(webrtcPollTimer); webrtcPollTimer = null;
+    if (webrtcDc) { webrtcDc.onclose = webrtcDc.onerror = webrtcDc.onmessage = null; webrtcDc.close(); webrtcDc = null; }
+    if (webrtcPc) { webrtcPc.onconnectionstatechange = null; webrtcPc.close(); webrtcPc = null; }
+    webrtcPartial.clear();
+}
+function stopTransport() {
+    ++transportGeneration;
+    wsReconnectTimers.forEach(clearTimeout); wsReconnectTimers.clear();
+    socketIntervals.forEach(clearInterval); socketIntervals.clear();
+    for (const socket of [encodeWs, decodeWs]) {
+        if (socket) { socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null; socket.close(); }
+    }
+    encodeWs = decodeWs = null; teardownWebRtcTransport(); transport = null; clearSigningRequest();
+    updateConnectionStatus(false, 'Stopped');
+    clearVideoVerification('Transport stopped — previous results are historical');
+}
+function stopCamera() {
+    ++cameraGeneration; cameraActive = false; clearInterval(signInterval); signInterval = null;
+    if (webcamStream) webcamStream.getTracks().forEach(track => track.stop());
+    webcamStream = null; $('webcam-video').srcObject = null; stopTransport();
+    latestVideoFrame = null; lastVideoVerificationId = null; lastOriginalFrameData = lastWatermarkedFrameData = null;
+    if (videoRecording) toggleVideoRecording();
+    $('encode-overlay').classList.remove('hidden'); $('encode-overlay').querySelector('.overlay-text').textContent = 'Camera stopped';
+    $('encode-overlay').querySelector('.overlay-subtext').textContent = 'Start camera to resume signed snapshots';
+    $('stop-camera-btn').disabled = true; clearVideoVerification('Stopped — previous results are historical');
+}
+async function startCamera() {
+    if (!configHydrated) return;
+    stopCamera(); const generation = cameraGeneration;
+    const [width, height] = liveConfig.resolution.split('x').map(Number);
+    const video = { width: { ideal: width }, height: { ideal: height } };
+    if ($('camera-select').value) video.deviceId = { exact: $('camera-select').value };
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        if (generation !== cameraGeneration) { stream.getTracks().forEach(track => track.stop()); return; }
+        webcamStream = stream; $('webcam-video').srcObject = stream; await $('webcam-video').play();
+        if (generation !== cameraGeneration) return;
+        cameraActive = true; $('encode-overlay').classList.add('hidden'); $('stop-camera-btn').disabled = false;
+        $('encode-canvas').getContext('2d').clearRect(0, 0, $('encode-canvas').width, $('encode-canvas').height);
+        clearVideoVerification(); transportFallback = false; connectTransport(); startSigningInterval(); enumerateCameras();
+    } catch (err) {
+        if (generation !== cameraGeneration) return;
+        stopCamera(); $('encode-overlay').querySelector('.overlay-text').textContent = 'Camera unavailable';
+        $('encode-overlay').querySelector('.overlay-subtext').textContent = err.message || 'Try starting again';
+    }
+}
 async function enumerateCameras() {
     try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoInputs = devices.filter(d => d.kind === 'videoinput');
-        if (el.cameraSelect) {
-            // Preserve current selection
-            const currentVal = el.cameraSelect.value;
-            el.cameraSelect.innerHTML = '<option value="">Default Camera</option>';
-            videoInputs.forEach((device, idx) => {
-                const opt = document.createElement('option');
-                opt.value = device.deviceId;
-                const label = device.label || `Camera ${idx + 1}`;
-                opt.textContent = label.length > 40 ? label.slice(0, 37) + '…' : label;
-                el.cameraSelect.appendChild(opt);
-            });
-            // Restore selection if still valid
-            if (currentVal && [...el.cameraSelect.options].some(o => o.value === currentVal)) {
-                el.cameraSelect.value = currentVal;
-            }
-        }
-        return videoInputs;
-    } catch (err) {
-        console.error('[camera] enumerateDevices failed:', err);
-        return [];
-    }
+        const selected = $('camera-select').value, devices = await navigator.mediaDevices.enumerateDevices();
+        $('camera-select').replaceChildren(new Option('Default camera', ''));
+        devices.filter(device => device.kind === 'videoinput').forEach((device, index) => $('camera-select').add(new Option(device.label || `Camera ${index + 1}`, device.deviceId)));
+        $('camera-select').value = selected;
+    } catch (_) { /* Camera permission can be requested with the default device. */ }
 }
-
-async function startCamera() {
-    const [rw, rh] = liveConfig.resolution.split('x').map(Number);
-    try {
-        // Stop existing stream if restarting
-        if (webcamStream) {
-            webcamStream.getTracks().forEach(t => t.stop());
-            webcamStream = null;
-        }
-        const constraints = {
-            video: { width: { ideal: rw || 640 }, height: { ideal: rh || 480 }, facingMode: 'user' },
-            audio: false,
-        };
-        // Use specific camera device if selected
-        if (selectedCameraDeviceId) {
-            constraints.video.deviceId = { exact: selectedCameraDeviceId };
-            delete constraints.video.facingMode;
-        }
-        webcamStream = await navigator.mediaDevices.getUserMedia(constraints);
-        el.webcamVideo.srcObject = webcamStream;
-        await el.webcamVideo.play();
-        cameraActive = true;
-        el.encodeOverlay.classList.add('hidden');
-        // Re-enumerate to populate labels (labels are empty until permission granted)
-        await enumerateCameras();
-        drawWebcamLoop();
-        startSigningInterval();
-        console.log(`[camera] Webcam started at ${rw}x${rh}` + (selectedCameraDeviceId ? ` (device: ${selectedCameraDeviceId.slice(0, 8)}…)` : ''));
-    } catch (err) {
-        console.error('[camera] Failed:', err);
-        el.encodeOverlay.querySelector('.overlay-text').textContent = '❌ Camera denied';
-        el.encodeOverlay.querySelector('.overlay-subtext').textContent = err.message || 'Allow camera and reload';
-    }
-}
-
-function drawWebcamLoop() {
-    if (!cameraActive) return;
-    const v = el.webcamVideo;
-    if (v.readyState >= 2) {
-        const c = el.encodeCanvas;
-        c.width = v.videoWidth || 640;
-        c.height = v.videoHeight || 480;
-        liveConfig.width = c.width;
-        liveConfig.height = c.height;
-        const ctx = c.getContext('2d');
-
-        // Draw webcam frame
-        ctx.drawImage(v, 0, 0, c.width, c.height);
-
-        // Render QR data matrix overlay (opacity-controlled)
-        renderQrOverlay(ctx, c.width, c.height);
-
-        frameCounter++;
-    }
-    drawLoopId = requestAnimationFrame(drawWebcamLoop);
-}
-
-function startSigningInterval() {
-    clearInterval(signInterval);
-    signInterval = setInterval(sendFrameForSigning, SIGN_INTERVAL_MS);
-}
-
+function startSigningInterval() { clearInterval(signInterval); signInterval = setInterval(sendFrameForSigning, liveConfig.signRateMs); }
+function transportIsConnected() { return transport === 'webrtc' ? webrtcDc?.readyState === 'open' : encodeWs?.readyState === WebSocket.OPEN; }
 function sendFrameForSigning() {
-    if (!cameraActive || awaitingSignResponse) return;
-    if (!transportIsConnected()) return;
-    const v = el.webcamVideo;
-    if (v.readyState < 2) return;
-    const c = document.createElement('canvas');
-    c.width = v.videoWidth || 640;
-    c.height = v.videoHeight || 480;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(v, 0, 0, c.width, c.height);
-
-    // Capture original frame for diff viewer (before encoding)
-    if (diffViewerEnabled) {
-        lastOriginalFrameData = ctx.getImageData(0, 0, c.width, c.height);
-    }
-
-    el.signIndicator.classList.remove('hidden');
-    c.toBlob((blob) => {
-        if (blob && transportIsConnected()) {
-            awaitingSignResponse = true;
-            blob.arrayBuffer().then(buf => sendFrameBytes(buf));
-        }
-    }, 'image/jpeg', JPEG_QUALITY);
-}
-
-
-// ─── WebSocket ────────────────────────────────────────────────────────────────
-function connectEncodeWs() {
-    const url = wsUrl('/ws/encode');
-    encodeWs = new WebSocket(url);
-    encodeWs.binaryType = 'arraybuffer';
-    let heartbeatId = null;
-    encodeWs.onopen = () => {
-        console.log('[encode] WS connected');
-        updateConnectionStatus(true, 'Connected (WS)');
-        heartbeatId = setInterval(() => {
-            if (encodeWs?.readyState === WebSocket.OPEN) encodeWs.send('ping');
-        }, WS_HEARTBEAT_INTERVAL_MS);
-    };
-    encodeWs.onmessage = (e) => { try { handleEncodeMessage(JSON.parse(e.data)); } catch (err) { } };
-    encodeWs.onclose = () => { clearInterval(heartbeatId); updateConnectionStatus(false); setTimeout(connectEncodeWs, WS_RECONNECT_DELAY_MS); };
-    encodeWs.onerror = () => encodeWs.close();
-}
-
-function connectDecodeWs() {
-    const url = wsUrl('/ws/decode');
-    decodeWs = new WebSocket(url);
-    decodeWs.onopen = () => {
-        decodePollInterval = setInterval(() => {
-            if (decodeWs?.readyState === WebSocket.OPEN) decodeWs.send('poll');
-        }, DECODE_POLL_INTERVAL_MS);
-    };
-    decodeWs.onmessage = (e) => { try { handleDecodeMessage(JSON.parse(e.data)); } catch (err) { } };
-    decodeWs.onclose = () => { clearInterval(decodePollInterval); setTimeout(connectDecodeWs, WS_RECONNECT_DELAY_MS); };
-    decodeWs.onerror = () => decodeWs.close();
-}
-
-
-// ─── Transport: WebRTC DataChannel with WebSocket fallback ────────────────────
-
-const WEBRTC_CHUNK_MAGIC = 0x5354474f;          // "STGO"
-const WEBRTC_CHUNK_HEADER_BYTES = 20;           // u32 magic + u64 msg_id + u32 idx + u32 count
-const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
-const TRANSPORT_STORAGE_KEY = 'stego-transport';
-const WEBRTC_ANSWER_TIMEOUT_MS = 5000;
-const WEBRTC_MEDIA_TRACK_TIMEOUT_MS = 5000;
-// Once WebRTC fails, fall back to WebSocket permanently for this session.
-let transportFallback = false;
-let transport = null;
-let webrtcPc = null;
-let webrtcDc = null;
-let webrtcPollTimer = null;
-let webrtcMsgId = 0;
-// Partial inbound binary messages keyed by msg_id (chunk reassembly).
-const webrtcPartial = new Map();
-// WebRTC media (H.264 RTP track) state. The media preview is an enhancement
-// view: the DataChannel canvas path remains the primary rendering surface.
-let mediaFpsActive = false;
-let mediaTrackTimer = null;
-
-function resolveTransportPreference() {
-    const q = new URL(location.href).searchParams.get('transport');
-    if (q === 'webrtc' || q === 'websocket' || q === 'auto') return q;
-    const saved = localStorage.getItem(TRANSPORT_STORAGE_KEY);
-    if (saved === 'webrtc' || saved === 'websocket') return saved;
-    return 'auto';
-}
-
-function transportIsConnected() {
-    if (transport && transport.mode === 'webrtc') {
-        return webrtcDc && webrtcDc.readyState === 'open';
-    }
-    return !!(encodeWs && encodeWs.readyState === WebSocket.OPEN);
-}
-
-function connectTransport() {
-    const pref = resolveTransportPreference();
-    console.log('[transport] preference:', pref, 'fallback:', transportFallback);
-    if (pref === 'webrtc' || (pref === 'auto' && !transportFallback)) {
-        connectWebRtcTransport();
-    } else {
-        connectWsTransport();
-    }
-}
-
-function connectWsTransport() {
-    transport = { mode: 'ws' };
-    connectEncodeWs();
-    connectDecodeWs();
-}
-
-function fallbackToWs(reason) {
-    console.warn('[transport] WebRTC failed, falling back to WebSocket:', reason);
-    transportFallback = true;
-    // Persist so reloads skip the failed WebRTC attempt.
-    try { localStorage.setItem(TRANSPORT_STORAGE_KEY, 'websocket'); } catch (e) { }
-    teardownWebRtcTransport();
-    if (!transport || transport.mode !== 'ws') connectWsTransport();
-}
-
-function teardownWebRtcTransport() {
-    if (webrtcPollTimer) { clearInterval(webrtcPollTimer); webrtcPollTimer = null; }
-    if (webrtcDc) { try { webrtcDc.close(); } catch (e) { } webrtcDc = null; }
-    if (webrtcPc) { try { webrtcPc.close(); } catch (e) { } webrtcPc = null; }
-    webrtcPartial.clear();
-    resetMediaPreview();
-}
-
-async function connectWebRtcTransport() {
-    try {
-        // Probe the server's WebRTC capabilities: mirror its ICE server list
-        // and learn whether the H.264 media track is published.
-        let mediaEnabled = false;
-        let iceServers = [];
+    const video = $('webcam-video');
+    if (!cameraActive || awaitingSignResponse || !transportIsConnected() || video.readyState < 2) return;
+    const generation = cameraGeneration, transportEpoch = transportGeneration;
+    const canvas = document.createElement('canvas'); canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(video, 0, 0);
+    awaitingSignResponse = true; pendingOriginalFrame = diffViewerEnabled ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+    const requestId = ++signRequestId;
+    $('sign-indicator').classList.remove('hidden');
+    signTimeout = setTimeout(() => {
+        showToast('Signing timed out — reconnecting transport', 'error'); stopTransport(); if (cameraActive) connectTransport();
+    }, 10000);
+    // PNG input avoids JPEG motion/quantization being mislabeled as embedding differences.
+    canvas.toBlob(async blob => {
+        const current = () => generation === cameraGeneration && transportEpoch === transportGeneration && awaitingSignResponse && requestId === signRequestId;
+        if (!current()) return;
         try {
-            const cfgResp = await fetch('/api/webrtc/config');
-            if (cfgResp.ok) {
-                const cfg = await cfgResp.json();
-                mediaEnabled = !!cfg.media;
-                iceServers = parseIceServersForBrowser(cfg.ice_servers || []);
-            }
-        } catch (err) {
-            // Config endpoint unavailable -> DataChannel-only session.
-        }
-
-        const pc = new RTCPeerConnection({ iceServers });
-        webrtcPc = pc;
-        const dc = pc.createDataChannel('frames', { ordered: true });
-        webrtcDc = dc;
-
-        // Media: recvonly video transceiver must be added BEFORE createOffer
-        // so the server answers with a sendonly H.264 track. A 5s guard keeps
-        // the DataChannel canvas path as the default when no track arrives.
-        if (mediaEnabled) {
-            pc.addTransceiver('video', { direction: 'recvonly' });
-            mediaTrackTimer = setTimeout(() => {
-                console.log('[media] no WebRTC track within 5s; keeping DataChannel canvas path');
-            }, WEBRTC_MEDIA_TRACK_TIMEOUT_MS);
-            pc.ontrack = (ev) => {
-                if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
-                if (ev.streams && ev.streams[0]) {
-                    showMediaPreview(ev.streams[0]);
-                }
-            };
-        }
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        // Non-trickle server: it consumes candidates from the SDP only, so
-        // wait for gathering (capped at 1s — host candidates appear fast).
-        // Without this the offer carries no candidates and the server-side
-        // ICE agent has no candidate pairs to check.
-        if (pc.iceGatheringState !== 'complete') {
-            await new Promise((resolve) => {
-                const timer = setTimeout(resolve, 1000);
-                pc.addEventListener('icegatheringstatechange', () => {
-                    if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
-                });
-            });
-        }
-        const resp = await fetch('/api/webrtc/offer', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer' }),
-        });
-        if (resp.status === 501) throw new Error('webrtc feature disabled; using websocket fallback');
-        if (!resp.ok) throw new Error(`offer endpoint returned ${resp.status}`);
-        const answer = await resp.json();
-        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-
-        // The media restructure dropped the old `opened` promise; restore
-        // the wait as a timeout race so a pre-open DataChannel failure
-        // falls back to WebSocket instead of hanging forever.
-        await Promise.race([
-            new Promise((resolve) => { dc.onopen = resolve; }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('DataChannel open timeout')), WEBRTC_ANSWER_TIMEOUT_MS)),
-        ]);
-        console.log('[transport] WebRTC DataChannel open (session', answer.session_id + ')');
-
-        dc.onmessage = (e) => handleWebRtcMessage(e.data);
-        dc.onclose = () => { updateConnectionStatus(false); fallbackToWs('DataChannel closed'); };
-        dc.onerror = () => fallbackToWs('DataChannel error');
-
-        transport = { mode: 'webrtc' };
-        updateConnectionStatus(true, 'Connected (WebRTC)');
-
-        // Decode poll semantics over the DataChannel.
-        webrtcPollTimer = setInterval(() => {
-            if (webrtcDc && webrtcDc.readyState === 'open') {
-                webrtcDc.send(JSON.stringify({ kind: 'decode_poll', msg_id: ++webrtcMsgId }));
-            }
-        }, DECODE_POLL_INTERVAL_MS);
-    } catch (err) {
-        fallbackToWs(err);
-    }
+            if (!blob || blob.size > 4 * 1024 * 1024) throw new Error('Frame exceeds 4 MiB; choose a smaller resolution');
+            const bytes = await blob.arrayBuffer(); if (!current()) return;
+            if (!transportIsConnected()) throw new Error('Signing transport disconnected');
+            if (transport === 'webrtc') webRtcSendChunked(++webrtcMsgId, new TextEncoder().encode(JSON.stringify({
+                kind: 'encode', msg_id: webrtcMsgId, sent_unix_ms: Date.now(), jpeg_b64: btoa(bytesToChunks(new Uint8Array(bytes))),
+            })));
+            else encodeWs.send(bytes);
+        } catch (err) { if (current()) { clearSigningRequest(); showToast(err.message, 'error'); } }
+    }, 'image/png');
 }
-
-// Convert the server's ICE server URL list into browser RTCIceServer
-/// entries. Inline TURN credentials (`turn:user:cred@host:port`) are hoisted
-/// into username/credential; unsupported or incomplete entries are skipped.
-function parseIceServersForBrowser(urls) {
-    return urls.map((raw) => {
-        const m = /^(stuns?|turns?):(.+)$/i.exec(String(raw).trim());
-        if (!m) return null;
-        const scheme = m[1].toLowerCase();
-        let rest = m[2];
-        let username = '';
-        let credential = '';
-        const at = rest.lastIndexOf('@');
-        if (at >= 0) {
-            const userinfo = rest.slice(0, at);
-            rest = rest.slice(at + 1);
-            const sep = userinfo.indexOf(':');
-            username = sep >= 0 ? userinfo.slice(0, sep) : userinfo;
-            credential = sep >= 0 ? userinfo.slice(sep + 1) : '';
-        }
-        if ((scheme === 'turn' || scheme === 'turns') && (!username || !credential)) return null;
-        return { urls: [scheme + ':' + rest], username, credential };
-    }).filter(Boolean);
-}
-
-// Attach the remote media stream to the preview <video> and start the fps
-// counter (requestVideoFrameCallback when available, rAF otherwise).
-function showMediaPreview(stream) {
-    const video = document.getElementById('media-preview');
-    const wrap = document.getElementById('media-preview-container');
-    if (!video || !wrap) return;
-    if (video.srcObject !== stream) {
-        video.srcObject = stream;
-        wrap.classList.remove('hidden');
-    }
-    startMediaFpsCounter(video);
-}
-
-function startMediaFpsCounter(video) {
-    if (mediaFpsActive) return;
-    mediaFpsActive = true;
-    const el = document.getElementById('footer-media-fps-value');
-    let frames = 0;
-    let windowStart = performance.now();
-    const update = () => {
-        const now = performance.now();
-        if (now - windowStart >= 1000) {
-            if (el) el.textContent = (frames * 1000 / (now - windowStart)).toFixed(1);
-            frames = 0;
-            windowStart = now;
+function connectVideoSocket(kind) {
+    if (!cameraActive) return;
+    const generation = transportGeneration, socket = new WebSocket(wsUrl('/ws/' + kind));
+    if (kind === 'encode') encodeWs = socket; else decodeWs = socket;
+    let pollTimer = null;
+    const current = () => cameraActive && generation === transportGeneration && socket === (kind === 'encode' ? encodeWs : decodeWs);
+    socket.onopen = () => {
+        if (!current()) return socket.close();
+        if (kind === 'encode') { clearSigningRequest(); updateConnectionStatus(true, 'Connected (WebSocket)'); }
+        else {
+            pollTimer = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send('poll'); }, DECODE_POLL_INTERVAL_MS);
+            socketIntervals.add(pollTimer);
         }
     };
-    if (typeof video.requestVideoFrameCallback === 'function') {
-        const loop = () => {
-            if (!mediaFpsActive) return;
-            frames += 1;
-            update();
-            video.requestVideoFrameCallback(loop);
-        };
-        video.requestVideoFrameCallback(loop);
-    } else {
-        const loop = () => {
-            if (!mediaFpsActive) return;
-            frames += 1;
-            update();
-            requestAnimationFrame(loop);
-        };
-        requestAnimationFrame(loop);
+    socket.onmessage = event => {
+        if (!current()) return;
+        try { const msg = JSON.parse(event.data); if (kind === 'encode') handleEncodeMessage(msg); else handleDecodeMessage(msg); }
+        catch (_) { if (kind === 'encode') clearSigningRequest(); }
+    };
+    socket.onclose = () => {
+        clearInterval(pollTimer); socketIntervals.delete(pollTimer);
+        if (!current()) return;
+        clearSigningRequest(); clearVideoVerification('Disconnected — previous results are historical'); updateConnectionStatus(false);
+        const timer = setTimeout(() => { wsReconnectTimers.delete(timer); if (current()) connectVideoSocket(kind); }, WS_RECONNECT_DELAY_MS);
+        wsReconnectTimers.add(timer);
+    };
+    socket.onerror = () => socket.close();
+}
+function resolveTransportPreference() {
+    const query = new URL(location.href).searchParams.get('transport');
+    if (['auto', 'websocket', 'webrtc'].includes(query)) return query;
+    const saved = localStorage.getItem(TRANSPORT_STORAGE_KEY);
+    return ['auto', 'websocket', 'webrtc'].includes(saved) ? saved : serverTransport;
+}
+function connectWsTransport() { transport = 'websocket'; connectVideoSocket('encode'); connectVideoSocket('decode'); }
+function connectTransport() {
+    const preference = resolveTransportPreference();
+    if (preference === 'webrtc' || (preference === 'auto' && !transportFallback)) connectWebRtcTransport();
+    else connectWsTransport();
+}
+function fallbackToWs(reason) {
+    teardownWebRtcTransport(); clearSigningRequest();
+    if (!cameraActive) return;
+    if (resolveTransportPreference() !== 'auto') {
+        transport = null; updateConnectionStatus(false, 'Pinned WebRTC unavailable');
+        clearVideoVerification('WebRTC unavailable — no fallback in pinned mode'); showToast(String(reason), 'error'); return;
+    }
+    transportFallback = true;
+    if (transport !== 'websocket') connectWsTransport();
+}
+function parseIceServersForBrowser(urls) {
+    return urls.flatMap(url => {
+        if (!/^turns?:|^stuns?:/.test(url)) return [];
+        const match = url.match(/^(turns?):([^:]+):([^@]+)@(.+)$/);
+        return [match ? { urls: match[1] + ':' + match[4], username: match[2], credential: match[3] } : { urls: url }];
+    });
+}
+async function connectWebRtcTransport() {
+    const generation = transportGeneration, current = () => cameraActive && generation === transportGeneration;
+    let pc = null, answerTimer = null;
+    try {
+        const configResponse = await fetch('/api/webrtc/config', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+        if (!configResponse.ok) throw new Error(`WebRTC config HTTP ${configResponse.status}`);
+        const config = await configResponse.json(); if (!current()) return;
+        pc = new RTCPeerConnection({ iceServers: parseIceServersForBrowser(config.ice_servers || []) }); webrtcPc = pc;
+        const dc = pc.createDataChannel('frames', { ordered: true }); webrtcDc = dc; dc.binaryType = 'arraybuffer';
+        dc.onmessage = event => { if (current()) handleWebRtcMessage(event.data); };
+        const opened = new Promise((resolve, reject) => {
+            answerTimer = setTimeout(() => reject(new Error('WebRTC connection timed out')), 10000);
+            dc.onopen = resolve; dc.onclose = dc.onerror = () => reject(new Error('WebRTC closed before opening'));
+        });
+        // Keep early rejection handled while signaling is still pending.
+        opened.catch(() => {});
+        await pc.setLocalDescription(await pc.createOffer());
+        if (pc.iceGatheringState !== 'complete') await new Promise(resolve => {
+            const done = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', changed); resolve(); };
+            const changed = () => { if (pc.iceGatheringState === 'complete') done(); };
+            const timer = setTimeout(done, 1000); pc.addEventListener('icegatheringstatechange', changed);
+        });
+        if (!current()) { pc.close(); return; }
+        const response = await fetch('/api/webrtc/offer', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer' }), signal: AbortSignal.timeout(5000) });
+        if (!response.ok) throw new Error(`WebRTC offer HTTP ${response.status}`);
+        const answer = await response.json(); if (!current()) { pc.close(); return; }
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp }); await opened;
+        if (!current()) { pc.close(); return; }
+        dc.onclose = () => { if (current()) fallbackToWs('WebRTC channel closed'); };
+        dc.onerror = () => { if (current()) fallbackToWs('WebRTC channel failed'); };
+        pc.onconnectionstatechange = () => { if (current() && ['failed', 'disconnected'].includes(pc.connectionState)) fallbackToWs('WebRTC disconnected'); };
+        transport = 'webrtc'; updateConnectionStatus(true, 'Connected (WebRTC)');
+        webrtcPollTimer = setInterval(() => { if (dc.readyState === 'open') dc.send(JSON.stringify({ kind: 'decode_poll', msg_id: ++webrtcMsgId })); }, DECODE_POLL_INTERVAL_MS);
+    } catch (err) { if (current()) fallbackToWs(err.message); else pc?.close(); }
+    finally { clearTimeout(answerTimer); }
+}
+function webRtcSendChunked(id, bytes) {
+    const count = Math.max(1, Math.ceil(bytes.length / WEBRTC_CHUNK_PAYLOAD_MAX));
+    for (let index = 0; index < count; index++) {
+        const slice = bytes.subarray(index * WEBRTC_CHUNK_PAYLOAD_MAX, (index + 1) * WEBRTC_CHUNK_PAYLOAD_MAX);
+        const chunk = new Uint8Array(20 + slice.length), view = new DataView(chunk.buffer);
+        view.setUint32(0, WEBRTC_CHUNK_MAGIC); view.setBigUint64(4, BigInt(id));
+        view.setUint32(12, index); view.setUint32(16, count); chunk.set(slice, 20); webrtcDc.send(chunk);
     }
 }
-
-function resetMediaPreview() {
-    mediaFpsActive = false;
-    if (mediaTrackTimer) { clearTimeout(mediaTrackTimer); mediaTrackTimer = null; }
-    const video = document.getElementById('media-preview');
-    if (video) video.srcObject = null;
-    const wrap = document.getElementById('media-preview-container');
-    if (wrap) wrap.classList.add('hidden');
-    const fpsEl = document.getElementById('footer-media-fps-value');
-    if (fpsEl) fpsEl.textContent = '—';
-}
-
 function handleWebRtcMessage(data) {
-    let payload;
-    if (typeof data === 'string') {
-        payload = data;
-    } else {
-        // Binary chunk: reassemble with the framing header.
-        const buf = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
-        if (buf.length < WEBRTC_CHUNK_HEADER_BYTES) return;
-        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-        const magic = dv.getUint32(0);
-        if (magic !== WEBRTC_CHUNK_MAGIC) return;
-        const msgId = dv.getBigUint64(4);
-        const idx = dv.getUint32(12);
-        const count = dv.getUint32(16);
-        const partial = webrtcPartial.get(msgId) || { chunks: new Array(count), received: 0 };
-        if (partial.chunks.length !== count) { webrtcPartial.delete(msgId); return; }
-        if (partial.chunks[idx] === undefined) {
-            partial.chunks[idx] = buf.slice(WEBRTC_CHUNK_HEADER_BYTES);
-            partial.received += 1;
-        }
-        if (partial.received < count) { webrtcPartial.set(msgId, partial); return; }
-        webrtcPartial.delete(msgId);
-        const total = partial.chunks.reduce((n, c) => n + c.length, 0);
-        const out = new Uint8Array(total);
-        let off = 0;
-        for (const c of partial.chunks) { out.set(c, off); off += c.length; }
-        payload = new TextDecoder().decode(out);
+    let payload = data;
+    if (typeof data !== 'string') {
+        const bytes = new Uint8Array(data); if (bytes.length < 20) return;
+        const view = new DataView(bytes.buffer), id = view.getBigUint64(4), index = view.getUint32(12), count = view.getUint32(16);
+        if (view.getUint32(0) !== WEBRTC_CHUNK_MAGIC || !count || count > 1024 || index >= count) return;
+        const now = Date.now();
+        for (const [key, part] of webrtcPartial) if (now - part.created > 10000) webrtcPartial.delete(key);
+        if (!webrtcPartial.has(id) && webrtcPartial.size >= 4) return;
+        const part = webrtcPartial.get(id) || { chunks: new Array(count), received: 0, bytes: 0, created: now };
+        if (part.chunks.length !== count) { webrtcPartial.delete(id); return; }
+        if (!part.chunks[index]) { part.chunks[index] = bytes.slice(20); part.received++; part.bytes += bytes.length - 20; }
+        if (part.bytes > 16 * 1024 * 1024) { webrtcPartial.delete(id); return; }
+        if (part.received !== count) { webrtcPartial.set(id, part); return; }
+        webrtcPartial.delete(id); const joined = new Uint8Array(part.bytes); let offset = 0;
+        for (const chunk of part.chunks) { joined.set(chunk, offset); offset += chunk.length; }
+        payload = new TextDecoder().decode(joined);
     }
     try {
         const msg = JSON.parse(payload);
-        if (msg.type === 'encoded_frame' || msg.type === 'metrics') handleEncodeMessage(msg);
-        else if (msg.type === 'decoded_frame' || msg.type === 'verify_status') handleDecodeMessage(msg);
-    } catch (err) { }
+        if (['encoded_frame', 'metrics', 'error', 'encode_error'].includes(msg.type)) handleEncodeMessage(msg);
+        else handleDecodeMessage(msg);
+    } catch (_) { clearSigningRequest(); }
 }
-
-function webRtcSendChunked(msgId, payloadBytes) {
-    const count = Math.max(1, Math.ceil(payloadBytes.length / WEBRTC_CHUNK_PAYLOAD_MAX));
-    const header = new ArrayBuffer(WEBRTC_CHUNK_HEADER_BYTES);
-    for (let i = 0; i < count; i++) {
-        const slice = payloadBytes.subarray(i * WEBRTC_CHUNK_PAYLOAD_MAX, (i + 1) * WEBRTC_CHUNK_PAYLOAD_MAX);
-        const chunk = new Uint8Array(WEBRTC_CHUNK_HEADER_BYTES + slice.length);
-        const dv = new DataView(chunk.buffer);
-        dv.setUint32(0, WEBRTC_CHUNK_MAGIC);
-        // msg_id fits in 32 bits in practice; write low word into u64 field.
-        dv.setUint32(4, 0); dv.setUint32(8, msgId);
-        dv.setUint32(12, i);
-        dv.setUint32(16, count);
-        chunk.set(slice, WEBRTC_CHUNK_HEADER_BYTES);
-        webrtcDc.send(chunk);
+async function handleEncodeMessage(msg) {
+    if (msg.ots) window.OtsPanel?.applyMetrics(msg.ots);
+    if (msg.data) applyMetrics(msg.data);
+    if (['error', 'encode_error'].includes(msg.type)) {
+        clearSigningRequest(); clearVideoVerification('Encoding failed — no new signed frame');
+        showToast(msg.message || msg.error || 'Encoding failed', 'error'); return;
     }
-}
-
-function sendFrameBytes(buf) {
-    if (transport && transport.mode === 'webrtc') {
-        if (!webrtcDc || webrtcDc.readyState !== 'open') return;
-        const msgId = ++webrtcMsgId;
-        const bytes = new Uint8Array(buf);
-        const b64 = btoa(bytesToChunks(bytes));
-        const request = JSON.stringify({
-            kind: 'encode', msg_id: msgId,
-            sent_unix_ms: Date.now(), jpeg_b64: b64,
-        });
-        webRtcSendChunked(msgId, new TextEncoder().encode(request));
-    } else if (encodeWs && encodeWs.readyState === WebSocket.OPEN) {
-        encodeWs.send(buf);
-    }
-}
-
-function bytesToChunks(bytes) {
-    // Feed base64 conversion in safe slices (avoid call-stack overflow).
-    let s = '';
-    const STEP = 0x8000;
-    for (let i = 0; i < bytes.length; i += STEP) {
-        s += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
-    }
-    return s;
-}
-
-// ─── Message Handlers ─────────────────────────────────────────────────────────
-
-function handleEncodeMessage(msg) {
-    awaitingSignResponse = false;
-    el.signIndicator.classList.add('hidden');
-    if (msg.data) updateEncodeMetrics(msg.data);
-    if (msg.backend) el.footerBackendValue.textContent = msg.backend;
-    if (msg.identity) {
-        el.identityValue.textContent = truncateIdentity(msg.identity);
-        el.identityValue.title = msg.identity;
-    }
-    if (msg.width && msg.height) el.footerResolutionValue.textContent = `${msg.width}×${msg.height}`;
-
-    // Capture watermarked frame for diff viewer (post-encode, from encode canvas)
-    if (diffViewerEnabled && lastOriginalFrameData) {
-        try {
-            const encCanvas = el.encodeCanvas;
-            const encCtx = encCanvas.getContext('2d');
-            lastWatermarkedFrameData = encCtx.getImageData(0, 0, encCanvas.width, encCanvas.height);
-            renderDiffViewer();
-        } catch (e) {
-            console.warn('[diff] Failed to capture watermarked frame:', e);
+    if (msg.type !== 'encoded_frame' || !cameraActive || !awaitingSignResponse) return;
+    const generation = cameraGeneration, epoch = transportGeneration, original = pendingOriginalFrame, requestId = signRequestId;
+    try {
+        if (msg.image_mime !== 'image/png' || !msg.frame || !/^[\da-f]{64}$/i.test(msg.public_key || '') ||
+            msg.frame_index == null || msg.cache_revision == null || !Number.isInteger(msg.lsb_bits)) throw new Error('Server did not return lossless signed media with extraction metadata');
+        const bytes = decodeArchiveBase64(msg.frame), image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        if (generation !== cameraGeneration || epoch !== transportGeneration || requestId !== signRequestId) { image.close(); return; }
+        const canvas = $('encode-canvas'); canvas.width = image.width; canvas.height = image.height;
+        canvas.getContext('2d').drawImage(image, 0, 0); image.close();
+        latestVideoFrame = { frame_index: msg.frame_index, cache_revision: msg.cache_revision,
+            public_key: msg.public_key, lsb_bits: msg.lsb_bits, stego_type: 'video', kernel: 'lsb', signing_backend: 'ed25519',
+            width: msg.width, height: msg.height, payload: msg.payload, media_digest: msg.media_digest, received_at: new Date().toISOString() };
+        $('identity-value').textContent = truncateIdentity(msg.public_key); $('identity-value').title = msg.public_key;
+        $('footer-resolution-value').textContent = `${msg.width}×${msg.height}`;
+        clearVideoVerification('Signed frame received — server verification pending');
+        if (videoRecording && !videoArchive.add(`frame-${msg.frame_index}-revision-${msg.cache_revision}.png`, bytes, latestVideoFrame)) {
+            showToast('Recording limit reached (64 MiB / 300 frames); archive stopped before next frame', 'error'); toggleVideoRecording();
+        }
+        if (diffViewerEnabled && original && original.width === canvas.width && original.height === canvas.height) {
+            lastOriginalFrameData = original; lastWatermarkedFrameData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height); renderDiffViewer();
+        }
+        window.OtsPanel?.refreshStatus();
+    } catch (err) {
+        if (generation === cameraGeneration && epoch === transportGeneration && requestId === signRequestId) {
+            clearVideoVerification('Signed artifact unavailable'); showToast(err.message, 'error');
         }
     }
+    finally { if (generation === cameraGeneration && epoch === transportGeneration && requestId === signRequestId) clearSigningRequest(); }
 }
-
 function handleDecodeMessage(msg) {
-    if (msg.type === 'decoded_frame') {
-        el.verifyWaiting.classList.add('hidden');
-        el.verifyResult.classList.remove('hidden');
-
-        // Update shared verification state (used by QR overlay)
-        lastVerifyData.verified = msg.verified;
-        lastVerifyData.frameIndex = msg.payload?.frame_index || 0;
-        lastVerifyData.hash = msg.payload?.hash || '0000000000000000';
-        lastVerifyData.backend = msg.backend || 'ed25519';
-        lastVerifyData.signLatencyUs = msg.verify_us || 0;
-        lastVerifyData.timestamp = msg.timestamp || new Date().toISOString();
-
-        if (msg.verified) {
-            el.verifyStatusBanner.className = 'verify-status-banner status-ok';
-            el.verifyStatusIcon.textContent = '✅';
-            el.verifyStatusText.textContent = 'Signature Verified';
-        } else if (msg.payload?.payload_found) {
-            // Extraction found a payload but the signature does not check
-            // out — the data has been altered or is not from our signer.
-            el.verifyStatusBanner.className = 'verify-status-banner status-fail';
-            el.verifyStatusIcon.textContent = '❌';
-            el.verifyStatusText.textContent = 'Payload extracted, signature INVALID';
-        } else {
-            el.verifyStatusBanner.className = 'verify-status-banner status-fail';
-            el.verifyStatusIcon.textContent = '❌';
-            el.verifyStatusText.textContent = 'Verification Failed';
-        }
-        if (msg.payload) {
-            el.fieldFrameIndex.textContent = msg.payload.frame_index ?? '—';
-            el.fieldHash.textContent = msg.payload.hash ? msg.payload.hash.slice(0, 12) + '…' + msg.payload.hash.slice(-6) : '—';
-            el.fieldHash.title = msg.payload.hash || '';
-            el.fieldSigPreview.textContent = msg.payload.signature_preview || '—';
-            el.fieldSigPreview.title = msg.payload.signature_full || msg.payload.signature_preview || '';
-        }
-        el.fieldBackend.textContent = msg.backend || '—';
-        el.fieldVerifyLatency.textContent = msg.verify_us ? msg.verify_us + ' μs' : '—';
-        addLogEntry(msg.verified, msg.payload?.frame_index, msg.verify_us);
-
-        // Update footer verified counter
-        const footerVerified = document.getElementById('footer-verified-value');
-        if (footerVerified) {
-            const ok = parseInt(el.valVerifiedOk.textContent) || 0;
-            const fail = parseInt(el.valVerifiedFail.textContent) || 0;
-            footerVerified.textContent = `✅ ${ok} / ❌ ${fail}`;
-        }
-    }
-    if (msg.data) updateDecodeMetrics(msg.data);
-}
-
-function addLogEntry(verified, frameIndex, verifyUs) {
-    const entry = document.createElement('div');
-    entry.className = 'log-entry ' + (verified ? 'log-ok' : 'log-fail');
-    const t = new Date().toLocaleTimeString();
-    const lat = verifyUs ? ` · ${verifyUs}μs` : '';
-    entry.innerHTML = `<span class="log-time">${t}</span><span class="log-icon">${verified ? '✅' : '❌'}</span><span class="log-frame">#${frameIndex ?? '?'}</span><span class="log-status">${verified ? 'OK' : 'FAIL'}${lat}</span>`;
-    el.verifyLog.insertBefore(entry, el.verifyLog.firstChild);
-    while (el.verifyLog.children.length > MAX_LOG_ENTRIES) el.verifyLog.removeChild(el.verifyLog.lastChild);
-}
-
-// ─── Metrics ──────────────────────────────────────────────────────────────────
-
-function updateEncodeMetrics(data) {
-    el.valFrames.textContent = fmtNum(data.frames_processed || 0);
-    el.valFps.textContent = data.average_fps || '0.0';
-    el.valSignLatency.textContent = data.avg_sign_latency_us || '0.0';
-    el.footerUptimeValue.textContent = fmtUptime(parseFloat(data.uptime_secs || 0));
-}
-
-function updateDecodeMetrics(data) {
-    el.valVerifiedOk.textContent = fmtNum(data.frames_verified_ok || 0);
-    el.valVerifiedFail.textContent = fmtNum(data.frames_verified_fail || 0);
-    el.valVerifyLatency.textContent = data.avg_verify_latency_us || '0.0';
-}
-
-// ─── Config Controls ──────────────────────────────────────────────────────────
-
-function setupConfigControls() {
-    el.cfgOpacity.addEventListener('input', () => {
-        liveConfig.opacity = parseInt(el.cfgOpacity.value) / 100;
-        el.cfgOpacityVal.textContent = liveConfig.opacity.toFixed(2);
-        pushConfigToServer();
-    });
-
-    el.cfgLsbBits.addEventListener('input', () => {
-        liveConfig.lsbBits = parseInt(el.cfgLsbBits.value);
-        el.cfgLsbBitsVal.textContent = liveConfig.lsbBits;
-        updateStegoInfo();
-        pushConfigToServer();
-    });
-
-    el.cfgSignBackend.addEventListener('change', () => {
-        liveConfig.signingBackend = el.cfgSignBackend.value;
-        updateStegoInfo();
-        pushConfigToServer();
-    });
-
-    el.cfgOverlayText.addEventListener('change', () => {
-        liveConfig.overlayText = el.cfgOverlayText.value;
-        pushConfigToServer();
-    });
-
-    el.cfgSignRate.addEventListener('input', () => {
-        SIGN_INTERVAL_MS = parseInt(el.cfgSignRate.value);
-        liveConfig.signRateMs = SIGN_INTERVAL_MS;
-        el.cfgSignRateVal.textContent = (1000 / SIGN_INTERVAL_MS).toFixed(1) + '/s';
-        if (cameraActive) startSigningInterval();
-    });
-
-    // QR Scale slider
-    if (el.cfgQrScale) {
-        el.cfgQrScale.addEventListener('input', () => {
-            liveConfig.qrScale = parseInt(el.cfgQrScale.value);
-            el.cfgQrScaleVal.textContent = liveConfig.qrScale + '%';
-        });
-    }
-
-    // Resolution dropdown
-    if (el.cfgResolution) {
-        el.cfgResolution.addEventListener('change', () => {
-            liveConfig.resolution = el.cfgResolution.value;
-            const [rw, rh] = liveConfig.resolution.split('x').map(Number);
-            liveConfig.width = rw;
-            liveConfig.height = rh;
-            updateStegoInfo();
-            pushConfigToServer();
-            // Restart camera with new resolution
-            if (cameraActive) {
-                startCamera();
-            }
-        });
-    }
-
-
-    updateStegoInfo();
-}
-
-function updateStegoInfo() {
-    const bits = liveConfig.lsbBits;
-    const w = liveConfig.width;
-    const h = liveConfig.height;
-    const capacityBits = w * h * 3 * bits;
-    const capacityBytes = Math.floor(capacityBits / 8);
-
-    const isEth = liveConfig.signingBackend === 'ethereum';
-    // Ed25519 payload size: steganographer_core SignaturePayload::SERIALIZED_SIZE
-    // (4 magic + 1 version + 8 frame index + 32 BLAKE3 hash + 64 Ed25519 sig).
-    const payloadSize = 109;
-    const utilization = capacityBits > 0 ? ((payloadSize * 8 / capacityBits) * 100).toFixed(3) : 0;
-
-    el.infoPayloadSize.textContent = payloadSize + ' bytes';
-    el.infoHashAlgo.textContent = 'BLAKE3 (256-bit)';
-    el.infoSigAlgo.textContent = isEth ? 'secp256k1 (EIP-191)' : 'Ed25519 (512-bit)';
-    el.infoCapacity.textContent = fmtBytes(capacityBytes) + ' (' + fmtNum(capacityBits) + ' bits)';
-    el.infoUtilization.textContent = utilization + '%';
-}
-
-function pushConfigToServer() {
-    fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(liveConfig),
-    })
-        .then(r => { if (r.ok) showToast('Config saved', 'success'); else showToast('Config save failed', 'error'); })
-        .catch(() => showToast('Config save failed — server unreachable', 'error'));
-}
-
-// ─── MetaMask ─────────────────────────────────────────────────────────────────
-
-function detectMetaMask() {
-    if (typeof window.ethereum !== 'undefined' && window.ethereum.isMetaMask) {
-        el.metamaskBtn.classList.add('metamask-available');
-        setupMetaMaskListeners();
-    } else {
-        el.metamaskBtn.classList.add('metamask-unavailable');
-        el.metamaskLabel.textContent = 'No MetaMask';
+    if (msg.ots) window.OtsPanel?.applyMetrics(msg.ots); if (msg.data) applyMetrics(msg.data);
+    if (!cameraActive) return;
+    if (msg.waiting || msg.verified_stale || msg.payload?.stale) { clearVideoVerification(msg.waiting ? 'Waiting for signed media' : 'Server verification pending'); return; }
+    if (msg.type !== 'decoded_frame') return;
+    if (typeof msg.verified !== 'boolean') { clearVideoVerification('Server verification pending'); return; }
+    const id = msg.frame_index ?? msg.payload?.frame_index;
+    if (!latestVideoFrame || msg.cache_revision == null ||
+        String(msg.cache_revision) !== String(latestVideoFrame.cache_revision) || String(id) !== String(latestVideoFrame.frame_index)) return;
+    lastVerifyData = { frame_index: id, cache_revision: msg.cache_revision, verified: msg.verified, hash: msg.payload?.hash, backend: msg.backend, verify_us: msg.verify_us };
+    $('verify-waiting').classList.add('hidden'); $('verify-result').classList.remove('hidden');
+    $('verify-status-banner').className = 'verify-status-banner ' + (msg.verified ? 'status-ok' : 'status-fail');
+    $('verify-status-icon').textContent = msg.verified ? '✅' : '❌';
+    $('verify-status-text').textContent = msg.verified ? 'Server verified this signed frame' : 'Server verification INVALID';
+    $('field-frame-index').textContent = id; $('field-hash').textContent = truncateIdentity(msg.payload?.hash); $('field-hash').title = msg.payload?.hash || '';
+    $('field-sig-preview').textContent = msg.payload?.signature_preview || '—'; $('field-sig-preview').title = msg.payload?.signature_full || '';
+    $('field-backend').textContent = msg.backend || 'ed25519'; $('field-verify-latency').textContent = `${msg.verify_us || 0} μs`;
+    if (lastVideoVerificationId !== String(msg.cache_revision)) {
+        const entry = document.createElement('div'); entry.className = 'log-entry ' + (msg.verified ? 'log-ok' : 'log-fail');
+        entry.textContent = `${new Date().toLocaleTimeString()}  #${id}  ${msg.verified ? 'OK' : 'INVALID'} · ${msg.verify_us || 0} μs`;
+        $('verify-log').prepend(entry); while ($('verify-log').children.length > 20) $('verify-log').lastChild.remove();
+        lastVideoVerificationId = String(msg.cache_revision);
     }
 }
-
-async function connectMetaMask() {
-    if (!window.ethereum) { window.open('https://metamask.io/download/', '_blank'); return; }
-    try {
-        el.metamaskLabel.textContent = 'Connecting...';
-        el.metamaskBtn.disabled = true;
-        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        if (accounts.length > 0) {
-            metamaskAccount = accounts[0];
-            el.metamaskLabel.textContent = truncAddr(metamaskAccount);
-            el.metamaskBtn.classList.add('metamask-connected');
-            el.identityValue.textContent = truncAddr(metamaskAccount);
-            el.identityValue.title = metamaskAccount;
-            el.signingBackend.value = 'ethereum';
-            el.cfgSignBackend.value = 'ethereum';
-            liveConfig.signingBackend = 'ethereum';
-            el.footerBackendValue.textContent = 'metamask';
-            updateStegoInfo();
-        }
-    } catch (err) { el.metamaskLabel.textContent = 'Connect MetaMask'; }
-    finally { el.metamaskBtn.disabled = false; }
-}
-
-function disconnectMetaMask() {
-    metamaskAccount = null;
-    el.metamaskLabel.textContent = 'Connect MetaMask';
-    el.metamaskBtn.classList.remove('metamask-connected');
-    fetchConfig();
-}
-
-function setupMetaMaskListeners() {
-    if (!window.ethereum) return;
-    window.ethereum.on('accountsChanged', (accts) => {
-        if (!accts.length) disconnectMetaMask();
-        else { metamaskAccount = accts[0]; el.metamaskLabel.textContent = truncAddr(metamaskAccount); el.identityValue.textContent = truncAddr(metamaskAccount); }
-    });
-    window.ethereum.on('chainChanged', () => { });
-}
-
-// ─── Config Fetch ─────────────────────────────────────────────────────────────
-
-async function fetchConfig() {
-    try {
-        const r = await fetch('/api/config');
-        const c = await r.json();
-        if (c.signing_backend && !metamaskAccount) {
-            el.signingBackend.value = c.signing_backend;
-            el.footerBackendValue.textContent = c.signing_backend;
-            el.cfgSignBackend.value = c.signing_backend;
-            liveConfig.signingBackend = c.signing_backend;
-        }
-        if (c.identity && !metamaskAccount) {
-            el.identityValue.textContent = truncateIdentity(c.identity);
-            el.identityValue.title = c.identity;
-        }
-        if (c.width && c.height) {
-            el.footerResolutionValue.textContent = `${c.width}×${c.height}`;
-            liveConfig.width = c.width; liveConfig.height = c.height;
-        }
-        updateStegoInfo();
-    } catch (e) { }
-}
-
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function updateConnectionStatus(connected, label) {
-    el.statusDot.classList.toggle('connected', connected);
-    el.statusDot.classList.toggle('disconnected', !connected);
-    if (!connected) {
-        el.statusText.textContent = 'Reconnecting...';
-    } else {
-        const mode = transport && transport.mode === 'webrtc' ? 'Connected (WebRTC)' : 'Connected (WS)';
-        el.statusText.textContent = label || mode;
-    }
-}
-
-function fmtNum(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return String(n);
-}
-
-function fmtBytes(b) {
-    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
-    if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
-    return b + ' B';
-}
-
-function fmtUptime(s) {
-    if (s < 60) return Math.floor(s) + 's';
-    if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
-    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
-}
-
-function truncateIdentity(id) { return (!id || id.length <= 16) ? id : id.slice(0, 8) + '…' + id.slice(-6); }
-function truncAddr(a) { return (!a || a.length < 12) ? a : a.slice(0, 6) + '…' + a.slice(-4); }
-
-// ─── Video Recording ──────────────────────────────────────────────────────────
-
-let videoMediaRecorder = null;
-let videoRecordedChunks = [];
-let videoRecording = false;
-
 function toggleVideoRecording() {
-    const btn = document.getElementById('record-video-btn');
-    const label = document.getElementById('record-video-label');
-    const canvas = document.getElementById('encode-canvas');
-
-    if (!videoRecording) {
-        // Start recording
-        if (!canvas) {
-            console.error('[record] No encode-canvas found');
-            return;
-        }
-        const stream = canvas.captureStream(30);
-        videoMediaRecorder = new MediaRecorder(stream, {
-            mimeType: 'video/webm; codecs=vp9',
-            videoBitsPerSecond: 2500000,
-        });
-        videoRecordedChunks = [];
-        videoMediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) videoRecordedChunks.push(e.data);
-        };
-        videoMediaRecorder.onstop = () => {
-            const blob = new Blob(videoRecordedChunks, { type: 'video/webm' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-            a.href = url;
-            a.download = `steganographer-video-${ts}.webm`;
-            a.click();
-            URL.revokeObjectURL(url);
-            console.log(`[record] Video saved: ${a.download} (${(blob.size / 1024).toFixed(1)} KB)`);
-        };
-        videoMediaRecorder.start(1000); // collect chunks every 1s
-        videoRecording = true;
-        btn.classList.add('recording');
-        label.textContent = 'Stop';
-        console.log('[record] Video recording started');
-    } else {
-        // Stop recording
-        videoMediaRecorder.stop();
+    if (videoRecording || videoArchive) {
         videoRecording = false;
-        btn.classList.remove('recording');
-        label.textContent = 'Record';
-        console.log('[record] Video recording stopped');
+        $('record-video-btn').classList.remove('recording');
+        try {
+            if (!videoArchive.entries.length || videoArchive.finish()) videoArchive = null;
+        } catch (err) { showToast('Archive export failed: ' + err.message + ' — click Export archive to retry', 'error'); }
+        $('record-video-label').textContent = videoArchive ? 'Export archive' : 'Record';
+        return;
     }
+    if (!cameraActive) { showToast('Start camera before recording signed snapshots', 'error'); return; }
+    if (!serverVersion) { showToast('Wait for dashboard initialization before recording', 'error'); return; }
+    videoArchive = createSignedArchive('video');
+    videoRecording = true;
+    $('record-video-btn').classList.add('recording');
+    $('record-video-label').textContent = 'Stop & save ZIP';
 }
-// ─── Theme Toggle ─────────────────────────────────────────────────────────────
-
-function initThemeToggle() {
-    // Apply saved theme on load
-    const savedTheme = localStorage.getItem('stego-theme') || 'dark';
-    document.body.setAttribute('data-theme', savedTheme);
-
-    const toggleBtn = document.getElementById('theme-toggle-btn');
-    if (toggleBtn) {
-        toggleBtn.addEventListener('click', () => {
-            const currentTheme = document.body.getAttribute('data-theme') || 'dark';
-            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-            document.body.setAttribute('data-theme', newTheme);
-
-            // Update mermaid theme if diagrams are present
-            if (window.mermaid) {
-                window.mermaid.initialize({
-                    startOnLoad: false,
-                    theme: newTheme === 'light' ? 'default' : 'dark',
-                    securityLevel: 'strict',
-                });
-            }
-
-            showToast(`Theme: ${newTheme}`, 'info');
-        });
-    }
-}
-
-// ─── Init ─────────────────────────────────────────────────────────────────────
-
-const SESSION_START = new Date();
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// FRAME DIFF VIEWER
-// ═══════════════════════════════════════════════════════════════════════════════
-
 function renderDiffViewer() {
     if (!diffViewerEnabled || !lastOriginalFrameData || !lastWatermarkedFrameData) return;
-
-    const origCanvas = el.diffOriginalCanvas;
-    const wmCanvas = el.diffWatermarkedCanvas;
-    const heatCanvas = el.diffHeatmapCanvas;
-
-    // Match canvas size to the encode/decode canvas
-    const encW = el.encodeCanvas.width;
-    const encH = el.encodeCanvas.height;
-    [origCanvas, wmCanvas, heatCanvas].forEach(c => {
-        c.width = encW;
-        c.height = encH;
-    });
-
-    // Draw original frame
-    const origCtx = origCanvas.getContext('2d');
-    origCtx.putImageData(lastOriginalFrameData, 0, 0);
-
-    // Draw watermarked frame
-    const wmCtx = wmCanvas.getContext('2d');
-    wmCtx.putImageData(lastWatermarkedFrameData, 0, 0);
-
-    // Compute pixel-level diff and render heatmap
-    const heatCtx = heatCanvas.getContext('2d');
-    const origData = lastOriginalFrameData.data;
-    const wmData = lastWatermarkedFrameData.data;
-    const diffImageData = origCtx.createImageData(encW, encH);
-    const diffData = diffImageData.data;
-
-    for (let i = 0; i < origData.length; i += 4) {
-        const rDiff = Math.abs(origData[i] - wmData[i]);
-        const gDiff = Math.abs(origData[i + 1] - wmData[i + 1]);
-        const bDiff = Math.abs(origData[i + 2] - wmData[i + 2]);
-        const pixelDiff = rDiff + gDiff + bDiff;
-
-        if (diffOverlayEnabled) {
-            if (pixelDiff > 6) {
-                // Changed: red (intensity proportional to diff)
-                const intensity = Math.min(255, pixelDiff);
-                diffData[i] = Math.min(255, 80 + intensity / 3);      // R
-                diffData[i + 1] = 0;                                   // G
-                diffData[i + 2] = 0;                                   // B
-                diffData[i + 3] = 255;                                 // A
-            } else {
-                // Unchanged: green (dim)
-                diffData[i] = 0;                                        // R
-                diffData[i + 1] = 60;                                   // G
-                diffData[i + 2] = 0;                                    // B
-                diffData[i + 3] = 255;                                 // A
-            }
-        } else {
-            // No overlay — just show the watermarked frame in the heatmap canvas too
-            diffData[i] = wmData[i];
-            diffData[i + 1] = wmData[i + 1];
-            diffData[i + 2] = wmData[i + 2];
-            diffData[i + 3] = 255;
-        }
+    const original = lastOriginalFrameData, signed = lastWatermarkedFrameData;
+    for (const id of ['diff-original-canvas', 'diff-watermarked-canvas', 'diff-heatmap-canvas']) { $(id).width = original.width; $(id).height = original.height; }
+    $('diff-original-canvas').getContext('2d').putImageData(original, 0, 0);
+    $('diff-watermarked-canvas').getContext('2d').putImageData(signed, 0, 0);
+    const ctx = $('diff-heatmap-canvas').getContext('2d'), heat = ctx.createImageData(original.width, original.height);
+    for (let i = 0; i < original.data.length; i += 4) {
+        const delta = Math.abs(original.data[i] - signed.data[i]) + Math.abs(original.data[i + 1] - signed.data[i + 1]) + Math.abs(original.data[i + 2] - signed.data[i + 2]);
+        heat.data[i] = diffOverlayEnabled ? Math.min(255, delta * 16) : signed.data[i];
+        heat.data[i + 1] = diffOverlayEnabled ? (delta ? 0 : 35) : signed.data[i + 1];
+        heat.data[i + 2] = diffOverlayEnabled ? 0 : signed.data[i + 2]; heat.data[i + 3] = 255;
     }
-
-    heatCtx.putImageData(diffImageData, 0, 0);
+    ctx.putImageData(heat, 0, 0);
 }
 
-function setupDiffViewer() {
-    if (el.diffToggleBtn) {
-        el.diffToggleBtn.addEventListener('click', () => {
-            diffViewerEnabled = !diffViewerEnabled;
-            if (diffViewerEnabled) {
-                el.diffToggleBtn.textContent = '🔍 Hide Diff';
-                el.diffToggleBtn.classList.add('active');
-                el.diffViewer.classList.remove('hidden');
-                // If camera is active, the next sign cycle will capture frames
-            } else {
-                el.diffToggleBtn.textContent = '🔍 Show Diff';
-                el.diffToggleBtn.classList.remove('active');
-                el.diffViewer.classList.add('hidden');
-                lastOriginalFrameData = null;
-                lastWatermarkedFrameData = null;
-            }
-        });
-    }
-
-    if (el.diffOverlayToggle) {
-        el.diffOverlayToggle.addEventListener('click', () => {
-            diffOverlayEnabled = !diffOverlayEnabled;
-            if (diffOverlayEnabled) {
-                el.diffOverlayToggle.textContent = '🎨 Heatmap ON';
-                el.diffOverlayToggle.classList.add('active');
-            } else {
-                el.diffOverlayToggle.textContent = '🎨 Heatmap OFF';
-                el.diffOverlayToggle.classList.remove('active');
-            }
-            renderDiffViewer();
-        });
-    }
+let metricsPollInterval = null, metricsPolling = false;
+const metricsHistory = [];
+function applyMetrics(data) {
+    rawMetrics = { ...rawMetrics, ...data }; window.OtsPanel?.applyMetrics(data);
+    $('val-frames').textContent = fmtNum(rawMetrics.frames_processed || 0); $('val-fps').textContent = rawMetrics.average_fps || '0.0';
+    $('val-sign-latency').textContent = rawMetrics.avg_sign_latency_us || '0.0';
+    $('val-verified-ok').textContent = fmtNum(rawMetrics.frames_verified_ok || 0); $('val-verified-fail').textContent = fmtNum(rawMetrics.frames_verified_fail || 0);
+    $('val-verify-latency').textContent = rawMetrics.avg_verify_latency_us || '0.0'; $('footer-uptime-value').textContent = fmtUptime(rawMetrics.uptime_secs || 0);
+    $('footer-verified-value').textContent = `✅ ${rawMetrics.frames_verified_ok || 0} / ❌ ${rawMetrics.frames_verified_fail || 0} (all media)`;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// HISTORICAL METRICS CHARTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-let metricsPollInterval = null;
-
-function startMetricsPolling() {
-    if (metricsPollInterval) clearInterval(metricsPollInterval);
-    metricsPollInterval = setInterval(pollMetrics, 1000);
-}
-
 async function pollMetrics() {
+    if (metricsPolling) return; metricsPolling = true;
     try {
-        const r = await fetch('/api/metrics');
-        const data = await r.json();
-        const entry = {
-            timestamp: Date.now(),
-            fps: parseFloat(data.average_fps) || 0,
-            signLatency: parseFloat(data.avg_sign_latency_us) || 0,
-            verifyLatency: parseFloat(data.avg_verify_latency_us) || 0,
-            verifiedOk: parseInt(data.frames_verified_ok) || 0,
-            verifiedFail: parseInt(data.frames_verified_fail) || 0,
-        };
-        metricsHistory.push(entry);
-        if (metricsHistory.length > METRICS_HISTORY_MAX) metricsHistory.shift();
-        drawCharts();
-    } catch (e) {
-        // Server might not be running yet
-    }
+        const response = await fetch('/api/metrics', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+        if (!response.ok) return;
+        const data = await response.json(); applyMetrics(data); metricsHistory.push(data); if (metricsHistory.length > 60) metricsHistory.shift();
+        for (const [id, keys] of [['chart-fps', ['average_fps']], ['chart-sign-latency', ['avg_sign_latency_us']], ['chart-verify-latency', ['avg_verify_latency_us']], ['chart-verify-counts', ['frames_verified_ok', 'frames_verified_fail']]]) {
+            const canvas = $(id), ctx = canvas.getContext('2d'), max = Math.max(1, ...metricsHistory.flatMap(row => keys.map(key => Number(row[key]) || 0)));
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            keys.forEach((key, series) => { ctx.strokeStyle = series ? '#ef4444' : '#3b82f6'; ctx.beginPath();
+                metricsHistory.forEach((row, i) => { const x = i * canvas.width / 59, y = canvas.height - (Number(row[key]) || 0) / max * (canvas.height - 10); if (!i) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.stroke(); });
+        }
+    } catch (_) { /* Polling is observational, not a verification result. */ }
+    finally { metricsPolling = false; }
 }
-
-function drawCharts() {
-    drawLineChart(el.chartFps, metricsHistory, 'fps', '#3b82f6', 'FPS');
-    drawLineChart(el.chartSignLatency, metricsHistory, 'signLatency', '#f59e0b', 'µs');
-    drawLineChart(el.chartVerifyLatency, metricsHistory, 'verifyLatency', '#8b5cf6', 'µs');
-    drawBarChart(el.chartVerifyCounts, metricsHistory);
+async function exportSession() {
+    if (!serverVersion) { showToast('Wait for dashboard initialization before exporting', 'error'); return; }
+    try {
+        const response = await fetch('/api/session', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+        if (!response.ok) throw new Error(`Session HTTP ${response.status}`);
+        const report = { steganographer_version: serverVersion, exported_at: new Date().toISOString(), browser_session_start: SESSION_START.toISOString(),
+            server_session: await response.json(), aggregate_media_metrics: { ...rawMetrics },
+            metrics_scope: 'Server counters may include video and audio; never parsed from formatted labels.', last_video_verification: lastVerifyData };
+        downloadBlob(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }), `steganographer-session-${Date.now()}.json`);
+    } catch (err) { showToast('Export failed: ' + err.message, 'error'); }
 }
-
-function drawLineChart(canvas, data, key, color, yLabel) {
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width;
-    const h = canvas.height;
-    const padL = 38, padR = 8, padT = 8, padB = 18;
-
-    // Clear background
-    ctx.fillStyle = '#0a0a0a';
-    ctx.fillRect(0, 0, w, h);
-
-    if (data.length < 2) {
-        ctx.fillStyle = '#555';
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('Waiting for data…', w / 2, h / 2);
-        return;
-    }
-
-    const chartW = w - padL - padR;
-    const chartH = h - padT - padB;
-
-    // Calculate Y range
-    const values = data.map(d => d[key]);
-    let yMax = Math.max(...values, 1);
-    let yMin = Math.min(...values, 0);
-    // Add 10% padding to yMax
-    if (yMax > 0) yMax = yMax * 1.1;
-    const yRange = yMax - yMin || 1;
-
-    // Draw grid lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i++) {
-        const y = padT + (chartH / 4) * i;
-        ctx.beginPath();
-        ctx.moveTo(padL, y);
-        ctx.lineTo(w - padR, y);
-        ctx.stroke();
-
-        // Y-axis labels
-        const labelVal = yMax - (yRange / 4) * i;
-        ctx.fillStyle = '#555';
-        ctx.font = '9px "JetBrains Mono", monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(labelVal.toFixed(1), padL - 4, y + 3);
-    }
-
-    // Draw X-axis label
-    ctx.fillStyle = '#555';
-    ctx.font = '9px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('60s ago', padL + 10, h - 4);
-    ctx.fillText('now', w - padR - 10, h - 4);
-
-    // Draw Y-axis label
-    ctx.save();
-    ctx.translate(10, padT + chartH / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillText(yLabel, 0, 0);
-    ctx.restore();
-
-    // Draw line
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    const xStep = chartW / (METRICS_HISTORY_MAX - 1);
-    data.forEach((d, i) => {
-        const x = padL + i * xStep;
-        const y = padT + chartH - ((d[key] - yMin) / yRange) * chartH;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // Fill area under line
-    ctx.lineTo(padL + (data.length - 1) * xStep, padT + chartH);
-    ctx.lineTo(padL, padT + chartH);
-    ctx.closePath();
-    ctx.fillStyle = color + '20'; // 12% opacity
-    ctx.fill();
+function switchTab(name) {
+    if (!['video', 'audio', 'docs'].includes(name)) return;
+    document.querySelectorAll('.tab-btn').forEach(button => { const selected = button.dataset.tab === name; button.classList.toggle('active', selected); button.setAttribute('aria-selected', String(selected)); });
+    document.querySelectorAll('.tab-content').forEach(panel => { const selected = panel.id === 'tab-' + name; panel.classList.toggle('hidden', !selected); panel.style.display = selected ? '' : 'none'; });
+    if (name === 'docs' && typeof initDocsTab === 'function') initDocsTab();
 }
-
-function drawBarChart(canvas, data) {
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width;
-    const h = canvas.height;
-    const padL = 38, padR = 8, padT = 8, padB = 18;
-
-    // Clear
-    ctx.fillStyle = '#0a0a0a';
-    ctx.fillRect(0, 0, w, h);
-
-    if (data.length < 1) {
-        ctx.fillStyle = '#555';
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('Waiting for data…', w / 2, h / 2);
-        return;
-    }
-
-    const chartW = w - padL - padR;
-    const chartH = h - padT - padB;
-
-    // Calculate max value for scaling
-    const okValues = data.map(d => d.verifiedOk);
-    const failValues = data.map(d => d.verifiedFail);
-    const yMax = Math.max(...okValues, ...failValues, 1) * 1.1;
-
-    // Grid lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i++) {
-        const y = padT + (chartH / 4) * i;
-        ctx.beginPath();
-        ctx.moveTo(padL, y);
-        ctx.lineTo(w - padR, y);
-        ctx.stroke();
-
-        const labelVal = yMax - (yMax / 4) * i;
-        ctx.fillStyle = '#555';
-        ctx.font = '9px "JetBrains Mono", monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(Math.round(labelVal).toString(), padL - 4, y + 3);
-    }
-
-    // X-axis label
-    ctx.fillStyle = '#555';
-    ctx.font = '9px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('60s ago', padL + 10, h - 4);
-    ctx.fillText('now', w - padR - 10, h - 4);
-
-    // Y-axis label
-    ctx.save();
-    ctx.translate(10, padT + chartH / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillText('Count', 0, 0);
-    ctx.restore();
-
-    // Draw bars — show the latest values as stacked bars across time
-    const barWidth = Math.max(2, chartW / METRICS_HISTORY_MAX);
-    const xStep = chartW / METRICS_HISTORY_MAX;
-
-    data.forEach((d, i) => {
-        const x = padL + i * xStep;
-
-        // OK bar (green, bottom)
-        const okHeight = (d.verifiedOk / yMax) * chartH;
-        ctx.fillStyle = '#22c55e';
-        ctx.fillRect(x, padT + chartH - okHeight, barWidth - 1, okHeight);
-
-        // Fail bar (red, stacked on top)
-        const failHeight = (d.verifiedFail / yMax) * chartH;
-        ctx.fillStyle = '#dc2626';
-        ctx.fillRect(x, padT + chartH - okHeight - failHeight, barWidth - 1, failHeight);
-    });
-}
-
-function setupPerformancePanel() {
-    // Collapse/expand toggle
-    if (el.perfPanelHeader) {
-        el.perfPanelHeader.addEventListener('click', () => {
-            if (el.perfPanel) el.perfPanel.classList.toggle('collapsed');
-        });
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CAMERA SELECTOR SETUP
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function setupCameraSelector() {
-    if (el.cameraSelect) {
-        el.cameraSelect.addEventListener('change', () => {
-            selectedCameraDeviceId = el.cameraSelect.value;
-            if (cameraActive) {
-                startCamera();
-            }
-        });
-        enumerateCameras();
-    }
-}
-
-function setupTransportToggle() {
-    const sel = document.getElementById('cfg-transport');
-    if (!sel) return;
-    sel.value = resolveTransportPreference();
-    sel.addEventListener('change', () => {
-        try { localStorage.setItem(TRANSPORT_STORAGE_KEY, sel.value); } catch (e) { }
-        // Simplest acceptable behavior: reload so both connections come up on
-        // the newly selected transport.
-        location.reload();
-    });
-}
-
-function init() {
-    ingestAuthToken();
-    console.log('Steganographer Dashboard initializing...');
-    initThemeToggle();
-    fetchConfig();
-    connectTransport();
-    detectMetaMask();
-    setupConfigControls();
-    setupDiffViewer();
-    setupPerformancePanel();
-    setupCameraSelector();
-    setupTransportToggle();
-    startMetricsPolling();
-    el.startCameraBtn.addEventListener('click', startCamera);
-    el.metamaskBtn.addEventListener('click', () => metamaskAccount ? disconnectMetaMask() : connectMetaMask());
-    setInterval(fetchConfig, 5000);
-
-    const recordVideoBtn = document.getElementById('record-video-btn');
-    if (recordVideoBtn) recordVideoBtn.addEventListener('click', toggleVideoRecording);
-
-    // ─── Help Tooltip Positioning (fixed position to escape overflow containers) ──
-    initHelpTooltips();
-
-    // ─── Config Preset Buttons ──
-    initPresetButtons();
-
-    // ─── Keyboard Shortcuts ──
-    document.addEventListener('keydown', handleKeyboardShortcut);
-
-    // ─── Copy-to-Clipboard Buttons ──
-    document.querySelectorAll('.copy-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const targetId = btn.dataset.copyTarget;
-            const targetEl = document.getElementById(targetId);
-            if (!targetEl) return;
-            const text = targetEl.title || targetEl.textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                const orig = btn.textContent;
-                btn.textContent = '✓';
-                btn.classList.add('copied');
-                showToast('Copied to clipboard', 'success');
-                setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
-            });
-        });
-    });
-
-    // ─── Session Export Button ──
-    const exportBtn = document.getElementById('session-export-btn');
-    if (exportBtn) exportBtn.addEventListener('click', exportSession);
-
-    // ─── Auto-Start Camera ──
-    if (new URLSearchParams(window.location.search).has('autostart')) {
-        setTimeout(startCamera, 500);
-    }
-}
-
-function initHelpTooltips() {
-    document.querySelectorAll('.help-icon').forEach(icon => {
-        const tip = icon.querySelector('.help-tooltip');
-        if (!tip) return;
-        icon.addEventListener('mouseenter', () => {
-            const rect = icon.getBoundingClientRect();
-
-            // Find closest ancestor with a CSS transform — this changes the
-            // containing block for position:fixed children, making coordinates
-            // relative to that ancestor instead of the viewport.
-            let offsetX = 0, offsetY = 0;
-            let ancestor = tip.parentElement;
-            while (ancestor && ancestor !== document.documentElement) {
-                const cs = getComputedStyle(ancestor);
-                if (cs.transform && cs.transform !== 'none') {
-                    const ar = ancestor.getBoundingClientRect();
-                    offsetX = ar.left;
-                    offsetY = ar.top;
-                    break;
-                }
-                ancestor = ancestor.parentElement;
-            }
-
-            let top = rect.top - 10 - offsetY;
-            let left = rect.left + rect.width / 2 - offsetX;
-            tip.style.display = 'block';
-            tip.style.left = `${left}px`;
-            tip.style.top = '0px';
-            const tipRect = tip.getBoundingClientRect();
-            const tipH = tipRect.height;
-            top -= tipH;
-            if (top < 8 - offsetY) top = rect.bottom + 10 - offsetY;
-            const maxRight = window.innerWidth - offsetX;
-            left = Math.max(tipRect.width / 2 + 8, Math.min(left, maxRight - tipRect.width / 2 - 8));
-            tip.style.left = `${left}px`;
-            tip.style.top = `${top}px`;
-            tip.style.transform = 'translateX(-50%)';
-        });
-        icon.addEventListener('mouseleave', () => {
-            tip.style.display = 'none';
-        });
-    });
-}
-
-function handleKeyboardShortcut(e) {
-    // Don't trigger if typing in an input/textarea/select
-    const tag = e.target.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-    switch (e.code) {
-        case 'Space':
-            e.preventDefault();
-            if (cameraActive) {
-                // Stop camera
-                if (webcamStream) webcamStream.getTracks().forEach(t => t.stop());
-                cameraActive = false;
-                cancelAnimationFrame(drawLoopId);
-                clearInterval(signInterval);
-                el.encodeOverlay.classList.remove('hidden');
-            } else {
-                startCamera();
-            }
-            break;
-        case 'KeyR':
-            if (!e.ctrlKey && !e.metaKey) toggleVideoRecording();
-            break;
-        case 'Digit1': switchTab('video'); break;
-        case 'Digit2': switchTab('audio'); break;
-        case 'Digit3': switchTab('docs'); break;
-        case 'Equal': // + key
-        case 'NumpadAdd':
-            if (liveConfig.lsbBits < 4) {
-                liveConfig.lsbBits++;
-                el.cfgLsbBits.value = liveConfig.lsbBits;
-                el.cfgLsbBitsVal.textContent = liveConfig.lsbBits;
-                updateStegoInfo();
-                pushConfigToServer();
-            }
-            break;
-        case 'Minus':
-        case 'NumpadSubtract':
-            if (liveConfig.lsbBits > 1) {
-                liveConfig.lsbBits--;
-                el.cfgLsbBits.value = liveConfig.lsbBits;
-                el.cfgLsbBitsVal.textContent = liveConfig.lsbBits;
-                updateStegoInfo();
-                pushConfigToServer();
-            }
-            break;
-        case 'KeyE':
-            if (!e.ctrlKey && !e.metaKey) exportSession();
-            break;
-        case 'Slash':  // ? key (Shift+/)
-            if (e.shiftKey) { e.preventDefault(); toggleCheatSheet(); }
-            break;
-        case 'Escape':
-            closeCheatSheet();
-            break;
-    }
-}
-
-function switchTab(tabName) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    const btn = document.getElementById(`tab-btn-${tabName}`);
-    const content = document.getElementById(`tab-${tabName}`);
-    if (btn) btn.classList.add('active');
-    if (content) content.classList.add('active');
-}
-
-function exportSession() {
-    const now = new Date();
-    const report = {
-        steganographer_version: 'v0.1.0',
-        session: {
-            start: SESSION_START.toISOString(),
-            end: now.toISOString(),
-            duration_seconds: Math.round((now - SESSION_START) / 1000),
-        },
-        config: { ...liveConfig },
-        video_metrics: {
-            frames_signed: parseInt(el.valFrames.textContent) || 0,
-            sign_fps: parseFloat(el.valFps.textContent) || 0,
-            avg_sign_latency_us: parseFloat(el.valSignLatency.textContent) || 0,
-            verified_ok: parseInt(el.valVerifiedOk.textContent) || 0,
-            verified_fail: parseInt(el.valVerifiedFail.textContent) || 0,
-            avg_verify_latency_us: parseFloat(el.valVerifyLatency.textContent) || 0,
-        },
-        last_verification: { ...lastVerifyData },
-    };
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    a.href = url;
-    a.download = `steganographer-session-${ts}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    console.log(`[export] Session report saved: ${a.download}`);
-    showToast(`Session exported: ${a.download}`, 'success');
-}
-
-// ─── Toast Notifications ──────────────────────────────────────────────────────
-
-function showToast(message, type = 'info') {
-    let container = document.getElementById('toast-container');
-    if (!container) {
-        container = document.createElement('div');
-        container.id = 'toast-container';
-        document.body.appendChild(container);
-    }
-
-    const icons = { success: '✓', error: '✗', info: 'ℹ' };
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span>${message}`;
-    container.appendChild(toast);
-
-    setTimeout(() => {
-        toast.classList.add('toast-exit');
-        toast.addEventListener('animationend', () => toast.remove());
-    }, TOAST_DURATION_MS);
-}
-
-// ─── Keyboard Shortcut Cheat Sheet ────────────────────────────────────────────
-
 function toggleCheatSheet() {
-    const existing = document.getElementById('cheatsheet-overlay');
+    const existing = $('cheatsheet-overlay');
     if (existing) { existing.remove(); return; }
-
-    const shortcuts = [
-        ['Space', 'Start / stop camera'],
-        ['R', 'Toggle video recording'],
-        ['1 / 2 / 3', 'Switch to Video / Audio / Docs tab'],
-        ['+ / −', 'Increase / decrease LSB bits'],
-        ['E', 'Export session report'],
-        ['?', 'Toggle this cheat sheet'],
-        ['Esc', 'Close this overlay'],
-    ];
-
     const overlay = document.createElement('div');
     overlay.id = 'cheatsheet-overlay';
-    overlay.innerHTML = `
-        <div class="cheatsheet-panel">
-            <h3>⌨️ Keyboard Shortcuts</h3>
-            <table>
-                ${shortcuts.map(([key, desc]) =>
-        `<tr><td><kbd>${key}</kbd></td><td>${desc}</td></tr>`
-    ).join('')}
-            </table>
-            <p class="cheatsheet-hint">Press <kbd>?</kbd> or <kbd>Esc</kbd> to close</p>
-        </div>
-    `;
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) overlay.remove();
+    overlay.innerHTML = '<div class="cheatsheet-panel" role="dialog" aria-label="Keyboard shortcuts"><h3>Keyboard shortcuts</h3>' +
+        '<table><tr><td>1 / 2 / 3</td><td>Video / Audio / Docs</td></tr><tr><td>Space</td><td>Start / stop camera</td></tr>' +
+        '<tr><td>R</td><td>Record / export active media archive</td></tr><tr><td>+ / −</td><td>Video LSB depth</td></tr>' +
+        '<tr><td>E</td><td>Export session JSON</td></tr><tr><td>?</td><td>Shortcut help</td></tr></table><button type="button">Close</button></div>';
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+    overlay.querySelector('button').addEventListener('click', close);
+    document.body.append(overlay); overlay.querySelector('button').focus();
+}
+function handleKeyboardShortcut(event) {
+    if (event.code === 'Escape') { $('cheatsheet-overlay')?.remove(); return; }
+    if (event.target.closest('input,textarea,select,button,a,[contenteditable="true"],[role="button"]') || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.code === 'Digit1') switchTab('video'); else if (event.code === 'Digit2') switchTab('audio'); else if (event.code === 'Digit3') switchTab('docs');
+    else if (event.code === 'Space') { event.preventDefault(); if (cameraActive) stopCamera(); else startCamera(); }
+    else if (event.code === 'KeyR') { if (!$('tab-audio').classList.contains('hidden') && typeof toggleAudioRecording === 'function') toggleAudioRecording(); else toggleVideoRecording(); }
+    else if (event.code === 'KeyE') exportSession();
+    else if (event.code === 'Slash' && event.shiftKey) { event.preventDefault(); toggleCheatSheet(); }
+    else if (event.code === 'Equal' || event.code === 'Minus') {
+        if (!configHydrated) return;
+        liveConfig.lsbBits = Math.max(1, Math.min(4, liveConfig.lsbBits + (event.code === 'Equal' ? 1 : -1))); renderConfigControls(); pushConfigToServer();
+    }
+}
+async function init() {
+    ingestAuthToken();
+    document.querySelectorAll('.tab-btn').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
+    document.addEventListener('keydown', handleKeyboardShortcut);
+    $('start-camera-btn').addEventListener('click', startCamera); $('stop-camera-btn').addEventListener('click', stopCamera);
+    $('record-video-btn').addEventListener('click', toggleVideoRecording); $('session-export-btn').addEventListener('click', exportSession);
+    $('camera-select').addEventListener('change', () => { if (cameraActive) startCamera(); });
+    $('cfg-transport').addEventListener('change', () => {
+        localStorage.setItem(TRANSPORT_STORAGE_KEY, $('cfg-transport').value);
+        const url = new URL(location.href); url.searchParams.delete('transport'); history.replaceState(null, '', url);
+        stopTransport(); transportFallback = false; if (cameraActive) connectTransport();
     });
-    document.body.appendChild(overlay);
+    $('diff-toggle-btn').addEventListener('click', () => { diffViewerEnabled = !diffViewerEnabled; $('diff-viewer').classList.toggle('hidden', !diffViewerEnabled); $('diff-toggle-btn').textContent = diffViewerEnabled ? 'Hide Diff' : 'Show Diff'; });
+    $('diff-overlay-toggle').addEventListener('click', () => { diffOverlayEnabled = !diffOverlayEnabled; $('diff-overlay-toggle').textContent = diffOverlayEnabled ? 'Heatmap ON' : 'Heatmap OFF'; renderDiffViewer(); });
+    $('perf-panel-header').addEventListener('click', () => { const hidden = $('perf-panel-body').classList.toggle('hidden'); $('perf-collapse-icon').textContent = hidden ? '▶' : '▼'; });
+    const theme = localStorage.getItem('stego-theme') || 'dark'; document.body.setAttribute('data-theme', theme);
+    $('theme-toggle-btn').addEventListener('click', () => { const next = document.body.getAttribute('data-theme') === 'light' ? 'dark' : 'light'; document.body.setAttribute('data-theme', next); localStorage.setItem('stego-theme', next); });
+    document.querySelectorAll('.copy-btn').forEach(button => button.addEventListener('click', async () => { const node = $(button.dataset.copyTarget); try { await navigator.clipboard.writeText(node.title || node.textContent); showToast('Copied', 'success'); } catch (_) { showToast('Clipboard unavailable', 'error'); } }));
+    document.querySelectorAll('.help-icon').forEach(icon => icon.addEventListener('mouseenter', () => {
+        const tooltip = icon.querySelector('.help-tooltip');
+        if (!tooltip) return;
+        const rect = icon.getBoundingClientRect(), width = tooltip.offsetWidth || 300;
+        tooltip.style.left = Math.max(8, Math.min(innerWidth - width - 8, rect.left - width / 2)) + 'px';
+        tooltip.style.top = Math.max(8, rect.top - tooltip.offsetHeight - 10) + 'px';
+    }));
+    window.addEventListener('pagehide', () => { stopCamera(); if (typeof stopMicrophone === 'function') stopMicrophone(); clearInterval(metricsPollInterval); });
+    const controls = [...document.querySelectorAll('.config-controls input, .config-controls select, .preset-btn')];
+    controls.forEach(control => control.disabled = true); $('start-camera-btn').disabled = true;
+    try {
+        await fetchConfig();
+        const response = await fetch('/api/version', { headers: authHeaders(), signal: AbortSignal.timeout(5000) }); if (!response.ok) throw new Error('Version unavailable');
+        serverVersion = (await response.json()).version; $('version-badge').textContent = 'v' + serverVersion;
+        const capabilityResponse = await fetch('/api/webrtc/config', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+        if (capabilityResponse.ok) serverTransport = (await capabilityResponse.json()).default_transport || serverTransport;
+        controls.forEach(control => control.disabled = false); $('start-camera-btn').disabled = false;
+        // Not implemented by this dashboard; never imply these affect signed output.
+        ['signing-backend', 'cfg-sign-backend', 'audio-cfg-sign-backend', 'cfg-qr-scale', 'cfg-overlay-text'].forEach(id => $(id).disabled = true);
+        $('cfg-transport').value = resolveTransportPreference(); setupConfigControls(); enumerateCameras();
+        metricsPollInterval = setInterval(pollMetrics, 1000); pollMetrics();
+        if (new URL(location.href).searchParams.has('autostart')) startCamera();
+    } catch (err) { showToast('Initialization failed: ' + err.message + ' — reload to retry', 'error'); }
 }
-
-function closeCheatSheet() {
-    const overlay = document.getElementById('cheatsheet-overlay');
-    if (overlay) overlay.remove();
-}
-
-// ─── Config Presets ─────────────────────────────────────────────────────────────
-
-const CONFIG_PRESETS = {
-    low: { lsbBits: 1, opacity: 0.3, signRateMs: 2000, label: 'Low (stealth)' },
-    medium: { lsbBits: 2, opacity: 0.7, signRateMs: 1000, label: 'Medium (balanced)' },
-    high: { lsbBits: 4, opacity: 1.0, signRateMs: 500, label: 'High (maximum)' },
-};
-
-function applyConfigPreset(presetName) {
-    const preset = CONFIG_PRESETS[presetName];
-    if (!preset) return;
-
-    liveConfig.lsbBits = preset.lsbBits;
-    liveConfig.opacity = preset.opacity;
-    liveConfig.signRateMs = preset.signRateMs;
-
-    // Update UI controls
-    if (el.cfgLsbBits) { el.cfgLsbBits.value = preset.lsbBits; }
-    if (el.cfgLsbBitsVal) { el.cfgLsbBitsVal.textContent = preset.lsbBits; }
-    if (el.cfgOpacity) { el.cfgOpacity.value = preset.opacity; }
-    if (el.cfgOpacityVal) { el.cfgOpacityVal.textContent = preset.opacity.toFixed(1); }
-    if (el.cfgSignRate) { el.cfgSignRate.value = preset.signRateMs; }
-    if (el.cfgSignRateVal) { el.cfgSignRateVal.textContent = preset.signRateMs + 'ms'; }
-
-    updateStegoInfo();
-    pushConfigToServer();
-    showToast(`Preset applied: ${preset.label}`, 'success');
-
-    // Highlight active preset button
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    const activeBtn = document.querySelector(`.preset-btn[data-preset="${presetName}"]`);
-    if (activeBtn) activeBtn.classList.add('active');
-}
-
-// Initialize preset buttons if present in DOM
-function initPresetButtons() {
-    document.querySelectorAll('.preset-btn').forEach(btn => {
-        btn.addEventListener('click', () => applyConfigPreset(btn.dataset.preset));
-    });
-}
-
 document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', init) : init();
-

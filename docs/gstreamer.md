@@ -36,12 +36,16 @@ flowchart TD
 
 ## Threading and macOS Integration
 
-Bridging GStreamer with macOS native UI and AVFoundation frameworks (`avfvideosrc`, `osxvideosink`) introduces strict threading constraints:
+`steganographer_gst::init()` initializes GStreamer only: it does not load
+`NSApplication` or start a Cocoa loop. Headless file/test pipelines execute
+on the calling thread, including repeated calls and calls from worker threads.
 
-1. **`NSRunLoop` Requirement**: macOS implicitly requires the main thread to run an active `NSRunLoop` for capturing camera frames and rendering windows. Without it, the pipeline immediately crashes or freezes.
-2. **`gstreamer::macos_main`**: To solve the `NSRunLoop` constraint while still running the heavy steganography pipeline, we use `gstreamer::macos_main()`. This hijacks the main thread to call `[NSApp run]` (pumping the UI/AVFoundation events) and transparently spawns a GCD background thread to execute the Rust `appsink` processing closure.
-3. **Queue Decoupling**: Because the camera capture (AVFoundation) and mathematical steganography run in different timing domains, `queue max-size-buffers=5` elements are synthetically injected into the GStreamer pipeline before the `appsink` and after the `appsrc`. This prevents AppSrc/AppSink blocking from stalling the entire camera.
-4. **Hardware Pool Exhaustion and `AutoReleasePool`**: Apple's `AVCaptureSession` allocates a strict, fixed memory pool of ~35 `CVPixelBuffer` objects. When frames are pulled onto a GCD background thread and dropped after processing, Objective-C targets them for delayed garbage collection. Without an active `NSAutoreleasePool`, the memory leaks, completely draining the hardware pool exactly 1 second in (30 FPS), which permanently halts `avfvideosrc`. To prevent this, the Rust processing loop explicitly pushes and pops an Objective-C `AutoReleasePool` using a custom RAII `Drop` guard.
+On macOS, camera and GUI elements require application-owned Cocoa event
+handling. The CLI dispatches live `video`/`audio` commands through
+`gstreamer::macos_main` **once at process entry, before creating Tokio**.
+Neither individual filters nor file helpers wrap themselves in a Cocoa loop.
+Embedding applications must arrange the same entry-point ownership when using
+camera/window elements; a library call must not take over an existing event loop.
 
 ---
 
@@ -53,27 +57,45 @@ Bridging GStreamer with macOS native UI and AVFoundation frameworks (`avfvideosr
 pub struct VideoFilterConfig {
     pub source_pipeline: String,  // e.g., "videotestsrc ! videoconvert ! video/x-raw,format=RGB"
     pub sink_pipeline: String,    // e.g., "videoconvert ! autovideosink"
+    pub signing_kernel: Option<SigningKernel>, // required with Some(signer)
 }
 ```
 
 ### Processing Flow
 
-1. **Pull** a `GstSample` from the AppSink (with a 5-second timeout and EOS detection)
-2. **Extract** buffer info (width, height, stride) from the sample's caps
-3. **Map** the `GstBuffer` as a writable `VideoFrame`
-4. **Apply** the configured `CompositeVideoStego` chain (e.g. LSB → text overlay → InfoBar)
-5. **Sign** the frame data if a `Signer` is provided
-6. **Set** per-frame PTS timestamps (`buffer.set_pts`) and set caps on the AppSrc (first frame only)
-7. **Push** the modified, timestamped buffer to the AppSrc
+1. Pull samples while checking both buses; source EOS drains queued input.
+2. Parse each sample's caps and checked packed RGB/BGRA layout, gathering
+   pixel bytes without row padding or metadata offsets.
+3. If signing, canonicalize the kernel-owned regions and sign the logical pixels.
+4. Embed, then extract from the actual modified pixels and verify their binding.
+5. Scatter pixels back without modifying padding; preserve buffer timing.
+6. Push samples with their current caps and TIME segment, including renegotiation.
+7. Send output EOS and wait for downstream drain. Source/sink errors and stalled
+   operations return errors; guards return both pipelines to `Null` on failure.
+
+Bridge waits are bounded (15 seconds per stalled operation). The post-embed
+check happens **before AppSrc**; it does not authenticate arbitrary downstream
+codecs, color conversion, container metadata, or a display's rendering.
 
 ```rust
 pub fn run_video_filter(
     config: &VideoFilterConfig,
-    stego: &mut dyn VideoStegoModule,
+    stego: Box<dyn VideoStegoModule>,
     signer: Option<&Signer>,
     max_frames: Option<u64>,
 ) -> anyhow::Result<()>
 ```
+
+`SigningKernel` is `Lsb { bits: u8 }`, `Dct`, or `SpreadSpectrum`.
+The binding must describe the actual module; signing without a binding fails.
+Video LSB and DCT bindings are supported. Trait-based spread-spectrum signing
+is currently rejected: its green-channel mapping differs from the offline CLI
+scalar binding. Audio signing supports LSB only.
+
+The CLI signed live path accepts exactly one invisible kernel and Ed25519.
+Unsupported live encryption/ECC/spreading and invisible-plus-visible
+overlay/InfoBar compositions fail before pipeline startup. Plain rendering
+and unsigned kernel APIs remain separate.
 
 ### Frame Format Mapping
 
@@ -92,21 +114,66 @@ pub fn run_video_filter(
 pub struct AudioFilterConfig {
     pub source_pipeline: String,  // e.g., "audiotestsrc ! audioconvert ! audio/x-raw,format=S16LE"
     pub sink_pipeline: String,    // e.g., "audioconvert ! autoaudiosink"
+    pub signing_kernel: Option<SigningKernel>, // Some(Lsb { bits }) when signing
 }
 ```
 
 ### Processing Flow
 
-1. **Pull** a `GstSample` from the AppSink
-2. **Convert** raw buffer bytes to `&mut [i16]` samples
-3. **Build** an `AudioBuffer` struct
-4. **Apply** the `AudioStegoModule`
-5. **Sign** the audio buffer if a Signer is provided
-6. **Push** the modified buffer to the AppSrc
+`run_audio_filter(config: &AudioFilterConfig, stego: &mut dyn AudioStegoModule,
+signer: Option<&Signer>, max_buffers: Option<u64>) -> anyhow::Result<()>`
+processes each selected input buffer independently. It validates complete
+interleaved S16LE sample frames, signs the canonical PCM before embedding,
+extracts and verifies the modified PCM, and preserves timing/caps/segments
+through the bridge. Extraction later needs the original buffer boundaries and
+indices; arbitrary re-chunking is not equivalent to this live path.
 
 ### Sample Format
 
-Currently supports: **S16LE** (signed 16-bit little-endian), mono.
+Supports **interleaved S16LE** with validated positive rate/channel count and
+complete sample frames, not just mono. Other formats/layouts fail.
+
+### Exact file helpers
+
+Both helpers live in `steganographer_gst::video_filter`:
+
+```rust
+pub fn process_video_file(
+    input_path: &str,
+    output_path: &str,
+    stego: Box<dyn VideoStegoModule>,
+    signer: Option<&Signer>,
+    signing_kernel: Option<SigningKernel>,
+    max_frames: Option<u64>,
+) -> anyhow::Result<()>;
+
+pub fn process_audio_file(
+    input_path: &str,
+    output_path: &str,
+    stego: &mut dyn AudioStegoModule,
+    signer: Option<&Signer>,
+    signing_kernel: Option<SigningKernel>,
+    max_buffers: Option<u64>,
+) -> anyhow::Result<()>;
+```
+
+Video decodes to RGB and writes **raw RGB Matroska (`.mkv`)**. Audio decodes to
+interleaved S16LE and writes **PCM WAV (`.wav`)**, with no conversion after
+embedding. Other output extensions reject. Paths are quoted literal properties,
+not launch-language fragments. Lossy downstream codecs may destroy watermarks;
+no arbitrary lossy-output authentication is promised.
+
+The audio file helper gathers all selected decoded PCM, bounded to **64 MiB**,
+and embeds once at logical index **0**. Without `max_buffers` this means the
+complete file; the limit, empty input, or midstream caps changes are errors,
+not successful truncation. An explicit `max_buffers` selects a prefix.
+Extract from the whole delivered WAV PCM at index 0, not decoder-sized chunks.
+EOS drain finalizes the output container before success.
+
+Release validation delivered and independently checked 17 RGB Matroska frames
+(including padded RGB) and 14,336 WAV samples, plus downstream-error propagation.
+These are headless synthetic-source/file runs, not evidence of physical-camera
+or Windows execution.
 
 ---
 
@@ -195,6 +262,12 @@ bits without changing buffer sizes or caps. Registered via
 `register_elements()` for both cdylib plugin loading and direct application
 registration.
 
+Both native elements require `bits-per-unit` and keyed/sequential placement to
+match the pre-encoded packet descriptors. Malformed packets and mismatched
+configuration post a pipeline error, never clean EOS with silently unembedded
+output. Insufficient buffer capacity remains a warned skip, allowing a later
+sufficiently large buffer to deliver the packet; verify the delivered carrier.
+
 **Pad templates are restricted** to packed one-plane `video/x-raw` formats —
 `RGB`, `BGR`, `RGBx`, `BGRx`, `XRGB`, `XBGR` — so caps negotiation fails
 loudly for anything the byte-sequential kernel cannot address, instead of
@@ -206,9 +279,9 @@ negotiate their own caps and are unaffected.)
 *pixel-only* byte stream (`width × height × bpp` units); padded row-padding
 bytes never carry packet bits. With no padding (`stride == row_bytes`) the
 frame is processed in place; with padding the pixel stream is gathered and
-scattered through a stride-aware slot mapping, and only the first frame is
-allowed to embed across rows (later frames mix the frame index into the key
-derivation).
+scattered through a stride-aware slot mapping. Padding is preserved on every
+frame, including later keyed frames; keyed frame 0 uses the configured key and
+later frames use frame-index-derived keys.
 
 **Property changes apply at frame granularity** (snapshot under a `StreamState`
 mutex in the element's `imp` module): the next frame after a `key-hex` or
@@ -266,6 +339,7 @@ Example application-side registration:
 ```rust
 use steganographer_gst::plugin::register_elements;
 steganographer_gst::init()?;
+register_elements()?;
 let element = gstreamer::ElementFactory::make("stegovideo")
     .property("packet-hex", packet_hex)
     .property("bits-per-unit", 1u32)
@@ -325,6 +399,19 @@ caps="video/x-raw,format=RGB,width=1280,height=720,framerate=30/1"
 ```
 
 The Rust `VideoPipelineConfig` struct provides matching default values through `_or_default()` methods.
+
+The Rust CLI also negotiates these caps for configured test/device/file/network
+sources before signing, without inserting frame-rate resampling. Explicit
+`--source` fragments own their caps and any intentional `videorate` conversion.
+`type = "test"` is the explicit synthetic mode. Device input requires a
+recognized backend; missing/unknown backends are errors, never fake capture.
+
+Configured `.mkv` video and `.wav` audio outputs use private same-directory
+temporary files and publish without clobber only after successful EOS/drain.
+Live or explicit source fragments require a positive `--max-frames` /
+`--max-buffers` when capturing to those managed files. Audio signs the whole
+selected PCM once at index 0 (64 MiB bound). Arbitrary explicit sink fragments
+remain caller-owned and can destroy signature evidence.
 
 ---
 

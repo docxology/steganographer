@@ -25,23 +25,23 @@ opacity = 1.0
 [video.pipeline.payload]
 type = "signature"
 size = 109
-# Signing backend: "ed25519" (default) or "ethereum" (requires --features ethereum)
+# Live signing supports Ed25519; other signing backends are separate core APIs.
 signing_backend = "ed25519"
-# Enable payload encryption (ChaCha20-Poly1305 AEAD)
-# encrypt = true
-# Encryption key (hex-encoded 32 bytes). If omitted with encrypt=true, random key is generated.
+# The encryption/ECC/spreading fields below are offline encode options.
+# Signed live pipelines reject these options rather than silently ignoring them.
+# Use an explicit encryption key or key file for recoverable offline encryption.
 # encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 # Path to encryption key file (overrides encryption_key)
 # encryption_key_file = "keys/encryption.key"
 # Error correction: "none" (default) or "reed_solomon"
 # error_correction = "reed_solomon"
-# Multi-frame signature spreading: spread one signature across N frames (1 = no spreading)
+# Offline RGB LSB spreading: 2–8 frames; 1 disables spreading.
 # multi_frame_spread = 1
 
 [video.input]
-# Input type: "device", "file", "network"
-type = "device"
-# Backend: "v4l2" (Linux), "avfoundation" (macOS), or omit for test source
+# Input type: "test", "device", "file", "network"; test never opens hardware.
+type = "test"
+# Set type = "device" plus a platform backend for real capture.
 # backend = "v4l2"
 # device = "/dev/video0"
 
@@ -51,9 +51,10 @@ type = "device"
 # device = "/dev/video42"
 
 [video.stego]
-# Ordered list of stego modules to apply per frame
-# Available: "lsb_signature", "overlay", "info_bar"
-pipeline = ["lsb_signature", "overlay", "info_bar"]
+# Signed live output uses exactly one invisible kernel.
+# Visible overlay/info_bar modules are separate: mixing them with signed LSB
+# is rejected rather than emitting an invalid signature.
+pipeline = ["lsb_signature"]
 
 [video.stego.lsb_signature]
 # Number of LSBs per pixel byte (1-4). Lower = less visible distortion.
@@ -86,7 +87,7 @@ show_timestamp = true
 [audio]
 
 [audio.input]
-type = "device"
+type = "test"
 # backend = "pulseaudio"
 # backend = "pipewire"
 
@@ -111,11 +112,12 @@ key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 # Entirely disabled unless enabled = true.
 # [ots]
 # enabled = false
-# server_url = "https://opentimestamps.org"
-# method = "bitcoin"              # "bitcoin" | "ethereum"
+# server_url = "https://alice.btc.calendar.opentimestamps.org"
+# method = "bitcoin"              # Bitcoin only
 # interval_secs = 300             # minimum seconds between stamps
 # proof_dir = "ots_proofs"        # directory for .ots proof files
 # timeout_secs = 30               # HTTP request timeout
+# bitcoin_explorer_url = "https://blockstream.info/api" # trusted canonical-chain provider
 
 # ─── Packet Decode Limits (optional) ─────────────────────────────────────────
 #

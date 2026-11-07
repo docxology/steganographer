@@ -1,9 +1,10 @@
 //! `#[wasm_bindgen]` exports over [`crate::api`].
 //!
-//! Signatures use `Vec<u8>` (maps to JS `Uint8Array`), `u16`/`u8`, and
-//! `Option<String>` for the JSON decode-limits override (`null` = defaults).
-//! Every report-returning export serializes the `serde_json::Value` report to
-//! a string. Errors are returned as `Err(String)` messages.
+//! Byte buffers use `Vec<u8>` (JS `Uint8Array`); numeric controls cross as
+//! `f64` so finite integer/range validation precedes u8/u16 narrowing.
+//! `Option<String>` carries JSON decode limits (`null` = defaults).
+//! Reports are JSON strings; packet reports identify their lossless schema
+//! and encode protocol u64 metadata as decimal strings. Errors throw strings.
 
 use wasm_bindgen::prelude::*;
 
@@ -40,18 +41,18 @@ pub fn decode_limits_default() -> String {
 #[wasm_bindgen]
 pub fn packet_encode(
     payload: Vec<u8>,
-    payload_kind: u16,
+    payload_kind: f64,
     packet_id: Vec<u8>,
     nonce: Vec<u8>,
-    bits_per_unit: u8,
+    bits_per_unit: f64,
     limits_json: Option<String>,
 ) -> Result<Vec<u8>, String> {
     api::packet_encode(
         payload,
-        payload_kind,
+        api::js_payload_kind(payload_kind)?,
         packet_id,
         nonce,
-        bits_per_unit,
+        api::js_bits_per_unit(bits_per_unit)?,
         limits(limits_json)?,
     )
 }
@@ -64,18 +65,25 @@ pub fn packet_decode(packet: Vec<u8>, limits_json: Option<String>) -> Result<Str
 // ─── Carriers ───────────────────────────────────────────────────────────────
 
 #[wasm_bindgen]
-pub fn capacity_rgb(carrier: Vec<u8>, bits_per_unit: u8) -> Result<String, String> {
-    to_string(api::capacity_rgb(&carrier, bits_per_unit))
+pub fn capacity_rgb(carrier: Vec<u8>, bits_per_unit: f64) -> Result<String, String> {
+    to_string(api::capacity_rgb(
+        &carrier,
+        api::js_bits_per_unit(bits_per_unit)?,
+    ))
 }
 
 #[wasm_bindgen]
-pub fn capacity_pcm_s16le(carrier: Vec<u8>, bits_per_unit: u8) -> Result<String, String> {
-    to_string(api::capacity_pcm_s16le(&carrier, bits_per_unit))
+pub fn capacity_pcm_s16le(carrier: Vec<u8>, bits_per_unit: f64) -> Result<String, String> {
+    to_string(api::capacity_pcm_s16le(
+        &carrier,
+        api::js_bits_per_unit(bits_per_unit)?,
+    ))
 }
 
 #[wasm_bindgen]
-pub fn embed_rgb(carrier: Vec<u8>, packet: Vec<u8>, bits_per_unit: u8) -> Result<String, String> {
-    let (carrier, report) = api::embed_rgb(carrier, &packet, bits_per_unit)?;
+pub fn embed_rgb(carrier: Vec<u8>, packet: Vec<u8>, bits_per_unit: f64) -> Result<String, String> {
+    let (carrier, report) =
+        api::embed_rgb(carrier, &packet, api::js_bits_per_unit(bits_per_unit)?)?;
     Ok(to_string_now(serde_json::json!({
         "carrier": carrier,
         "report": {
@@ -90,9 +98,10 @@ pub fn embed_rgb(carrier: Vec<u8>, packet: Vec<u8>, bits_per_unit: u8) -> Result
 pub fn embed_pcm_s16le(
     carrier: Vec<u8>,
     packet: Vec<u8>,
-    bits_per_unit: u8,
+    bits_per_unit: f64,
 ) -> Result<String, String> {
-    let (carrier, report) = api::embed_pcm_s16le(carrier, &packet, bits_per_unit)?;
+    let (carrier, report) =
+        api::embed_pcm_s16le(carrier, &packet, api::js_bits_per_unit(bits_per_unit)?)?;
     Ok(to_string_now(serde_json::json!({
         "carrier": carrier,
         "report": {
@@ -106,12 +115,12 @@ pub fn embed_pcm_s16le(
 #[wasm_bindgen]
 pub fn extract_rgb(
     carrier: Vec<u8>,
-    bits_per_unit: u8,
+    bits_per_unit: f64,
     limits_json: Option<String>,
 ) -> Result<String, String> {
     to_string(api::extract_rgb(
         &carrier,
-        bits_per_unit,
+        api::js_bits_per_unit(bits_per_unit)?,
         limits(limits_json)?,
     ))
 }
@@ -119,12 +128,12 @@ pub fn extract_rgb(
 #[wasm_bindgen]
 pub fn extract_pcm_s16le(
     carrier: Vec<u8>,
-    bits_per_unit: u8,
+    bits_per_unit: f64,
     limits_json: Option<String>,
 ) -> Result<String, String> {
     to_string(api::extract_pcm_s16le(
         &carrier,
-        bits_per_unit,
+        api::js_bits_per_unit(bits_per_unit)?,
         limits(limits_json)?,
     ))
 }

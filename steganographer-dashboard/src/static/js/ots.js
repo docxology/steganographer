@@ -1,165 +1,82 @@
-/**
- * ots.js — OpenTimestamps dashboard UI component.
- *
- * Shows the OTS attestation status, last timestamp, proof count, and a
- * "Stamp Now" button that triggers POST /ots/stamp. All failures degrade
- * gracefully: if the OTS server is down the indicator shows "unavailable"
- * rather than throwing.
- */
+/** Real current-media OpenTimestamps status. A calendar receipt is not Bitcoin verification. */
 (function () {
-  'use strict';
-
-  const REFRESH_MS = 15000;
-
-  /** Build the OTS panel DOM and insert it into the given container. */
-  function buildPanel(container) {
-    container.innerHTML = `
-      <div class="ots-panel" id="ots-panel">
-        <div class="ots-header">
-          <span class="ots-indicator" id="ots-indicator">●</span>
-          <span class="ots-label">OpenTimestamps</span>
-          <span class="ots-status" id="ots-status">checking…</span>
-        </div>
-        <div class="ots-body">
-          <div class="ots-row">
-            <span class="ots-key">Last timestamp</span>
-            <span class="ots-val" id="ots-last-ts">—</span>
-          </div>
-          <div class="ots-row">
-            <span class="ots-key">Proofs</span>
-            <span class="ots-val" id="ots-proofs-count">0</span>
-          </div>
-          <div class="ots-row">
-            <span class="ots-key">Verified</span>
-            <span class="ots-val" id="ots-verified">—</span>
-          </div>
-        </div>
-        <button class="ots-stamp-btn" id="ots-stamp-btn" disabled>Stamp Now</button>
-      </div>
-    `;
-  }
-
-  /** Format a Unix-seconds timestamp into a human-readable UTC string. */
-  function formatTimestamp(unixSecs) {
-    if (!unixSecs || unixSecs === 0) return '—';
-    const d = new Date(unixSecs * 1000);
-    if (isNaN(d.getTime())) return '—';
-    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  }
-
-  /** Update the UI from a status JSON payload. */
-  function applyStatus(data) {
-    const indicator = document.getElementById('ots-indicator');
-    const statusEl = document.getElementById('ots-status');
-    const stampBtn = document.getElementById('ots-stamp-btn');
-
-    const enabled = data.enabled;
-    const available = data.available;
-    const status = data.status || 'unknown';
-
-    // Status indicator colour
-    const colours = {
-      ready: '#4caf50',
-      disabled: '#888',
-      unavailable: '#f44336',
-    };
-    indicator.style.color = colours[status] || '#888';
-    statusEl.textContent = status;
-
-    if (enabled && available) {
-      stampBtn.disabled = false;
-    } else {
-      stampBtn.disabled = true;
+    'use strict';
+    let initialized = false, busy = false, refreshPromise = null, refreshAgain = false, timer = null;
+    let currentStatus = null, outcome = null;
+    const node = id => document.getElementById(id);
+    function render() {
+        if (!initialized) return;
+        const status = currentStatus;
+        node('ots-status').textContent = !status ? 'checking…' : status.status || 'unknown';
+        node('ots-stamp-btn').disabled = busy || !status?.enabled || !status?.available || !status?.can_stamp || !status?.has_media;
+        node('ots-stamp-btn').textContent = busy ? 'Stamping…' : 'Stamp current signed media';
+        node('ots-media-digest').textContent = status?.media_digest || 'No signed media available';
+        node('ots-media-digest').title = status?.media_digest || '';
+        const proof = status?.proof || outcome;
+        const matches = proof?.digest && proof.digest === status?.media_digest;
+        const verified = matches && (status?.verified === true || proof?.verified === true);
+        const pending = matches && (status?.pending === true || proof?.pending === true);
+        node('ots-verified').textContent = verified ? 'Bitcoin commitment verified (trusted explorer)' :
+            pending ? 'Pending — not Bitcoin-confirmed/verified' : matches ? 'Receipt saved — not verified' : 'No proof verified for current media';
+        node('ots-indicator').style.color = verified ? '#4caf50' : pending ? '#e9a426' : '#888';
+        if (status && !status.has_media) node('ots-status').textContent = status.enabled ? 'Waiting for signed media' : 'disabled';
+        else if (status?.enabled && status.available && !status.can_stamp) node('ots-status').textContent = 'Stamp interval not yet elapsed';
     }
-  }
-
-  /** Update OTS metric fields from a WebSocket / API metrics payload. */
-  function applyMetrics(metrics) {
-    if (!metrics) return;
-    const proofs = metrics.ots_proofs_generated ?? metrics.ots_proofs_count ?? 0;
-    const lastTs = metrics.ots_last_timestamp ?? 0;
-    const verified = metrics.ots_last_verified ?? metrics.ots_verified ?? null;
-
-    const proofsEl = document.getElementById('ots-proofs-count');
-    const tsEl = document.getElementById('ots-last-ts');
-    const verifiedEl = document.getElementById('ots-verified');
-
-    if (proofsEl) proofsEl.textContent = proofs;
-    if (tsEl) tsEl.textContent = formatTimestamp(lastTs);
-    if (verifiedEl) {
-      if (verified === null || verified === undefined) {
-        verifiedEl.textContent = '—';
-      } else {
-        verifiedEl.textContent = verified ? '✓ yes' : '✗ no';
-        verifiedEl.style.color = verified ? '#4caf50' : '#f44336';
-      }
+    function applyMetrics(metrics) {
+        if (!initialized || !metrics) return;
+        const count = metrics.ots_proofs_generated ?? metrics.ots_proofs_count;
+        if (count != null) node('ots-proofs-count').textContent = String(count);
+        // Only /ots/status binds a proof to the latest exact media digest.
+        // An aggregate false metric is not a failed verification.
     }
-  }
-
-  /** Fetch GET /ots/status and refresh the panel. */
-  async function refreshStatus() {
-    try {
-      const resp = await fetch('/ots/status');
-      if (!resp.ok) {
-        applyStatus({ enabled: false, available: false, status: 'unavailable' });
-        return;
-      }
-      const data = await resp.json();
-      applyStatus(data);
-    } catch (_e) {
-      applyStatus({ enabled: false, available: false, status: 'unavailable' });
+    async function refreshStatus() {
+        if (!initialized) return;
+        if (refreshPromise) { refreshAgain = true; return refreshPromise; }
+        refreshPromise = (async () => {
+            do {
+                refreshAgain = false;
+                try {
+                    const response = await fetch('/ots/status', { headers: authHeaders(), signal: AbortSignal.timeout(5000) });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    currentStatus = await response.json(); render(); applyMetrics(currentStatus);
+                } catch (_) {
+                    currentStatus = { status: 'unavailable', enabled: false, available: false };
+                    render();
+                }
+            } while (refreshAgain);
+        })();
+        try { await refreshPromise; } finally { refreshPromise = null; }
     }
-  }
-
-  /** Trigger POST /ots/stamp. */
-  async function stampNow() {
-    const btn = document.getElementById('ots-stamp-btn');
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = 'Stamping…';
-    try {
-      // Authorization: Bearer <token> when the dashboard runs with auth
-      // enabled (token ingested from ?token= by app.js into sessionStorage).
-      const token = sessionStorage.getItem('auth_token');
-      const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
-      const resp = await fetch('/ots/stamp', { method: 'POST', headers: headers });
-      const data = await resp.json().catch(() => ({}));
-      if (resp.ok && data.status === 'stamped') {
-        btn.textContent = '✓ Stamped';
-        refreshStatus();
-      } else if (data.kind === 'unavailable' || data.kind === 'unreachable') {
-        btn.textContent = 'Unavailable';
-      } else {
-        btn.textContent = '✗ Failed';
-      }
-    } catch (_e) {
-      btn.textContent = 'Unavailable';
+    async function stampNow() {
+        if (busy || node('ots-stamp-btn').disabled) return;
+        busy = true; render();
+        try {
+            // Empty body explicitly requests the backend's latest signed-media SHA256.
+            // The backend rejects missing media; it never substitutes session uptime.
+            const response = await fetch('/ots/stamp', { method: 'POST', headers: authHeaders(), signal: AbortSignal.timeout(30000) });
+            const data = await response.json();
+            if (!response.ok || !['pending', 'stamped', 'verified'].includes(data.status) || !/^[0-9a-f]{64}$/i.test(data.digest || '')) {
+                throw new Error(data.message || `Stamp rejected: ${data.status || response.status}`);
+            }
+            outcome = data;
+            showToast(data.verified === true ? 'Bitcoin commitment verified' : 'Calendar receipt saved — Bitcoin verification pending', 'info');
+        } catch (error) { showToast('Timestamp not obtained: ' + error.message, 'error'); }
+        finally { busy = false; await refreshStatus(); render(); }
     }
-    setTimeout(() => {
-      btn.textContent = 'Stamp Now';
-      refreshStatus();
-    }, 2500);
-  }
-
-  /** Expose a hook so app.js / app.js can feed live WS metrics into the panel. */
-  window.OtsPanel = {
-    applyMetrics: applyMetrics,
-    refreshStatus: refreshStatus,
-  };
-
-  /** Initialise the panel when the DOM is ready. */
-  function init() {
-    const container = document.getElementById('ots-container');
-    if (!container) return; // OTS panel not present in this page
-    buildPanel(container);
-    document.getElementById('ots-stamp-btn').addEventListener('click', stampNow);
-    refreshStatus();
-    setInterval(refreshStatus, REFRESH_MS);
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+    function init() {
+        const container = node('ots-container');
+        if (!container || initialized) return;
+        container.innerHTML = `<div class="ots-panel"><div class="ots-header"><span id="ots-indicator">●</span>
+            <strong>OpenTimestamps — current signed artifact</strong><span id="ots-status">checking…</span></div>
+            <div class="ots-row"><span>SHA256 commitment</span><code id="ots-media-digest">—</code></div>
+            <div class="ots-row"><span>Calendar receipts (session)</span><span id="ots-proofs-count">0</span></div>
+            <div class="ots-row"><span id="ots-verified">No proof verified for current media</span></div>
+            <p>Stamps the latest exact signed PNG or PCM artifact held by the server. A pending receipt is not Bitcoin verification or independent proof of authorship.</p>
+            <button id="ots-stamp-btn" disabled>Stamp current signed media</button></div>`;
+        initialized = true; node('ots-stamp-btn').addEventListener('click', stampNow);
+        refreshStatus(); timer = setInterval(refreshStatus, 15000);
+        window.addEventListener('pagehide', () => clearInterval(timer));
+    }
+    window.OtsPanel = { applyMetrics, refreshStatus };
+    document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', init) : init();
 })();

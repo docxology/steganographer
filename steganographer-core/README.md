@@ -1,7 +1,6 @@
 # steganographer-core
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-537-brightgreen)
 Pure, media-agnostic algorithms for steganographic embedding, cryptographic signing, and configuration. This is the foundational crate with zero GStreamer or I/O dependencies.
 
 ## Modules
@@ -14,6 +13,7 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 | `video` | `src/video.rs` | `VideoFrame` struct, `VideoFormat` enum, `VideoStegoModule` trait |
 | `audio` | `src/audio.rs` | `AudioBuffer` struct, `AudioStegoModule` trait |
 | `crypto` | `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload` — BLAKE3 + Ed25519 |
+| `revocation` | `src/revocation.rs` | Known-compromise checks and normalized additional public-key registries; authorization is separate from raw signature mathematics |
 | `signer_backend` | `src/signer_backend.rs` | `SignerBackend` / `Ed25519Backend` / `EthereumBackend` / `MlDsaBackend` / `HybridBackend` + public-key-only `MlDsaVerifier` / `HybridVerifier` (real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate) |
 | `config` | `src/config.rs` | `Config` TOML parsing, hex key decoding, overlay/info_bar config |
 | `lsb_video` | `src/lsb_video.rs` | `LsbVideo` — 1–4 bit LSB video embed/extract with length prefix |
@@ -29,9 +29,10 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 
 ## Tests
 
-- **Unit tests**: 381 inline tests across all modules
-- **Integration tests**: 125 tests (`80` in `tests/integration_tests.rs` + `37` in `tests/ots_integration_tests.rs` + `6` in `tests/golden_vectors.rs` + `2` in `tests/calibration.rs` — the FOR-001 detector calibration corpus)
-- **Total**: 537 tests (core only; unit + integration + doc-tests)
+- Inline tests and real integration suites exercise cryptographic, parser,
+  carrier, signal, forensics and OpenTimestamps boundaries.
+- Frozen packet vectors and the detector calibration corpus remain immutable.
+- Canonical observed workspace totals live in [`../AGENTS.md`](../AGENTS.md).
 
 ```bash
 cargo test -p steganographer-core
@@ -60,6 +61,7 @@ lib.rs
 ├── video.rs             → VideoFrame / VideoStegoModule trait
 ├── audio.rs             → AudioBuffer / AudioStegoModule trait
 ├── crypto.rs            → Signer + Verifier (BLAKE3 hash, Ed25519 sign)
+├── revocation.rs        → immutable compromise policy + normalized additional registries
 ├── signer_backend.rs    → SignerBackend trait + Ed25519/Ethereum/ML-DSA/Hybrid impls (+ public-key-only verifiers)
 ├── config.rs            → Config model + TOML parsing
 ├── lsb_video.rs         → LsbVideo implements VideoStegoModule

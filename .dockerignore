@@ -1,5 +1,9 @@
 # Build artifacts
-target/
+**/target/
+**/fuzz/artifacts/
+**/fuzz/corpus/
+dist/
+.git/
 
 # Cargo lock is needed for builds but not for library crates
 # Cargo.lock

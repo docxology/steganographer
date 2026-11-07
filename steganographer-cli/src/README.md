@@ -4,18 +4,21 @@ Source modules for the CLI binary.
 
 ## Files
 
-| File | Lines | Purpose |
-| ------ | ------- | --------- |
-| `main.rs` | 1316 | Clap `#[derive(Parser)]` CLI with 15 subcommands, logging init, dispatch |
-| `cmd_video.rs` | 257 | Loads config, builds GStreamer video source/sink pipelines, runs `run_video_filter()` |
-| `cmd_audio.rs` | 141 | Loads config, builds GStreamer audio source/sink pipelines, runs `run_audio_filter()` |
-| `cmd_encode.rs` | 1589 | Reads raw file → auto-generates signing key → embeds LSB → writes output. Also handles `keygen`, `info`, `analyze`, `derive`, `revoke` |
-| `cmd_verify.rs` | 1349 | Reads raw file → extracts LSB signature → `--format plain\|json` output → `VerifyResult` struct |
-| `cmd_packet.rs` | 1092 | Opt-in generic packet v1 alpha encode/decode |
-| `cmd_scan.rs` | 590 | Bounded forensic scan over files and directory trees |
-| `cmd_ots.rs` | 431 | OpenTimestamps `stamp` / `verify` attestation |
-| `media_io.rs` | 346 | Descriptor-preserving image/WAV/raw I/O and output policy |
-| `carrier_binding.rs` | 133 | Kernel-canonical carrier bytes for signing |
+| File | Purpose |
+| --- | --- |
+| `cli.rs` | Shared Clap schema for the binary, generated completions and manuals |
+| `main.rs` | Logging/envelope initialization and command dispatch |
+| `envelope.rs` | Versioned machine output and semantic exit codes |
+| `key_policy.rs` | Zeroized signing-key loading, immutable compromise checks and shared fail-closed revocation policy |
+| `cmd_video.rs` | Config-driven native video pipelines |
+| `cmd_audio.rs` | Config-driven native audio pipelines |
+| `cmd_encode.rs` | Offline signing/embedding, keygen, info, analyze, derive and revoke |
+| `cmd_verify.rs` | Signature extraction, mathematical verification and authorization status |
+| `cmd_packet.rs` | Generic packet encode/decode/extraction |
+| `cmd_scan.rs` | Bounded forensic scans of files and directory trees |
+| `cmd_ots.rs` | OpenTimestamps stamp/verify |
+| `media_io.rs` | Descriptor-preserving image/WAV/raw I/O and atomic output policy |
+| `carrier_binding.rs` | Kernel-canonical carrier bytes for signing |
 
 ## Subcommands
 
@@ -26,6 +29,7 @@ steganographer
 ├── encode     --input <file> --output <file> --stego-type <type> --bits <1-4>
 ├── decode     --input <file> --output <file> [--bits auto|<1-4>]
 ├── verify     --input <file> --stego-type <type> [--public-key <hex>] [--format plain|json]
+├── extract    --input <file> --output <file> [--revoked-list <file>]
 ├── keygen     --output <path>     → writes <path>.key + <path>.pub
 ├── info       --input <file> --stego-type <type> --bits <1-4>
 ├── analyze    --input <file> [--analysis-type combined|chi_squared|sample_pairs|rs]
@@ -33,7 +37,7 @@ steganographer
 ├── derive     (--master-secret <hex> | --master-secret-file <path> | --master-secret-stdin)
 ├── config     check
 ├── revoke     --public-key <hex>
-├── dashboard  --port <port> [--backend ed25519|ethereum]
+├── dashboard  --port <port> [--backend ed25519]
 └── ots        stamp|verify --input <file>
 ```
 

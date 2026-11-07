@@ -50,11 +50,16 @@ fn gf_pow(mut base: u8, mut exponent: u32) -> u8 {
 
 /// GF(2^8) multiplicative inverse.
 fn gf_inv(value: u8) -> u8 {
-    if value == 0 {
-        return 0;
-    }
-    // Fermat's little theorem in GF(2^8): a^-1 = a^(2^8 - 2).
-    gf_pow(value, 254)
+    static INVERSES: std::sync::LazyLock<[u8; 256]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|value| {
+            if value == 0 {
+                0
+            } else {
+                gf_pow(value as u8, 254)
+            }
+        })
+    });
+    INVERSES[value as usize]
 }
 
 /// GF(2^8) division. Returns zero when the denominator is zero.
@@ -95,8 +100,10 @@ pub fn encode(data: &[u8], parity_count: usize) -> anyhow::Result<Vec<u8>> {
 
     let codeword_len = data.len() + parity_count;
     let mut codeword = Vec::with_capacity(codeword_len);
-    for i in 0..codeword_len {
-        codeword.push(gf_poly_eval(data, gf_pow(ALPHA, i as u32)));
+    let mut point = 1;
+    for _ in 0..codeword_len {
+        codeword.push(gf_poly_eval(data, point));
+        point = gf_mul(point, ALPHA);
     }
     Ok(codeword)
 }
@@ -174,11 +181,13 @@ fn validate_lengths(data_len: usize, parity_count: usize) -> anyhow::Result<()> 
 }
 
 fn mismatch_count(message: &[u8], received: &[u8]) -> usize {
-    received
-        .iter()
-        .enumerate()
-        .filter(|(i, value)| gf_poly_eval(message, gf_pow(ALPHA, *i as u32)) != **value)
-        .count()
+    let mut point = 1;
+    let mut mismatches = 0;
+    for &value in received {
+        mismatches += usize::from(gf_poly_eval(message, point) != value);
+        point = gf_mul(point, ALPHA);
+    }
+    mismatches
 }
 
 /// Recover a message with the Berlekamp-Welch construction.
@@ -239,17 +248,18 @@ fn solve_linear_system(mut matrix: Vec<Vec<u8>>, variable_count: usize) -> anyho
             *cell = gf_mul(*cell, inverse);
         }
 
-        for row in 0..row_count {
-            if row == next_row {
-                continue;
-            }
-            let factor = matrix[row][column];
+        let (before, pivot_and_after) = matrix.split_at_mut(next_row);
+        let (pivot, after) = pivot_and_after.split_first_mut().expect("pivot row exists");
+        for row in before.iter_mut().chain(after.iter_mut()) {
+            let factor = row[column];
             if factor == 0 {
                 continue;
             }
-            let pivot = matrix[next_row][column..=variable_count].to_vec();
-            for (offset, cell) in matrix[row][column..=variable_count].iter_mut().enumerate() {
-                *cell ^= gf_mul(factor, pivot[offset]);
+            for (cell, &pivot_cell) in row[column..=variable_count]
+                .iter_mut()
+                .zip(&pivot[column..=variable_count])
+            {
+                *cell ^= gf_mul(factor, pivot_cell);
             }
         }
 
@@ -287,6 +297,9 @@ fn polynomial_divide_exact(
 ) -> anyhow::Result<Vec<u8>> {
     if denominator.is_empty() || *denominator.last().unwrap_or(&0) == 0 {
         anyhow::bail!("Invalid Reed-Solomon error-locator polynomial");
+    }
+    if expected_len == 0 && numerator.iter().all(|&coefficient| coefficient == 0) {
+        return Ok(Vec::new());
     }
     if numerator.len() < denominator.len() {
         anyhow::bail!("Invalid Reed-Solomon polynomial degrees");
@@ -329,37 +342,28 @@ fn lagrange_interpolate(values: &[u8], k: usize) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("Not enough values for interpolation");
     }
 
-    let points: Vec<u8> = (0..k).map(|i| gf_pow(ALPHA, i as u32)).collect();
+    // Newton divided differences, then convert from Newton to monomial
+    // form in place. Both stages are O(k²); only the returned Vec allocates.
+    let mut points = [0u8; MAX_CODEWORD_LEN];
+    points[0] = 1;
+    for i in 1..k {
+        points[i] = gf_mul(points[i - 1], ALPHA);
+    }
+    let mut divided = [0u8; MAX_CODEWORD_LEN];
+    divided[..k].copy_from_slice(&values[..k]);
+    for order in 1..k {
+        for j in (order..k).rev() {
+            divided[j] = gf_div(divided[j] ^ divided[j - 1], points[j] ^ points[j - order]);
+        }
+    }
     let mut result = vec![0u8; k];
-
-    for j in 0..k {
-        let mut denominator = 1u8;
-        for i in 0..k {
-            if i != j {
-                denominator = gf_mul(denominator, points[j] ^ points[i]);
-            }
+    result[0] = divided[k - 1];
+    for (degree, j) in (0..k - 1).rev().enumerate() {
+        result[degree + 1] = result[degree];
+        for i in (1..=degree).rev() {
+            result[i] = result[i - 1] ^ gf_mul(points[j], result[i]);
         }
-        if denominator == 0 {
-            anyhow::bail!("Degenerate interpolation: duplicate evaluation points");
-        }
-        let scale = gf_mul(values[j], gf_inv(denominator));
-
-        let mut basis = vec![1u8];
-        for (i, &point) in points.iter().enumerate().take(k) {
-            if i == j {
-                continue;
-            }
-            let mut next_basis = vec![0u8; basis.len() + 1];
-            for (degree, &coefficient) in basis.iter().enumerate() {
-                next_basis[degree + 1] ^= coefficient;
-                next_basis[degree] ^= gf_mul(coefficient, point);
-            }
-            basis = next_basis;
-        }
-
-        for (degree, &coefficient) in basis.iter().enumerate() {
-            result[degree] ^= gf_mul(scale, coefficient);
-        }
+        result[0] = gf_mul(points[j], result[0]) ^ divided[j];
     }
 
     Ok(result)

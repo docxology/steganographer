@@ -1,894 +1,956 @@
-//! Bounded structural PDF analysis (DOC-004; plan spec 03 §Documents).
-//!
-//! Hand-rolled structural tokenizer with **no new dependencies**: header and
-//! version probing, `%%EOF` inventory, trailer/`startxref`/xref sanity, a
-//! bounded object-keyword scan (`/EmbeddedFile`, `/EmbeddedFiles`,
-//! `/JavaScript`, `/JS`, `/OpenAction`, `/Launch`, `/URI`, `/AcroForm`,
-//! `/Filter` chains), XMP metadata presence, and a literal-string text
-//! channel that runs the [`crate::unicode_text`] detectors over extracted
-//! strings. Detection only — no rendering, no JavaScript execution.
-//! Invisible-text rendering heuristics (text render mode 3, off-page `Td`
-//! positioning) are out of scope and skipped (see the registry calibration
-//! note).
-//!
-//! Every step is bounds-checked against hostile input: oversized files,
-//! runaway object counts, oversized literal strings, lying `/Length` claims,
-//! and truncated/corrupt structure never panic — they surface as bounded
-//! findings. Malformed-structure errors fold into a single consolidated
-//! finding.
-//!
-//! Finding families (reported as [`super::ContainerFinding`] strings):
-//!
-//! - [`PDF_FAMILY`] — structural inventory/observations for every parseable
-//!   PDF (version, object/EOF inventory, xref status, XMP/AcroForm/http(s)
-//!   URI notes). Observations never set
-//!   [`super::ForensicScan::detected`].
-//! - [`DOC_004_FAMILY`] — concealment/anomaly evidence: embedded files,
-//!   JavaScript/OpenAction/Launch actions, dangerous URI schemes, `/Crypt`
-//!   or stacked filters on non-image streams, appended data after the last
-//!   `%%EOF`, text-channel hits, budget rejections, and the consolidated
-//!   malformed-structure finding. These are detections and do set
-//!   `detected`.
+//! Bounded lexical PDF inspection, not a renderer or a complete PDF validator.
+//! Names, comments, literal/hex strings and stream bytes are kept distinct.
+//! Unsupported encodings, compressed object streams and exhausted budgets are
+//! explicitly incomplete; observations alone never become concealment verdicts.
 
-use super::ooxml;
-use super::ContainerFinding;
+use super::{incomplete, ooxml, ContainerAnalysis, ContainerFinding};
 use crate::unicode_text;
-use flate2::read::DeflateDecoder;
+use flate2::read::ZlibDecoder;
+use std::borrow::Cow;
 use std::io::Read as _;
 
-/// Stable detector family ID: PDF concealment/anomaly detections (DOC-004).
 pub const DOC_004_FAMILY: &str = "DOC-004";
-/// Stable detector family ID: PDF structural inventory/observations.
 pub const PDF_FAMILY: &str = "PDF";
-
-/// Maximum input size accepted for PDF structural analysis; larger buffers
-/// are reported as a single budget finding and skipped.
 pub const PDF_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
-/// Maximum number of `N 0 obj` bodies inspected in one scan; later objects
-/// are reported as truncated evidence, never silently dropped.
 pub const PDF_MAX_OBJECTS_SCANNED: usize = 8192;
-/// Maximum decoded length of a single PDF literal/hex string.
 pub const PDF_MAX_STRING_LENGTH: usize = 4096;
-/// Maximum bytes of one object body inspected (the per-object dict window).
 pub const PDF_MAX_OBJECT_WINDOW_BYTES: usize = 64 * 1024;
-/// Total extracted-text budget for the literal-string text channel.
 pub const PDF_MAX_TEXT_BYTES: usize = unicode_text::MAX_TEXT_SCAN_BYTES;
-/// Maximum bytes of one stream considered for inflation/text extraction.
 pub const PDF_MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum inflated bytes accepted for one stream.
 pub const PDF_MAX_STREAM_INFLATE_BYTES: usize = 256 * 1024;
-/// Maximum total inflated bytes across all streams in one scan.
 pub const PDF_MAX_STREAM_INFLATE_TOTAL: usize = 1024 * 1024;
-/// Maximum number of streams inflated in one scan.
 pub const PDF_MAX_STREAMS_INFLATED: usize = 16;
-/// Maximum number of findings emitted per PDF.
 pub const PDF_MAX_FINDINGS: usize = 64;
-/// Header search window: `%PDF-` must appear within the first 1024 bytes.
 const HEADER_WINDOW_BYTES: usize = 1024;
-/// Bound for one finding's `detail` string (bytes).
 const DETAIL_MAX_BYTES: usize = 256;
-
-/// Object keywords that mark concealment/execution channels, with the
-/// evidence phrase used in the finding detail.
-const SUSPICIOUS_KEYWORDS: &[(&str, &str)] = &[
-    ("/EmbeddedFile", "embedded file payload"),
-    ("/EmbeddedFiles", "embedded file name tree"),
-    ("/JavaScript", "embedded JavaScript"),
-    ("/JS", "JavaScript action payload"),
-    ("/OpenAction", "auto-run action on document open"),
-    ("/Launch", "external application launch"),
+const SUSPICIOUS_KEYWORDS: &[(&[u8], &str)] = &[
+    (b"EmbeddedFile", "embedded file payload (/EmbeddedFile)"),
+    (b"EmbeddedFiles", "embedded file name tree (/EmbeddedFiles)"),
+    (b"JavaScript", "embedded JavaScript (/JavaScript)"),
+    (b"JS", "JavaScript action payload (/JS)"),
+    (b"OpenAction", "auto-run action (/OpenAction)"),
+    (b"Launch", "external application launch (/Launch)"),
 ];
 
-/// URI schemes treated as concealment/execution channels (DOC-004).
-const DANGEROUS_URI_SCHEMES: &[&str] = &["javascript", "vbscript", "file"];
-/// Common external-link schemes reported as observations, not detections.
-const OBSERVED_URI_SCHEMES: &[&str] = &["http", "https", "mailto", "ftp"];
+fn reason(result: &mut ContainerAnalysis, code: &str) {
+    incomplete(&mut result.incomplete_reasons, code);
+}
 
-/// Run the bounded DOC-004 structural scan over a PDF-family buffer.
-///
-/// Never panics on hostile input. Returns findings in detector order:
-/// object-keyword evidence, the structural inventory, consolidated
-/// malformed-structure errors, trailing-data evidence, metadata notes, and
-/// finally the literal-string text channel.
-pub fn analyze_pdf(data: &[u8]) -> Vec<ContainerFinding> {
-    let mut findings: Vec<ContainerFinding> = Vec::new();
-
-    if data.len() > PDF_MAX_FILE_BYTES {
-        push_finding(
-            &mut findings,
-            ContainerFinding {
-                path: "<pdf>".to_string(),
-                family: DOC_004_FAMILY.to_string(),
-                detail: bound_detail(format!(
-                    "pdf is {} bytes, exceeding the {PDF_MAX_FILE_BYTES}-byte scan budget; structural scan skipped",
-                    data.len()
-                )),
-            },
-        );
-        return findings;
-    }
-
-    let header_at = find(data, b"%PDF-", 0).filter(|&at| at < HEADER_WINDOW_BYTES);
-    let Some(header_at) = header_at else {
-        push_finding(
-            &mut findings,
-            ContainerFinding {
-                path: "<pdf>".to_string(),
-                family: DOC_004_FAMILY.to_string(),
-                detail: format!(
-                    "no %PDF- header within the first {HEADER_WINDOW_BYTES} bytes; malformed or disguised PDF"
-                ),
-            },
-        );
-        return findings;
+fn finding(result: &mut ContainerAnalysis, path: &str, positive: bool, detail: String) {
+    result.detected |= positive;
+    let item = ContainerFinding {
+        path: path.to_string(),
+        family: (if positive { DOC_004_FAMILY } else { PDF_FAMILY }).to_string(),
+        detail: bound_detail(detail),
     };
-
-    if header_at > 0 {
-        push_finding(
-            &mut findings,
-            ContainerFinding {
-                path: "header".to_string(),
-                family: DOC_004_FAMILY.to_string(),
-                detail: bound_detail(format!(
-                    "junk prefix of {header_at} bytes before the %PDF- header (polyglot risk)"
-                )),
-            },
-        );
-    }
-    let version = parse_pdf_version(&data[header_at..]);
-
-    // ---- bounded object-keyword scan ----
-    let mut object_findings: Vec<ContainerFinding> = Vec::new();
-    let mut text_buf: Vec<u8> = Vec::new();
-    let mut inflate_total = 0usize;
-    let mut streams_inflated = 0usize;
-    let mut objects_scanned = 0usize;
-    let mut objects_truncated = false;
-    let mut pos = header_at;
-
-    while let Some(at) = find(data, b" obj", pos) {
-        if objects_scanned >= PDF_MAX_OBJECTS_SCANNED {
-            objects_truncated = true;
-            break;
-        }
-        objects_scanned += 1;
-        let label = object_label(data, at);
-        let cap = (at + PDF_MAX_OBJECT_WINDOW_BYTES).min(data.len());
-        let window_end = match find(data, b"endobj", at) {
-            Some(end) if end <= cap => end,
-            _ => cap,
-        };
-        let window = &data[at..window_end];
-
-        // Suspicious object keywords (one combined finding per object).
-        let matched: Vec<String> = SUSPICIOUS_KEYWORDS
-            .iter()
-            .filter(|(keyword, _)| find(window, keyword.as_bytes(), 0).is_some())
-            .map(|(keyword, description)| format!("{description} ({keyword})"))
-            .collect();
-        if !matched.is_empty() {
-            push_finding(
-                &mut object_findings,
-                ContainerFinding {
-                    path: label.clone(),
-                    family: DOC_004_FAMILY.to_string(),
-                    detail: bound_detail(format!(
-                        "{label}: suspicious keywords {}",
-                        matched.join("; ")
-                    )),
-                },
-            );
-        }
-
-        // Interactive forms are common in legitimate PDFs: observation only.
-        if find(window, b"/AcroForm", 0).is_some() {
-            push_finding(
-                &mut object_findings,
-                ContainerFinding {
-                    path: label.clone(),
-                    family: PDF_FAMILY.to_string(),
-                    detail: format!("{label}: interactive form (/AcroForm) present"),
-                },
-            );
-        }
-
-        // URI actions: dangerous schemes are detections; ordinary external
-        // links are observations.
-        if find(window, b"/URI", 0).is_some() {
-            if let Some(value) = extract_uri_value(window) {
-                match classify_uri(&value) {
-                    Some(UriClass::Dangerous(scheme)) => push_finding(
-                        &mut object_findings,
-                        ContainerFinding {
-                            path: label.clone(),
-                            family: DOC_004_FAMILY.to_string(),
-                            detail: bound_detail(format!(
-                                "{label}: URI action with dangerous scheme \"{scheme}:\" (value not reconstructed)"
-                            )),
-                        },
-                    ),
-                    Some(UriClass::Observed(scheme)) => push_finding(
-                        &mut object_findings,
-                        ContainerFinding {
-                            path: label.clone(),
-                            family: PDF_FAMILY.to_string(),
-                            detail: bound_detail(format!(
-                                "{label}: external URI link (scheme {scheme}:)"
-                            )),
-                        },
-                    ),
-                    _ => {}
-                }
-            }
-        }
-
-        // Lying /Length claims: the stream read is bounded regardless, but
-        // the claim itself is worth recording.
-        if let Some(claimed) = parse_dict_length(window) {
-            if claimed > PDF_MAX_STREAM_BYTES as u64 {
-                push_finding(
-                    &mut object_findings,
-                    ContainerFinding {
-                        path: label.clone(),
-                        family: DOC_004_FAMILY.to_string(),
-                        detail: bound_detail(format!(
-                            "{label}: stream /Length claims {claimed} bytes, exceeding the \
-                             {PDF_MAX_STREAM_BYTES}-byte bounded stream window; stream not inflated"
-                        )),
-                    },
-                );
-            }
-        }
-
-        let filters = parse_filter_names(window);
-        let is_image = find(window, b"/Image", 0).is_some();
-        if let Some(filters) = &filters {
-            let names: Vec<String> = filters.to_vec();
-            if !is_image {
-                if names.iter().any(|name| name == "Crypt") {
-                    push_finding(
-                        &mut object_findings,
-                        ContainerFinding {
-                            path: label.clone(),
-                            family: DOC_004_FAMILY.to_string(),
-                            detail: format!(
-                                "{label}: non-image stream uses the /Crypt filter (encrypted content not analyzed)"
-                            ),
-                        },
-                    );
-                } else if names.len() >= 3 {
-                    push_finding(
-                        &mut object_findings,
-                        ContainerFinding {
-                            path: label.clone(),
-                            family: DOC_004_FAMILY.to_string(),
-                            detail: bound_detail(format!(
-                                "{label}: stacked filter chain on non-image stream ({})",
-                                names.join(" / ")
-                            )),
-                        },
-                    );
-                }
-            }
-        }
-
-        // Literal-string text channel: dict strings plus (inflated) stream
-        if !is_image && text_buf.len() < PDF_MAX_TEXT_BYTES {
-            let dict_end = stream_keyword(window).unwrap_or(window.len());
-            collect_strings(&window[..dict_end], &mut text_buf);
-            if let Some(range) = stream_data_range(data, at, window_end) {
-                let filtered = filters.as_ref().is_some_and(|f| !f.is_empty());
-                let has_flate = filters
-                    .as_ref()
-                    .is_some_and(|f| f.iter().any(|name| name == "FlateDecode"));
-                if !filtered {
-                    collect_strings(&data[range], &mut text_buf);
-                } else if has_flate
-                    && streams_inflated < PDF_MAX_STREAMS_INFLATED
-                    && inflate_total < PDF_MAX_STREAM_INFLATE_TOTAL
-                {
-                    let cap = PDF_MAX_STREAM_INFLATE_BYTES
-                        .min(PDF_MAX_STREAM_INFLATE_TOTAL - inflate_total);
-                    streams_inflated += 1;
-                    let mut decoder = DeflateDecoder::new(&data[range]).take(cap as u64);
-                    let mut inflated = Vec::new();
-                    if decoder.read_to_end(&mut inflated).is_ok() {
-                        inflate_total += inflated.len();
-                        collect_strings(&inflated, &mut text_buf);
-                    }
-                }
-            }
-        }
-
-        pos = at + 4;
-    }
-    if objects_truncated {
-        push_finding(
-            &mut object_findings,
-            ContainerFinding {
-                path: "<pdf>".to_string(),
-                family: PDF_FAMILY.to_string(),
-                detail: format!(
-                    "object scan truncated at {PDF_MAX_OBJECTS_SCANNED} objects (budget); later objects not scanned"
-                ),
-            },
-        );
-    }
-
-    // ---- EOF / trailer / xref structure ----
-    let mut eof_positions: Vec<usize> = Vec::new();
-    let mut eof_from = 0usize;
-    while let Some(at) = find(data, b"%%EOF", eof_from) {
-        if eof_positions.len() < 4096 {
-            eof_positions.push(at);
-        }
-        eof_from = at + 5;
-    }
-
-    let mut structural_errors: Vec<String> = Vec::new();
-    if eof_positions.is_empty() {
-        structural_errors.push("no %%EOF marker".to_string());
-    } else if let Some(&last) = eof_positions.last() {
-        let after = &data[(last + 5).min(data.len())..];
-        let appended = after
-            .iter()
-            .filter(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-            .count();
-        if appended > 0 {
-            push_finding(
-                &mut object_findings,
-                ContainerFinding {
-                    path: "trailer".to_string(),
-                    family: DOC_004_FAMILY.to_string(),
-                    detail: bound_detail(format!(
-                        "{appended} byte(s) of data after the last %%EOF (appended payload or incremental-revision residue)"
-                    )),
-                },
-            );
-        }
-    }
-
-    let trailer_present = find(data, b"trailer", header_at).is_some();
-    let xref_stream_style = find(data, b"/XRef", 0).is_some();
-    let trailer_status = if trailer_present {
-        "present"
-    } else if xref_stream_style {
-        "absent (xref-stream style)"
+    if result.findings.len() < PDF_MAX_FINDINGS {
+        result.findings.push(item);
     } else {
-        "absent"
-    };
-    if !trailer_present && !xref_stream_style {
-        structural_errors.push("no trailer dictionary".to_string());
-    }
-
-    let startxref_status;
-    match find(data, b"startxref", header_at) {
-        None => {
-            structural_errors.push("no startxref marker".to_string());
-            startxref_status = "absent";
+        reason(result, "pdf_finding_limit");
+        // Keep a visible positive even if observations used all display slots.
+        if !result.findings[..PDF_MAX_FINDINGS - 1]
+            .iter()
+            .any(|f| f.family == DOC_004_FAMILY)
+        {
+            if positive {
+                result.findings[PDF_MAX_FINDINGS - 2] = item;
+            } else if result.findings[PDF_MAX_FINDINGS - 1].family == DOC_004_FAMILY {
+                result.findings[PDF_MAX_FINDINGS - 2] =
+                    result.findings[PDF_MAX_FINDINGS - 1].clone();
+            }
         }
-        Some(at) => match parse_startxref_value(data, at) {
-            None => {
-                structural_errors.push("startxref value unparsable".to_string());
-                startxref_status = "invalid";
-            }
-            Some(offset) => {
-                if offset >= data.len() {
-                    structural_errors.push(format!(
-                        "startxref offset {offset} is out of bounds (file is {} bytes)",
-                        data.len()
-                    ));
-                    startxref_status = "out of bounds";
-                } else {
-                    let target = &data[offset..];
-                    if target.starts_with(b"xref")
-                        || target.first().is_some_and(|b| b.is_ascii_digit())
-                    {
-                        startxref_status = "ok";
-                    } else {
-                        structural_errors.push(format!(
-                            "startxref points to byte {offset}, which is not an xref table or xref stream object"
-                        ));
-                        startxref_status = "mismatch";
-                    }
-                }
-            }
-        },
-    }
-
-    // ---- structural inventory (observation) ----
-    push_finding(
-        &mut findings,
-        ContainerFinding {
+        result.findings[PDF_MAX_FINDINGS - 1] = ContainerFinding {
             path: "<pdf>".to_string(),
             family: PDF_FAMILY.to_string(),
-            detail: bound_detail(format!(
-                "pdf: version {}, header at byte {header_at}, {objects_scanned} object(s) scanned, \
-                 {} %%EOF marker(s), trailer {trailer_status}, startxref {startxref_status}",
-                version.as_deref().unwrap_or("unknown"),
-                eof_positions.len(),
-            )),
-        },
-    );
-
-    // Malformed-structure errors fold into a single consolidated finding.
-    if !structural_errors.is_empty() {
-        push_finding(
-            &mut findings,
-            ContainerFinding {
-                path: "<pdf>".to_string(),
-                family: DOC_004_FAMILY.to_string(),
-                detail: bound_detail(format!("malformed pdf: {}", structural_errors.join("; "))),
-            },
-        );
+            detail: "finding budget exhausted; further findings suppressed".to_string(),
+        };
     }
+}
 
-    // XMP metadata packet presence (observation).
-    if find(data, b"<?xpacket", 0).is_some() {
-        push_finding(
-            &mut findings,
-            ContainerFinding {
-                path: "metadata".to_string(),
-                family: PDF_FAMILY.to_string(),
-                detail: "XMP metadata packet present".to_string(),
-            },
-        );
-    }
+fn whitespace(b: u8) -> bool {
+    matches!(b, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ')
+}
 
-    findings.extend(object_findings);
+fn delimiter(b: u8) -> bool {
+    whitespace(b)
+        || matches!(
+            b,
+            b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+        )
+}
 
-    // ---- literal-string text channel (DOC-002 detectors over PDF strings) ----
-    if !text_buf.is_empty() {
-        for finding in unicode_text::analyze_bytes(&text_buf) {
-            push_finding(
-                &mut findings,
-                ContainerFinding {
-                    path: "strings".to_string(),
-                    family: DOC_004_FAMILY.to_string(),
-                    detail: bound_detail(ooxml::format_text_finding(&finding)),
-                },
-            );
+#[derive(Debug)]
+enum Token<'a> {
+    Word(&'a [u8]),
+    Name(Cow<'a, [u8]>),
+    String(Vec<u8>, bool),
+    Delimiter(u8),
+    EofMarker(usize),
+}
+
+/// One forward-only lexer. Every next() either consumes input or returns None.
+/// Oversized strings are consumed to their real delimiter within this slice,
+/// but only a bounded prefix is retained. They are never reinterpreted as code.
+struct Lexer<'a> {
+    data: &'a [u8],
+    pos: usize,
+    malformed: bool,
+    limited: bool,
+}
+
+impl<'a> Lexer<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            malformed: false,
+            limited: false,
         }
     }
 
-    findings
-}
-
-/// One object keyword's classification for URI values.
-enum UriClass {
-    Dangerous(String),
-    Observed(String),
-}
-
-/// Classify a decoded URI value by its scheme.
-fn classify_uri(value: &[u8]) -> Option<UriClass> {
-    let window = &value[..value.len().min(128)];
-    let text = String::from_utf8_lossy(window).to_ascii_lowercase();
-    let colon = text.find(':')?;
-    let scheme = text[..colon].trim().to_string();
-    if scheme.is_empty()
-        || !scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-    {
-        return None;
-    }
-    if DANGEROUS_URI_SCHEMES.contains(&scheme.as_str()) {
-        Some(UriClass::Dangerous(scheme))
-    } else if OBSERVED_URI_SCHEMES.contains(&scheme.as_str()) {
-        Some(UriClass::Observed(scheme))
-    } else {
+    fn next(&mut self) -> Option<Token<'a>> {
+        while self.pos < self.data.len() {
+            let start = self.pos;
+            let byte = self.data[self.pos];
+            self.pos += 1;
+            if whitespace(byte) {
+                continue;
+            }
+            match byte {
+                b'%' => {
+                    while self.pos < self.data.len()
+                        && !matches!(self.data[self.pos], b'\r' | b'\n')
+                    {
+                        self.pos += 1;
+                    }
+                    let line_start = self.data[..start]
+                        .iter()
+                        .rposition(|b| matches!(b, b'\r' | b'\n'))
+                        .map_or(0, |p| p + 1);
+                    if self.data[line_start..start].iter().all(|b| whitespace(*b))
+                        && self.data[start..self.pos].starts_with(b"%%EOF")
+                        && self.data[start + 5..self.pos]
+                            .iter()
+                            .all(|b| whitespace(*b))
+                    {
+                        return Some(Token::EofMarker(start));
+                    }
+                }
+                b'/' => {
+                    let name_start = self.pos;
+                    while self.pos < self.data.len() && !delimiter(self.data[self.pos]) {
+                        self.pos += 1;
+                    }
+                    let raw = &self.data[name_start..self.pos];
+                    if !raw.contains(&b'#') {
+                        self.limited |= raw.len() > PDF_MAX_STRING_LENGTH;
+                        return Some(Token::Name(Cow::Borrowed(
+                            &raw[..raw.len().min(PDF_MAX_STRING_LENGTH)],
+                        )));
+                    }
+                    let mut name = Vec::with_capacity(raw.len().min(PDF_MAX_STRING_LENGTH));
+                    let mut at = 0;
+                    while at < raw.len() {
+                        let mut value = raw[at];
+                        at += 1;
+                        if value == b'#' {
+                            if let Some((hi, lo)) = raw
+                                .get(at..at.saturating_add(2))
+                                .and_then(|p| Some((hex_val(p[0])?, hex_val(p[1])?)))
+                            {
+                                value = hi * 16 + lo;
+                                at += 2;
+                            } else {
+                                self.malformed = true;
+                            }
+                        }
+                        if name.len() < PDF_MAX_STRING_LENGTH {
+                            name.push(value);
+                        } else {
+                            self.limited = true;
+                        }
+                    }
+                    return Some(Token::Name(Cow::Owned(name)));
+                }
+                b'(' => {
+                    let mut out = Vec::new();
+                    let mut depth = 1usize;
+                    let mut capped = false;
+                    while self.pos < self.data.len() {
+                        let mut value = self.data[self.pos];
+                        self.pos += 1;
+                        match value {
+                            b'\\' => {
+                                let Some(&escape) = self.data.get(self.pos) else {
+                                    break;
+                                };
+                                self.pos += 1;
+                                value = match escape {
+                                    b'n' => b'\n',
+                                    b'r' => b'\r',
+                                    b't' => b'\t',
+                                    b'b' => 8,
+                                    b'f' => 12,
+                                    b'\n' => continue,
+                                    b'\r' => {
+                                        if self.data.get(self.pos) == Some(&b'\n') {
+                                            self.pos += 1;
+                                        }
+                                        continue;
+                                    }
+                                    b'0'..=b'7' => {
+                                        let mut number = u16::from(escape - b'0');
+                                        for _ in 0..2 {
+                                            match self.data.get(self.pos) {
+                                                Some(&digit @ b'0'..=b'7') => {
+                                                    number = number * 8 + u16::from(digit - b'0');
+                                                    self.pos += 1;
+                                                }
+                                                _ => break,
+                                            }
+                                        }
+                                        number as u8
+                                    }
+                                    other => other,
+                                };
+                            }
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(Token::String(out, capped));
+                                }
+                            }
+                            b'\r' => {
+                                if self.data.get(self.pos) == Some(&b'\n') {
+                                    self.pos += 1;
+                                }
+                                value = b'\n';
+                            }
+                            _ => {}
+                        }
+                        if out.len() < PDF_MAX_STRING_LENGTH {
+                            out.push(value);
+                        } else {
+                            capped = true;
+                        }
+                    }
+                    self.malformed = true;
+                    return Some(Token::String(out, true));
+                }
+                b'<' if self.data.get(self.pos) != Some(&b'<') => {
+                    let mut out = Vec::new();
+                    let mut high = None;
+                    let mut capped = false;
+                    while self.pos < self.data.len() {
+                        let byte = self.data[self.pos];
+                        self.pos += 1;
+                        if byte == b'>' {
+                            if let Some(hi) = high {
+                                if out.len() < PDF_MAX_STRING_LENGTH {
+                                    out.push(hi * 16);
+                                } else {
+                                    capped = true;
+                                }
+                            }
+                            return Some(Token::String(out, capped));
+                        }
+                        if whitespace(byte) {
+                            continue;
+                        }
+                        if let Some(nibble) = hex_val(byte) {
+                            if let Some(hi) = high.take() {
+                                if out.len() < PDF_MAX_STRING_LENGTH {
+                                    out.push(hi * 16 + nibble);
+                                } else {
+                                    capped = true;
+                                }
+                            } else {
+                                high = Some(nibble);
+                            }
+                        } else {
+                            self.malformed = true;
+                        }
+                    }
+                    self.malformed = true;
+                    return Some(Token::String(out, true));
+                }
+                b'<' | b'>' => {
+                    if self.data.get(self.pos) == Some(&byte) {
+                        self.pos += 1;
+                    }
+                    return Some(Token::Delimiter(byte));
+                }
+                b')' | b'[' | b']' | b'{' | b'}' => return Some(Token::Delimiter(byte)),
+                _ => {
+                    while self.pos < self.data.len() && !delimiter(self.data[self.pos]) {
+                        self.pos += 1;
+                    }
+                    return Some(Token::Word(&self.data[start..self.pos]));
+                }
+            }
+        }
         None
     }
 }
 
-/// Extract the string value of a `/URI` key from a dict window, if present.
-///
-/// Iterates every `/URI` occurrence: `/S/URI` (the action-type name value)
-/// yields no string value and the scan continues to the `/URI(…)` key.
-fn extract_uri_value(window: &[u8]) -> Option<Vec<u8>> {
-    let mut from = 0usize;
-    loop {
-        let at = find(window, b"/URI", from)?;
-        let mut i = at + 4;
-        while i < window.len() && matches!(window[i], b' ' | b'\n' | b'\r' | b'\t') {
-            i += 1;
-        }
-        match window.get(i) {
-            Some(b'(') => return decode_literal_string(window, i).map(|(value, _)| value),
-            Some(b'<') if window.get(i + 1) != Some(&b'<') => {
-                return decode_hex_string(window, i).map(|(value, _)| value);
-            }
-            _ => from = at + 1,
-        }
-    }
+struct ScanState {
+    text: Vec<u8>,
+    inflate_total: usize,
+    streams_inflated: usize,
+    xref_stream: bool,
 }
 
-/// Parse the filter chain declared by a `/Filter` key: either a single name
-/// or an array of names. Returns the names without their leading slashes.
-fn parse_filter_names(window: &[u8]) -> Option<Vec<String>> {
-    let at = find(window, b"/Filter", 0)?;
-    let mut i = at + 7;
-    while i < window.len() && matches!(window[i], b' ' | b'\n' | b'\r' | b'\t') {
-        i += 1;
+/// Analyze bounded lexical objects, with a positive latch separate from display
+/// caps. Compressed object streams are explicitly unsupported, never certified
+/// clean. Stream searches are bounded BEFORE traversal.
+pub fn analyze_pdf(input: &[u8]) -> ContainerAnalysis {
+    let mut result = ContainerAnalysis::default();
+    let data = &input[..input.len().min(PDF_MAX_FILE_BYTES)];
+    if data.len() != input.len() {
+        reason(&mut result, "pdf_file_byte_limit");
     }
-    let mut names = Vec::new();
-    match window.get(i) {
-        Some(b'[') => {
-            i += 1;
-            while i < window.len() {
-                match window[i] {
-                    b']' => break,
-                    b'/' => {
-                        if let Some(name) = read_name(window, &mut i) {
-                            names.push(name);
-                        }
+    let header = &data[..data.len().min(HEADER_WINDOW_BYTES)];
+    let Some(header_at) = find(header, b"%PDF-", 0) else {
+        reason(&mut result, "pdf_header_invalid");
+        finding(
+            &mut result,
+            "<pdf>",
+            false,
+            "no %PDF- header within the first 1024 bytes; malformed pdf".to_string(),
+        );
+        return result;
+    };
+    if header_at > 0 {
+        finding(
+            &mut result,
+            "header",
+            true,
+            format!("junk prefix of {header_at} bytes before the %PDF- header (polyglot risk)"),
+        );
+    }
+    let version = parse_pdf_version(&data[header_at..]);
+    if version.is_none() {
+        reason(&mut result, "pdf_header_invalid");
+    }
+    let mut state = ScanState {
+        text: Vec::new(),
+        inflate_total: 0,
+        streams_inflated: 0,
+        xref_stream: false,
+    };
+    let mut lexer = Lexer::new(data);
+    let mut numbers: [Option<u64>; 2] = [None, None];
+    let mut objects = 0usize;
+    let mut eof_count = 0usize;
+    let mut last_eof = None;
+    let mut trailer = false;
+    let mut startxref = None;
+    let mut expect_startxref = false;
+    while let Some(token) = lexer.next() {
+        match &token {
+            Token::Word(b"obj") if numbers[0].is_some() && numbers[1].is_some() => {
+                if objects == PDF_MAX_OBJECTS_SCANNED {
+                    reason(&mut result, "pdf_object_limit");
+                    break;
+                }
+                objects += 1;
+                let label = format!("object {}", numbers[0].unwrap());
+                lexer.pos = scan_object(data, lexer.pos, &label, &mut state, &mut result);
+                numbers = [None, None];
+                continue;
+            }
+            Token::EofMarker(at) => {
+                eof_count += 1;
+                last_eof = Some(*at);
+            }
+            Token::Word(b"trailer") => trailer = true,
+            Token::Word(b"startxref") => expect_startxref = true,
+            Token::Name(name) if name.as_ref() == b"Encrypt" => {
+                reason(&mut result, "pdf_encryption_unsupported")
+            }
+            Token::Word(word) if expect_startxref => {
+                startxref = unsigned(word).and_then(|n| usize::try_from(n).ok());
+                expect_startxref = false;
+            }
+            _ => {}
+        }
+        match token {
+            Token::Word(word) => numbers = [numbers[1], unsigned(word)],
+            _ => numbers = [None, None],
+        }
+    }
+    if lexer.malformed {
+        reason(&mut result, "pdf_lexical_error");
+    }
+    if lexer.limited {
+        reason(&mut result, "pdf_token_limit");
+    }
+    let mut errors = Vec::new();
+    if last_eof.is_none() {
+        errors.push("no %%EOF marker".to_string());
+    }
+    if !trailer && !state.xref_stream {
+        errors.push("no trailer dictionary".to_string());
+    }
+    let xref_status = match startxref {
+        None => {
+            errors.push("no valid startxref marker".to_string());
+            "absent"
+        }
+        Some(at) if at >= data.len() => {
+            errors.push(format!("startxref offset {at} is out of bounds"));
+            "out of bounds"
+        }
+        Some(at) if data[at..].starts_with(b"xref") || data[at].is_ascii_digit() => "ok",
+        Some(_) => {
+            errors.push("startxref target mismatch".to_string());
+            "mismatch"
+        }
+    };
+    let eof_coverage_complete = !result.incomplete_reasons.iter().any(|code| {
+        matches!(
+            code.as_str(),
+            "pdf_file_byte_limit"
+                | "pdf_object_limit"
+                | "pdf_object_byte_limit"
+                | "pdf_object_unterminated"
+                | "pdf_stream_unterminated"
+                | "pdf_stream_eol_invalid"
+                | "pdf_lexical_error"
+        )
+    });
+    if let Some(last) = last_eof.filter(|_| eof_coverage_complete) {
+        let appended = data[last + 5..].iter().filter(|b| !whitespace(**b)).count();
+        if appended > 0 {
+            finding(&mut result, "trailer", true, format!("{appended} byte(s) of data after the last %%EOF (appended payload or incremental-revision residue)"));
+        }
+    }
+    finding(&mut result, "<pdf>", false, format!(
+        "pdf: version {}, header at byte {header_at}, {objects} object(s) scanned, {eof_count} %%EOF marker(s), trailer {}, startxref {xref_status}",
+        version.as_deref().unwrap_or("unknown"), if trailer { "present" } else { "absent" },
+    ));
+    if !errors.is_empty() {
+        reason(&mut result, "pdf_structure_invalid");
+        finding(
+            &mut result,
+            "<pdf>",
+            false,
+            format!("malformed pdf: {}", errors.join("; ")),
+        );
+    }
+    if find(data, b"<?xpacket", 0).is_some() {
+        finding(
+            &mut result,
+            "metadata",
+            false,
+            "XMP metadata packet present".to_string(),
+        );
+    }
+    for text_finding in unicode_text::analyze_bytes(&state.text) {
+        finding(
+            &mut result,
+            "strings",
+            true,
+            ooxml::format_text_finding(&text_finding),
+        );
+    }
+    result
+}
+
+/// Consume one object window once. Stream bytes are skipped atomically and can
+/// never manufacture `obj`, `endobj`, action names or EOF markers.
+fn scan_object(
+    data: &[u8],
+    start: usize,
+    label: &str,
+    state: &mut ScanState,
+    result: &mut ContainerAnalysis,
+) -> usize {
+    let end = start
+        .saturating_add(PDF_MAX_OBJECT_WINDOW_BYTES)
+        .min(data.len());
+    let mut lexer = Lexer::new(&data[start..end]);
+    let mut previous_name: Option<Cow<'_, [u8]>> = None;
+    let mut filter_array = false;
+    let mut dictionary_depth = 0usize;
+    let mut stream_decode_unsupported = false;
+    let mut filters: Vec<Cow<'_, [u8]>> = Vec::new();
+    let mut image = false;
+    let mut claimed_length = None;
+    let mut length_numbers = 0usize;
+    let mut matched = [false; SUSPICIOUS_KEYWORDS.len()];
+    let mut saw_stream = false;
+    let mut closed = false;
+    let mut next = data.len();
+    while let Some(token) = lexer.next() {
+        let filter_value = dictionary_depth == 1 && previous_name.as_deref() == Some(b"Filter");
+        let decode_parameters_value =
+            dictionary_depth == 1 && previous_name.as_deref() == Some(b"DecodeParms");
+        match &token {
+            Token::Name(name) => {
+                for (index, (keyword, _)) in SUSPICIOUS_KEYWORDS.iter().enumerate() {
+                    matched[index] |= name.as_ref() == *keyword;
+                }
+                if name.as_ref() == b"AcroForm" {
+                    finding(
+                        result,
+                        label,
+                        false,
+                        format!("{label}: interactive form (/AcroForm) present"),
+                    );
+                }
+                if name.as_ref() == b"ObjStm" {
+                    reason(result, "pdf_object_stream_unsupported");
+                }
+                if name.as_ref() == b"Encrypt" {
+                    reason(result, "pdf_encryption_unsupported");
+                }
+                if dictionary_depth == 1
+                    && previous_name.as_deref() == Some(b"Type")
+                    && name.as_ref() == b"XRef"
+                {
+                    state.xref_stream = true;
+                }
+                if dictionary_depth == 1
+                    && previous_name.as_deref() == Some(b"Subtype")
+                    && name.as_ref() == b"Image"
+                {
+                    image = true;
+                }
+                if filter_value || filter_array {
+                    if filters.len() < 64 {
+                        filters.push(name.clone());
+                    } else {
+                        reason(result, "pdf_filter_limit");
                     }
-                    _ => i += 1,
                 }
             }
+            Token::String(bytes, capped) => {
+                if *capped {
+                    reason(result, "pdf_string_limit");
+                }
+                if previous_name.as_deref() == Some(b"URI") {
+                    if let Some((dangerous, scheme)) = classify_uri(bytes) {
+                        finding(
+                            result,
+                            label,
+                            dangerous,
+                            format!(
+                                "{label}: {} URI link (scheme {scheme}:)",
+                                if dangerous { "dangerous" } else { "external" }
+                            ),
+                        );
+                    }
+                }
+                push_text(&mut state.text, bytes, *capped, result);
+            }
+            Token::Delimiter(b'[') if filter_value => filter_array = true,
+            Token::Delimiter(b']') => filter_array = false,
+            Token::Delimiter(b'<') => dictionary_depth += 1,
+            Token::Delimiter(b'>') => {
+                if dictionary_depth == 0 {
+                    reason(result, "pdf_lexical_error");
+                }
+                dictionary_depth = dictionary_depth.saturating_sub(1);
+            }
+            Token::Word(b"endobj") => {
+                if dictionary_depth != 0 || filter_array {
+                    reason(result, "pdf_lexical_error");
+                }
+                closed = true;
+                next = start + lexer.pos;
+                break;
+            }
+            Token::Word(b"stream") => {
+                saw_stream = true;
+                if dictionary_depth != 0 || filter_array {
+                    reason(result, "pdf_lexical_error");
+                    stream_decode_unsupported = true;
+                }
+                let keyword_end = start + lexer.pos;
+                if let Some((range, resume)) =
+                    stream_range(data, keyword_end, claimed_length, result)
+                {
+                    if !stream_decode_unsupported {
+                        inspect_stream(&data[range], &filters, image, label, state, result);
+                    }
+                    // Only the small suffix after endstream is lexed for endobj.
+                    let suffix_end = resume
+                        .saturating_add(PDF_MAX_OBJECT_WINDOW_BYTES)
+                        .min(data.len());
+                    let mut suffix = Lexer::new(&data[resume..suffix_end]);
+                    if matches!(suffix.next(), Some(Token::Word(b"endobj"))) {
+                        closed = true;
+                        next = resume + suffix.pos;
+                    } else {
+                        reason(result, "pdf_object_unterminated");
+                        next = resume;
+                    }
+                } else {
+                    next = data.len();
+                }
+                break;
+            }
+            Token::Word(word) => {
+                if dictionary_depth == 1 && previous_name.as_deref() == Some(b"Length") {
+                    claimed_length = unsigned(word);
+                    length_numbers = usize::from(claimed_length.is_some());
+                } else if length_numbers == 1 && unsigned(word).is_some() {
+                    length_numbers = 2;
+                } else if length_numbers == 2 && *word == b"R" {
+                    claimed_length = None;
+                    reason(result, "pdf_indirect_length");
+                    length_numbers = 0;
+                } else {
+                    length_numbers = 0;
+                }
+            }
+            _ => {}
         }
-        Some(b'/') => {
-            names.push(read_name(window, &mut i)?);
+        if filter_value && !matches!(&token, Token::Name(_) | Token::Delimiter(b'[')) {
+            reason(result, "pdf_filter_unsupported");
+            stream_decode_unsupported = true;
         }
-        _ => return None,
-    }
-    Some(names)
-}
-
-/// Read one PDF name token (after its leading slash) starting at `*i`,
-/// advancing `*i` past it.
-fn read_name(window: &[u8], i: &mut usize) -> Option<String> {
-    *i += 1;
-    let start = *i;
-    while *i < window.len()
-        && (window[*i].is_ascii_alphanumeric() || matches!(window[*i], b'-' | b'+' | b'#'))
-    {
-        *i += 1;
-    }
-    if *i == start {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&window[start..*i]).into_owned())
-}
-
-/// Parse a direct numeric `/Length` claim (indirect `N 0 R` references are
-/// ignored: the length is unverifiable without resolving the reference).
-fn parse_dict_length(window: &[u8]) -> Option<u64> {
-    let at = find(window, b"/Length", 0)?;
-    // The keyword must end at a delimiter: "/Length1" (a distinct font key)
-    // is not a /Length claim.
-    if !matches!(
-        window.get(at + 7),
-        Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t')
-    ) {
-        return None;
-    }
-    let mut i = at + 7;
-    while i < window.len() && matches!(window[i], b' ' | b'\n' | b'\r' | b'\t') {
-        i += 1;
-    }
-    let start = i;
-    while i < window.len() && window[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start || i - start > 19 {
-        return None;
-    }
-    let value: u64 = std::str::from_utf8(&window[start..i]).ok()?.parse().ok()?;
-    // An indirect reference looks like "N 0 R": generation number is always 0.
-    let mut j = i;
-    while j < window.len() && window[j] == b' ' {
-        j += 1;
-    }
-    if window.get(j..j + 3) == Some(b"0 R") || window.get(j) == Some(&b'0') {
-        return None;
-    }
-    Some(value)
-}
-
-/// Locate the `stream` keyword in an object window (it must follow an EOL).
-fn stream_keyword(window: &[u8]) -> Option<usize> {
-    let mut from = 0usize;
-    loop {
-        let at = find(window, b"stream", from)?;
-        if at > 0 && matches!(window[at - 1], b'\n' | b'\r') {
-            return Some(at);
+        if previous_name.as_deref() == Some(b"URI") && matches!(&token, Token::Word(_)) {
+            reason(result, "pdf_uri_indirect_unsupported");
         }
-        from = at + 1;
+        if decode_parameters_value && !matches!(&token, Token::Word(b"null")) {
+            reason(result, "pdf_decode_parameters_unsupported");
+            stream_decode_unsupported = true;
+        }
+        previous_name = match token {
+            Token::Name(name) => Some(name),
+            _ => None,
+        };
     }
+    if lexer.malformed {
+        reason(result, "pdf_lexical_error");
+    }
+    if lexer.limited {
+        reason(result, "pdf_token_limit");
+    }
+    if !closed {
+        reason(
+            result,
+            if end < data.len() && !saw_stream {
+                "pdf_object_byte_limit"
+            } else {
+                "pdf_object_unterminated"
+            },
+        );
+    }
+    let mut descriptions = Vec::new();
+    for (index, (_, description)) in SUSPICIOUS_KEYWORDS.iter().enumerate() {
+        if matched[index] {
+            descriptions.push(*description);
+        }
+    }
+    if !descriptions.is_empty() {
+        finding(
+            result,
+            label,
+            true,
+            format!("{label}: suspicious keywords {}", descriptions.join("; ")),
+        );
+    }
+    if !image && filters.iter().any(|name| name.as_ref() == b"Crypt") {
+        finding(
+            result,
+            label,
+            true,
+            format!("{label}: non-image stream uses the /Crypt filter"),
+        );
+    } else if !image && filters.len() >= 3 {
+        finding(
+            result,
+            label,
+            true,
+            format!("{label}: stacked filter chain on non-image stream"),
+        );
+    }
+    next
 }
 
-/// Resolve the raw stream-data range for the object starting at `obj_start`.
-/// The stream is bounded by the next `endstream` and by
-/// [`PDF_MAX_STREAM_BYTES`] — claimed `/Length` values are never trusted for
-/// sizing.
-fn stream_data_range(
+/// Direct lengths are used only if their endpoint agrees with endstream. An
+/// indirect/malformed length falls back to ONE bounded delimiter search, with
+/// explicit ambiguity rather than pretending arbitrary stream bytes are parsed.
+fn stream_range(
     data: &[u8],
-    obj_start: usize,
-    window_end: usize,
-) -> Option<std::ops::Range<usize>> {
-    let keyword = find(data, b"stream", obj_start)
-        .filter(|&at| at < window_end)
-        .filter(|&at| at > 0 && matches!(data[at - 1], b'\n' | b'\r'))?;
-    let mut start = keyword + 6;
-    if data.get(start) == Some(&b'\r') {
-        start += 1;
-    }
-    if data.get(start) == Some(&b'\n') {
-        start += 1;
-    }
-    if start >= data.len() {
-        return None;
-    }
-    let search_end = start.saturating_add(PDF_MAX_STREAM_BYTES).min(data.len());
-    let end = find(data, b"endstream", start)
-        .filter(|&at| at <= search_end)
-        .unwrap_or(search_end);
-    Some(start..end)
-}
-
-/// Decode a PDF literal string starting at the `(` at `start`; returns the
-/// decoded bytes and the index just past the closing `)`. Unbalanced or
-/// oversized strings yield `None`.
-fn decode_literal_string(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
-    let mut out = Vec::new();
-    let mut depth = 1usize;
-    let mut i = start + 1;
-    while i < data.len() {
-        if out.len() > PDF_MAX_STRING_LENGTH {
+    keyword_end: usize,
+    claim: Option<u64>,
+    result: &mut ContainerAnalysis,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let mut start = keyword_end;
+    match data.get(start) {
+        Some(b'\r') => {
+            start += 1;
+            if data.get(start) == Some(&b'\n') {
+                start += 1;
+            }
+        }
+        Some(b'\n') => start += 1,
+        _ => {
+            reason(result, "pdf_stream_eol_invalid");
             return None;
         }
-        match data[i] {
-            b'\\' => {
-                i += 1;
-                let escape = *data.get(i)?;
-                i += 1;
-                match escape {
-                    b'n' => out.push(b'\n'),
-                    b'r' => out.push(b'\r'),
-                    b't' => out.push(b'\t'),
-                    b'b' => out.push(0x08),
-                    b'f' => out.push(0x0C),
-                    b'\n' => {}
-                    b'\r' => {
-                        if data.get(i) == Some(&b'\n') {
-                            i += 1;
-                        }
-                    }
-                    b'0'..=b'7' => {
-                        let mut value = u32::from(escape - b'0');
-                        for _ in 0..2 {
-                            match data.get(i) {
-                                Some(&digit @ b'0'..=b'7') => {
-                                    value = value * 8 + u32::from(digit - b'0');
-                                    i += 1;
-                                }
-                                _ => break,
-                            }
-                        }
-                        out.push(value as u8);
-                    }
-                    other => out.push(other),
-                }
-            }
-            b'(' => {
-                depth += 1;
-                out.push(b'(');
-                i += 1;
-            }
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((out, i + 1));
-                }
-                out.push(b')');
-                i += 1;
-            }
-            _ => {
-                out.push(data[i]);
-                i += 1;
-            }
-        }
     }
+    if let Some(length) = claim {
+        if length > PDF_MAX_STREAM_BYTES as u64 {
+            reason(result, "pdf_stream_byte_limit");
+        } else if let Some(end) = usize::try_from(length)
+            .ok()
+            .and_then(|n| start.checked_add(n))
+            .filter(|end| *end <= data.len())
+        {
+            let mut at = end;
+            if data.get(at) == Some(&b'\r') {
+                at += 1;
+            }
+            if data.get(at) == Some(&b'\n') {
+                at += 1;
+            }
+            if keyword_at(data, at, b"endstream") {
+                return Some((start..end, at + 9));
+            }
+            reason(result, "pdf_stream_length_mismatch");
+        } else {
+            reason(result, "pdf_stream_length_mismatch");
+        }
+    } else {
+        reason(result, "pdf_stream_length_unknown");
+    }
+    let end = start.saturating_add(PDF_MAX_STREAM_BYTES).min(data.len());
+    let window = &data[start..end];
+    let mut from = 0;
+    while let Some(at) = find(window, b"endstream", from) {
+        if at > 0 && matches!(window[at - 1], b'\r' | b'\n') && keyword_at(window, at, b"endstream")
+        {
+            let mut text_end = start + at;
+            if text_end > start && data[text_end - 1] == b'\n' {
+                text_end -= 1;
+            }
+            if text_end > start && data[text_end - 1] == b'\r' {
+                text_end -= 1;
+            }
+            return Some((start..text_end, start + at + 9));
+        }
+        from = at + 9;
+    }
+    reason(result, "pdf_stream_unterminated");
     None
 }
 
-/// Decode a PDF hex string starting at the `<` at `start` (dict delimiters
-/// `<<` are rejected). Returns the decoded bytes and the index just past
-/// the closing `>`; a dangling final nibble is zero-padded.
-fn decode_hex_string(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
-    if data.get(start + 1) == Some(&b'<') {
+fn inspect_stream(
+    bytes: &[u8],
+    filters: &[Cow<'_, [u8]>],
+    image: bool,
+    _label: &str,
+    state: &mut ScanState,
+    result: &mut ContainerAnalysis,
+) {
+    if image {
+        return;
+    } // Pixel/font rendering is outside this lexical scope.
+    if filters.is_empty() {
+        collect_strings(bytes, &mut state.text, result);
+        return;
+    }
+    if filters.len() != 1 || !matches!(filters[0].as_ref(), b"FlateDecode" | b"Fl") {
+        reason(result, "pdf_filter_unsupported");
+        return;
+    }
+    if state.streams_inflated >= PDF_MAX_STREAMS_INFLATED
+        || state.inflate_total >= PDF_MAX_STREAM_INFLATE_TOTAL
+    {
+        reason(result, "pdf_inflate_limit");
+        return;
+    }
+    let cap = PDF_MAX_STREAM_INFLATE_BYTES.min(PDF_MAX_STREAM_INFLATE_TOTAL - state.inflate_total);
+    state.streams_inflated += 1;
+    let mut decoder = ZlibDecoder::new(bytes).take((cap + 1) as u64);
+    let mut decoded = Vec::new();
+    let decode_ok = decoder.read_to_end(&mut decoded).is_ok();
+    if !decode_ok {
+        reason(result, "pdf_flate_invalid");
+    }
+    if decoded.len() > cap {
+        reason(result, "pdf_inflate_limit");
+        decoded.truncate(cap);
+    }
+    state.inflate_total += decoded.len();
+    collect_strings(&decoded, &mut state.text, result);
+}
+
+fn collect_strings(region: &[u8], text: &mut Vec<u8>, result: &mut ContainerAnalysis) {
+    let mut lexer = Lexer::new(region);
+    while let Some(token) = lexer.next() {
+        if text.len() >= PDF_MAX_TEXT_BYTES {
+            reason(result, "pdf_text_byte_limit");
+            break;
+        }
+        if let Token::String(bytes, capped) = token {
+            if capped {
+                reason(result, "pdf_string_limit");
+            }
+            push_text(text, &bytes, capped, result);
+        }
+    }
+    if lexer.malformed {
+        reason(result, "pdf_lexical_error");
+    }
+    if lexer.limited {
+        reason(result, "pdf_token_limit");
+    }
+}
+
+fn push_text(text: &mut Vec<u8>, value: &[u8], capped: bool, result: &mut ContainerAnalysis) {
+    if value.is_empty() {
+        return;
+    }
+    let decoded;
+    let value = if value.starts_with(b"\xfe\xff") || value.starts_with(b"\xff\xfe") {
+        if !(value.len() - 2).is_multiple_of(2) && !capped {
+            reason(result, "pdf_text_encoding_invalid");
+            return;
+        }
+        let little = value.starts_with(b"\xff\xfe");
+        let units = value[2..].as_chunks::<2>().0.iter().map(|pair| {
+            if little {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        });
+        let mut output = String::new();
+        for ch in char::decode_utf16(units) {
+            match ch {
+                Ok(ch) => output.push(ch),
+                Err(_) if capped => {
+                    reason(result, "pdf_text_encoding_invalid");
+                    break;
+                }
+                Err(_) => {
+                    reason(result, "pdf_text_encoding_invalid");
+                    return;
+                }
+            }
+        }
+        decoded = output;
+        decoded.as_str()
+    } else {
+        match std::str::from_utf8(value) {
+            Ok(value) => value,
+            Err(error) if capped => {
+                reason(result, "pdf_text_encoding_invalid");
+                // The decoder's retained prefix can end inside a character.
+                std::str::from_utf8(&value[..error.valid_up_to()]).unwrap_or("")
+            }
+            Err(_) => {
+                reason(result, "pdf_text_encoding_unsupported");
+                return;
+            }
+        }
+    };
+    if value.is_empty() {
+        return;
+    }
+    let separator = usize::from(!text.is_empty());
+    let room = PDF_MAX_TEXT_BYTES
+        .saturating_sub(text.len())
+        .saturating_sub(separator);
+    let mut take = value.len().min(room);
+    while !value.is_char_boundary(take) {
+        take -= 1;
+    }
+    if take < value.len() {
+        reason(result, "pdf_text_byte_limit");
+    }
+    if take == 0 {
+        return;
+    }
+    if separator != 0 {
+        text.push(b'\n');
+    }
+    text.extend_from_slice(&value.as_bytes()[..take]);
+}
+
+fn classify_uri(value: &[u8]) -> Option<(bool, &str)> {
+    let text = std::str::from_utf8(value).ok()?.trim_start();
+    let colon = text.find(':')?;
+    let scheme = &text[..colon];
+    if !scheme
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    {
         return None;
     }
-    let mut out = Vec::new();
-    let mut pending: Option<u8> = None;
-    let mut i = start + 1;
-    while i < data.len() {
-        match data[i] {
-            b'>' => {
-                if let Some(high) = pending {
-                    out.push(high * 16);
-                }
-                return Some((out, i + 1));
-            }
-            digit @ (b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F') => {
-                let nibble = hex_val(digit)?;
-                if out.len() > PDF_MAX_STRING_LENGTH {
-                    return None;
-                }
-                match pending.take() {
-                    Some(high) => out.push(high * 16 + nibble),
-                    None => pending = Some(nibble),
-                }
-            }
-            b' ' | b'\n' | b'\r' | b'\t' => {}
-            _ => return None,
+    for known in ["javascript", "vbscript", "file"] {
+        if scheme.eq_ignore_ascii_case(known) {
+            return Some((true, known));
         }
-        i += 1;
+    }
+    for known in ["http", "https", "mailto", "ftp"] {
+        if scheme.eq_ignore_ascii_case(known) {
+            return Some((false, known));
+        }
     }
     None
 }
 
-fn hex_val(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
+fn unsigned(word: &[u8]) -> Option<u64> {
+    if word.is_empty() || word.len() > 20 || !word.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(word).ok()?.parse().ok()
+}
+
+fn keyword_at(data: &[u8], at: usize, word: &[u8]) -> bool {
+    data.get(at..at.saturating_add(word.len())) == Some(word)
+        && data.get(at + word.len()).is_none_or(|b| delimiter(*b))
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
 
-/// Walk a byte region and append every decodable literal/hex string to
-/// `text` (newline-joined). Only strings that are valid UTF-8 within the
-/// per-string budget are kept, so `text` stays valid UTF-8 for the
-/// [`unicode_text`] detectors.
-fn collect_strings(region: &[u8], text: &mut Vec<u8>) {
-    let mut i = 0usize;
-    while i < region.len() && text.len() < PDF_MAX_TEXT_BYTES {
-        match region[i] {
-            b'(' => match decode_literal_string(region, i) {
-                Some((value, next)) => {
-                    i = next;
-                    push_text(text, &value);
-                }
-                None => i += 1,
-            },
-            b'<' if i + 1 < region.len() && region[i + 1] != b'<' => {
-                match decode_hex_string(region, i) {
-                    Some((value, next)) => {
-                        i = next;
-                        push_text(text, &value);
-                    }
-                    None => i += 1,
-                }
-            }
-            _ => i += 1,
-        }
-    }
-}
-
-/// Append one decoded string to the bounded text buffer.
-fn push_text(text: &mut Vec<u8>, value: &[u8]) {
-    if value.is_empty() || value.len() > PDF_MAX_STRING_LENGTH {
-        return;
-    }
-    if std::str::from_utf8(value).is_err() {
-        return;
-    }
-    if text.len() >= PDF_MAX_TEXT_BYTES {
-        return;
-    }
-    if !text.is_empty() {
-        text.push(b'\n');
-    }
-    let room = PDF_MAX_TEXT_BYTES - text.len();
-    let take = value.len().min(room);
-    text.extend_from_slice(&value[..take]);
-}
-
-/// Parse the version from a buffer starting at the `%PDF-` header.
 fn parse_pdf_version(data: &[u8]) -> Option<String> {
-    if data.len() < 8 {
-        return None;
-    }
-    let (major, dot, minor) = (data[5], data[6], data[7]);
-    if major.is_ascii_digit() && dot == b'.' && minor.is_ascii_digit() {
-        Some(format!("{}.{}", major as char, minor as char))
+    let version = data.get(5..8)?;
+    if version[0].is_ascii_digit() && version[1] == b'.' && version[2].is_ascii_digit() {
+        Some(String::from_utf8_lossy(version).into_owned())
     } else {
         None
     }
 }
 
-/// Label an object occurrence: `object N` when the classic `N 0 obj` token
-/// precedes the keyword, else a byte-offset label.
-fn object_label(data: &[u8], obj_keyword: usize) -> String {
-    let mut i = obj_keyword;
-    while i > 0 && data[i - 1] == b' ' {
-        i -= 1;
-    }
-    if i == 0 || data[i - 1] != b'0' {
-        return format!("object@{obj_keyword}");
-    }
-    i -= 1;
-    if i == 0 || data[i - 1] != b' ' {
-        return format!("object@{obj_keyword}");
-    }
-    i -= 1;
-    let digits_end = i;
-    while i > 0 && data[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    if digits_end == i || digits_end - i > 10 {
-        return format!("object@{obj_keyword}");
-    }
-    format!("object {}", String::from_utf8_lossy(&data[i..digits_end]))
-}
-
-/// Parse the integer following a `startxref` keyword.
-fn parse_startxref_value(data: &[u8], keyword: usize) -> Option<usize> {
-    let mut i = keyword + 9;
-    while i < data.len() && matches!(data[i], b' ' | b'\n' | b'\r' | b'\t') {
-        i += 1;
-    }
-    let start = i;
-    while i < data.len() && data[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start || i - start > 19 {
-        return None;
-    }
-    std::str::from_utf8(&data[start..i]).ok()?.parse().ok()
-}
-
-/// Find the first occurrence of `needle` in `data` at or after `from`.
 fn find(data: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || data.len() < needle.len() {
-        return None;
-    }
-    let last = data.len() - needle.len();
-    if from > last {
-        return None;
-    }
-    (from..=last).find(|&i| &data[i..i + needle.len()] == needle)
+    data.get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| at + from)
 }
 
-/// Push a finding unless the PDF hit [`PDF_MAX_FINDINGS`]; the cap is
-/// recorded as its own finding so truncation is never silent.
-fn push_finding(findings: &mut Vec<ContainerFinding>, finding: ContainerFinding) {
-    if findings.len() >= PDF_MAX_FINDINGS {
-        let exhausted = "finding budget exhausted; further findings suppressed";
-        if findings.last().is_none_or(|last| last.detail != exhausted) {
-            findings.push(ContainerFinding {
-                path: "<pdf>".to_string(),
-                family: PDF_FAMILY.to_string(),
-                detail: exhausted.to_string(),
-            });
+fn bound_detail(mut detail: String) -> String {
+    if detail.len() > DETAIL_MAX_BYTES {
+        let mut end = DETAIL_MAX_BYTES;
+        while !detail.is_char_boundary(end) {
+            end -= 1;
         }
-        return;
+        detail.truncate(end);
     }
-    findings.push(finding);
-}
-
-/// Bound a detail string to [`DETAIL_MAX_BYTES`] bytes at a char boundary.
-fn bound_detail(detail: String) -> String {
-    if detail.len() <= DETAIL_MAX_BYTES {
-        return detail;
-    }
-    let mut end = DETAIL_MAX_BYTES;
-    while !detail.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut bound = detail[..end].to_string();
-    bound.push('…');
-    bound
+    detail
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::forensics::{scan_bytes, FileFamily};
-    use flate2::write::DeflateEncoder;
+    use flate2::write::ZlibEncoder;
     use std::io::Write as _;
 
     /// Assemble a minimal deterministic PDF: `%PDF-1.7` header, numbered
@@ -924,8 +986,9 @@ mod tests {
         ])
     }
 
-    fn doc004_findings(findings: &[ContainerFinding]) -> Vec<&ContainerFinding> {
-        findings
+    fn doc004_findings(analysis: &ContainerAnalysis) -> Vec<&ContainerFinding> {
+        analysis
+            .findings
             .iter()
             .filter(|f| f.family == DOC_004_FAMILY)
             .collect()
@@ -937,6 +1000,7 @@ mod tests {
         let findings = analyze_pdf(&bytes);
         assert!(doc004_findings(&findings).is_empty());
         let inventory = findings
+            .findings
             .iter()
             .find(|f| f.family == PDF_FAMILY && f.path == "<pdf>")
             .expect("inventory finding");
@@ -972,9 +1036,11 @@ mod tests {
     #[test]
     fn no_header_yields_single_finding() {
         let findings = analyze_pdf(b"junk data");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].family, DOC_004_FAMILY);
-        assert!(findings[0].detail.contains("no %PDF- header"));
+        assert_eq!(findings.findings.len(), 1);
+        assert!(!findings.detected);
+        assert!(!findings.incomplete_reasons.is_empty());
+        assert_eq!(findings.findings[0].family, PDF_FAMILY);
+        assert!(findings.findings[0].detail.contains("no %PDF- header"));
     }
 
     #[test]
@@ -1042,11 +1108,15 @@ mod tests {
         let clean = clean_pdf();
         let truncated = &clean[..clean.len() / 2];
         let scan_tmp = analyze_pdf(truncated);
-        let findings = doc004_findings(&scan_tmp);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].path, "<pdf>");
-        assert!(findings[0].detail.contains("malformed pdf"));
-        assert!(findings[0].detail.contains("no %%EOF marker"));
+        assert!(!scan_tmp.detected);
+        assert!(!scan_tmp.incomplete_reasons.is_empty());
+        let malformed: Vec<_> = scan_tmp
+            .findings
+            .iter()
+            .filter(|f| f.detail.starts_with("malformed pdf"))
+            .collect();
+        assert_eq!(malformed.len(), 1);
+        assert!(malformed[0].detail.contains("no %%EOF marker"));
     }
 
     #[test]
@@ -1054,27 +1124,29 @@ mod tests {
         let bytes =
             build_pdf(&["<</Type/EmbeddedFile/Length 2147483647>>\nstream\nshort\nendstream"]);
         let scan_tmp = analyze_pdf(&bytes);
-        let findings = doc004_findings(&scan_tmp);
-        assert!(findings
+        assert!(scan_tmp.detected);
+        assert!(scan_tmp
+            .incomplete_reasons
             .iter()
-            .any(|f| f.detail.contains("Length claims 2147483647")));
+            .any(|code| code == "pdf_stream_byte_limit"));
     }
 
     #[test]
-    fn budget_oversized_file_is_skipped() {
+    fn oversized_file_reports_partial_without_fabricating_detection() {
         let data = vec![0u8; PDF_MAX_FILE_BYTES + 1];
-        let findings = analyze_pdf(&data);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].family, DOC_004_FAMILY);
-        assert!(findings[0].detail.contains("scan budget"));
+        let analysis = analyze_pdf(&data);
+        assert!(!analysis.detected);
+        assert!(analysis
+            .incomplete_reasons
+            .iter()
+            .any(|code| code == "pdf_file_byte_limit"));
     }
 
     #[test]
     fn flate_bomb_is_bounded() {
-        // 1 MiB of 'A' compressed to a few hundred bytes, with a lying small
-        // /Length and the inflated output far beyond the per-stream cap.
+        // Standard zlib framing; the decoded content exceeds the output cap.
         let big = vec![b'A'; 1024 * 1024];
-        let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
         encoder.write_all(&big).expect("deflate write");
         let compressed = encoder.finish().expect("deflate finish");
         assert!(compressed.len() < 4096);
@@ -1089,8 +1161,12 @@ mod tests {
         bytes.extend_from_slice(b"startxref\n99999\n%%EOF\n");
         // Completes in bounded time/memory and never panics; the inflate cap
         // keeps the extracted-text budget at most PDF_MAX_STREAM_INFLATE_BYTES.
-        let findings = analyze_pdf(&bytes);
-        assert!(findings.len() <= PDF_MAX_FINDINGS);
+        let analysis = analyze_pdf(&bytes);
+        assert!(analysis.findings.len() <= PDF_MAX_FINDINGS);
+        assert!(analysis
+            .incomplete_reasons
+            .iter()
+            .any(|code| code == "pdf_inflate_limit"));
     }
 
     #[test]
@@ -1133,9 +1209,11 @@ mod tests {
         let findings = analyze_pdf(&bytes);
         assert!(doc004_findings(&findings).is_empty());
         assert!(findings
+            .findings
             .iter()
             .any(|f| f.family == PDF_FAMILY && f.detail.contains("/AcroForm")));
         assert!(findings
+            .findings
             .iter()
             .any(|f| f.family == PDF_FAMILY && f.detail.contains("XMP metadata")));
     }
@@ -1145,19 +1223,34 @@ mod tests {
         // No trailer; startxref points at a non-xref offset.
         let out: Vec<u8> = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\nstartxref\n1\n%%EOF\n".to_vec();
         let scan_tmp = analyze_pdf(&out);
-        let findings = doc004_findings(&scan_tmp);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].detail.contains("no trailer dictionary"));
-        assert!(findings[0].detail.contains("not an xref table"));
+        assert!(!scan_tmp.detected);
+        assert!(scan_tmp
+            .incomplete_reasons
+            .iter()
+            .any(|code| code == "pdf_structure_invalid"));
+        assert!(scan_tmp
+            .findings
+            .iter()
+            .any(|finding| finding.detail.contains("no trailer dictionary")));
+        assert!(scan_tmp
+            .findings
+            .iter()
+            .any(|finding| finding.detail.contains("startxref target mismatch")));
     }
 
     #[test]
     fn startxref_out_of_bounds_is_reported() {
         let out: Vec<u8> = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\nstartxref\n99999\n%%EOF\n".to_vec();
         let scan_tmp = analyze_pdf(&out);
-        let findings = doc004_findings(&scan_tmp);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].detail.contains("out of bounds"));
+        assert!(!scan_tmp.detected);
+        assert!(scan_tmp
+            .incomplete_reasons
+            .iter()
+            .any(|code| code == "pdf_structure_invalid"));
+        assert!(scan_tmp
+            .findings
+            .iter()
+            .any(|finding| finding.detail.contains("out of bounds")));
     }
 
     #[test]
@@ -1202,7 +1295,7 @@ mod tests {
         mutants.push(b"%PDF-1.7\n".to_vec());
         for mutant in &mutants {
             let findings = analyze_pdf(mutant);
-            assert!(findings.len() <= PDF_MAX_FINDINGS);
+            assert!(findings.findings.len() <= PDF_MAX_FINDINGS);
         }
     }
 
@@ -1219,8 +1312,9 @@ mod tests {
         let bytes = build_pdf(&refs);
         let findings = analyze_pdf(&bytes);
         assert!(findings
+            .incomplete_reasons
             .iter()
-            .any(|f| f.detail.contains("object scan truncated")));
+            .any(|code| code == "pdf_object_limit"));
     }
 
     #[test]

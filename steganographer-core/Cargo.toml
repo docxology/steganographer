@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["ots"]
@@ -12,7 +13,7 @@ default = ["ots"]
 # needs an HTTP client. It is on by default so the workspace keeps full
 # functionality; build with `--no-default-features` for a network-free core
 # that also compiles for `wasm32-unknown-unknown`.
-ots = ["dep:reqwest"]
+ots = ["dep:reqwest", "dep:tokio", "dep:libc", "dep:sha1", "dep:ripemd", "dep:cap-std", "dep:cap-fs-ext"]
 ethereum = ["k256"]
 learned = ["dep:ndarray"]
 learned-eval = ["learned", "dep:openh264"]
@@ -34,11 +35,17 @@ anyhow = { workspace = true }
 log = { workspace = true }
 qrcode = "0.14"
 chrono = "0.4"
-argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
 flate2 = "1"
-# HTTP client for the OpenTimestamps attestation REST API (`ots_client`).
+# HTTP client for standard OpenTimestamps calendars (`ots_client`).
 # Optional: only pulled in by the `ots` feature (default on).
 reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+cap-std = { version = "4.0.3", optional = true }
+cap-fs-ext = { version = "4.0.3", optional = true }
+libc = { version = "0.2", optional = true }
+sha1 = { version = "0.10", optional = true }
+ripemd = { version = "0.1", optional = true }
 ml-dsa = { workspace = true }
 zeroize = { workspace = true }
 # Learned watermarking training/inference tensors (opt-in `learned` feature).
@@ -49,12 +56,13 @@ ndarray = { version = "0.17.2", optional = true }
 # in the bundled C OpenH264 build; the `learned-eval` feature enables it
 # together with `learned`:
 #   cargo test -p steganographer-core --features learned-eval --test learned_eval
-openh264 = { version = "0.9.8", optional = true }
+openh264 = { workspace = true, optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
 criterion = "0.5"
 tokio = { workspace = true }
+tempfile = "3"
 
 [[bench]]
 name = "core_benchmarks"

@@ -1,7 +1,7 @@
 //! Signing backend abstraction for pluggable cryptographic identity.
 //!
 //! Provides [`SignerBackend`] trait with implementations for:
-//! - [`Ed25519Backend`] — BLAKE3 hash + Ed25519 signature (default)
+//! - [`Ed25519Backend`] — Ed25519 over the caller's exact bytes (default)
 //! - [`MlDsaBackend`] — ML-DSA (FIPS 204) post-quantum signatures (RustCrypto `ml-dsa` crate)
 //! - [`HybridBackend`] — dual Ed25519 + ML-DSA signatures
 //! - `EthereumBackend` — Keccak-256 hash + secp256k1 ECDSA with EIP-191 (feature-gated)
@@ -12,8 +12,9 @@ use anyhow::Result;
 
 /// Trait for pluggable signing backends.
 ///
-/// Each backend handles hashing, signing, and verification of frame data.
-/// The signature format and size vary by backend.
+/// Each backend signs/verifies the exact input according to its documented scheme.
+/// Verification proves mathematical integrity, not trust in a supplied identity.
+/// Callers establishing authorship must pin/compare the full public key externally.
 pub trait SignerBackend: Send + Sync {
     /// Human-readable name of the backend (e.g. "ed25519", "ethereum").
     fn name(&self) -> &str;
@@ -38,15 +39,18 @@ pub trait SignerBackend: Send + Sync {
 // Ed25519 Backend
 // ─────────────────────────────────────────────────────────────────────────────
 
+use ed25519_dalek::Signer as DalekSigner;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use ed25519_dalek::{Signer as DalekSigner, Verifier as DalekVerifier};
 use rand::rngs::OsRng;
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::crypto::encode_hex;
 
 /// Ed25519 signing backend — default for Steganographer.
 ///
-/// Uses BLAKE3 for frame hashing and Ed25519 for digital signatures.
-/// Produces 64-byte signatures. Total payload: 104 bytes.
+/// Signs the input directly, without an implicit BLAKE3 prehash.
+/// Produces 64-byte signatures.
 pub struct Ed25519Backend {
     signing_key: SigningKey,
 }
@@ -99,7 +103,10 @@ impl SignerBackend for Ed25519Backend {
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(signature);
         let sig = Signature::from_bytes(&sig_bytes);
-        self.signing_key.verifying_key().verify(data, &sig).is_ok()
+        self.signing_key
+            .verifying_key()
+            .verify_strict(data, &sig)
+            .is_ok()
     }
 
     fn public_key_bytes(&self) -> Vec<u8> {
@@ -111,11 +118,7 @@ impl SignerBackend for Ed25519Backend {
     }
 
     fn display_identity(&self) -> String {
-        let bytes = self.signing_key.verifying_key().to_bytes();
-        bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>()
+        encode_hex(&self.signing_key.verifying_key().to_bytes())
     }
 }
 
@@ -133,6 +136,7 @@ impl Ed25519Verifier {
     /// Import from raw 32-byte public key.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
         let key = VerifyingKey::from_bytes(bytes)?;
+        anyhow::ensure!(!key.is_weak(), "Weak Ed25519 public key");
         Ok(Self { verifying_key: key })
     }
 
@@ -144,7 +148,7 @@ impl Ed25519Verifier {
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(signature);
         let sig = Signature::from_bytes(&sig_bytes);
-        self.verifying_key.verify(data, &sig).is_ok()
+        self.verifying_key.verify_strict(data, &sig).is_ok()
     }
 }
 
@@ -159,6 +163,7 @@ mod ethereum {
         signature::hazmat::PrehashSigner, signature::hazmat::PrehashVerifier, Signature,
         SigningKey as EthSigningKey, VerifyingKey as EthVerifyingKey,
     };
+    use k256::elliptic_curve::Generate;
     use sha3::{Digest, Keccak256};
 
     /// Ethereum-compatible signing backend using secp256k1 + Keccak-256.
@@ -181,7 +186,7 @@ mod ethereum {
         /// Generate a fresh random key pair.
         pub fn generate() -> Self {
             Self {
-                signing_key: EthSigningKey::random(&mut OsRng),
+                signing_key: EthSigningKey::generate(),
             }
         }
 
@@ -203,12 +208,12 @@ mod ethereum {
         /// Get the Ethereum address (0x-prefixed).
         pub fn ethereum_address(&self) -> String {
             let pubkey = self.signing_key.verifying_key();
-            let pubkey_bytes = pubkey.to_encoded_point(false);
+            let pubkey_bytes = pubkey.to_sec1_point(false);
             // Skip the 0x04 prefix byte, hash the 64-byte uncompressed key
             let hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
             // Last 20 bytes are the address
             let addr_bytes = &hash[12..32];
-            format!("0x{}", hex_encode(addr_bytes))
+            format!("0x{}", encode_hex(addr_bytes))
         }
 
         /// Create EIP-191 personal_sign hash of data.
@@ -253,7 +258,7 @@ mod ethereum {
 
         fn public_key_bytes(&self) -> Vec<u8> {
             let pk = self.signing_key.verifying_key();
-            pk.to_encoded_point(true).as_bytes().to_vec()
+            pk.to_sec1_point(true).as_bytes().to_vec()
         }
 
         fn signature_size(&self) -> usize {
@@ -290,10 +295,6 @@ mod ethereum {
             };
             self.verifying_key.verify_prehash(&hash, &sig).is_ok()
         }
-    }
-
-    fn hex_encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
     #[cfg(test)]
@@ -478,9 +479,9 @@ pub struct MlDsaBackend {
 impl MlDsaBackend {
     /// Generate a fresh ML-DSA keypair with OS entropy.
     pub fn generate(level: MlDsaLevel) -> Self {
-        let mut seed = [0u8; 32];
-        OsRng.fill_bytes(&mut seed);
-        Self::from_seed(level, seed)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(seed.as_mut());
+        Self::from_seed(level, *seed)
     }
 
     /// Deterministically derive an ML-DSA keypair from a 32-byte seed.
@@ -488,8 +489,9 @@ impl MlDsaBackend {
     /// The seed is passed unchanged to `SigningKey::<P>::from_seed`
     /// (FIPS 204 Algorithm 6). There is no extra domain separation between
     /// levels beyond the level-dependent expansion inside ML-DSA itself.
-    pub fn from_seed(level: MlDsaLevel, private_seed: [u8; 32]) -> Self {
-        let seed = Seed::from(private_seed);
+    pub fn from_seed(level: MlDsaLevel, mut private_seed: [u8; 32]) -> Self {
+        let seed = Zeroizing::new(Seed::from(private_seed));
+        private_seed.zeroize();
         Self {
             level,
             signing_key: match level {
@@ -549,7 +551,7 @@ impl SignerBackend for MlDsaBackend {
         format!(
             "{}:{}",
             self.level.name(),
-            hex_encode(&public_key[..16.min(public_key.len())])
+            encode_hex(&public_key[..16.min(public_key.len())])
         )
     }
 }
@@ -738,10 +740,6 @@ impl HybridVerifier {
         self.ed25519.verify(data, &signature[..ed_len])
             && self.mldsa.verify(data, &signature[ed_len..])
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

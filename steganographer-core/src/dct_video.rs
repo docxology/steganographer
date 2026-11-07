@@ -1,10 +1,9 @@
-//! DCT-domain steganography for compression-resistant embedding.
+//! DCT-domain quantization watermarking.
 //!
-//! This module implements a Discrete Cosine Transform (DCT) based
-//! steganography technique where payload bits are embedded into the
-//! mid-frequency DCT coefficients of 8×8 pixel blocks. This is the
-//! same domain used by JPEG compression, making the embedding
-//! significantly more resistant to JPEG re-encoding than LSB methods.
+//! Uses 8×8 DCT coefficients. Clean integer reconstruction is checked before
+//! mutation; clipping or an unrepresentable quantization choice returns an
+//! error. Codec/noise resilience depends on the carrier and codec settings
+//! and is not guaranteed by operating in the DCT domain.
 //!
 //! ## Algorithm
 //!
@@ -17,26 +16,28 @@
 //! 5. Extraction: apply DCT, read the coefficient, determine which half
 //!    of the quantization cell it falls in.
 //!
-//! ## Advantages over LSB
-//!
-//! - **JPEG resistant**: Since data is in the DCT domain, JPEG
-//!   compression preserves it better than spatial-domain LSB.
-//! - **Less detectable**: DCT modifications are less visible than LSB
-//!   changes at the same capacity.
-//! - **Tunable**: The coefficient index and quantization step are
-//!   configurable, trading off robustness vs. visibility.
+//! The coefficient and quantization step trade distortion against decision
+//! margin. Saturated covers may be rejected rather than destructively adjusted.
 
 use crate::crypto::SignaturePayload;
-use crate::video::{VideoFormat, VideoFrame, VideoStegoModule};
+#[cfg(test)]
+use crate::video::VideoFormat;
+use crate::video::{VideoFrame, VideoStegoModule};
 
 /// Block size for DCT processing (8×8 as in JPEG).
 const BLOCK_SIZE: usize = 8;
 
-/// Precomputed DCT basis matrix: cos(pi * (2k+1) * n / 16) / sqrt(2) normalization.
-/// Computed once at startup.
-fn cos_basis(n: usize, k: usize) -> f64 {
-    let factor = if n == 0 { 1.0 / 2.0_f64.sqrt() } else { 1.0 };
-    factor * (std::f64::consts::PI * (2.0 * k as f64 + 1.0) * n as f64 / 16.0).cos()
+/// Shared immutable normalized 8×8 DCT basis.
+pub(crate) fn cos_basis(n: usize, k: usize) -> f64 {
+    static BASIS: std::sync::LazyLock<[[f64; 8]; 8]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|n| {
+            std::array::from_fn(|k| {
+                let factor = if n == 0 { 1.0 / 2.0_f64.sqrt() } else { 1.0 };
+                factor * (std::f64::consts::PI * (2.0 * k as f64 + 1.0) * n as f64 / 16.0).cos()
+            })
+        })
+    });
+    BASIS[n][k]
 }
 
 /// DCT-domain steganography module.
@@ -67,6 +68,10 @@ impl DctVideo {
     /// * `coef_index` — Zigzag position of the coefficient to modify (1–63, not DC).
     /// * `quant_step` — Quantization step for bit embedding (8–32 recommended).
     /// * `channel` — Color channel index (0, 1, or 2).
+    ///
+    /// Integer embedding requires `quant_step >= 8`; smaller positive values
+    /// can be constructed for extraction but `embed` rejects them. Covers
+    /// whose clipped reconstruction changes any decision are rejected atomically.
     pub fn new(coef_index: usize, quant_step: i32, channel: usize) -> Self {
         assert!(
             (1..64).contains(&coef_index),
@@ -129,6 +134,22 @@ impl DctVideo {
         result
     }
 
+    /// One coefficient, preserving the full transform's summation order.
+    fn coefficient(block: &[u8; 64], index: usize) -> f64 {
+        let mut rows = [0.0; 8];
+        for row in 0..8 {
+            for k in 0..8 {
+                rows[row] += (block[row * 8 + k] as f64 - 128.0) * cos_basis(index % 8, k);
+            }
+            rows[row] /= 2.0;
+        }
+        let mut value = 0.0;
+        for (k, row) in rows.iter().enumerate() {
+            value += row * cos_basis(index / 8, k);
+        }
+        value / 2.0
+    }
+
     /// Apply 2D inverse DCT to 64 DCT coefficients.
     fn idct_2d(coeffs: &[f64; 64]) -> [u8; 64] {
         // Column inverse transform
@@ -181,13 +202,11 @@ impl VideoStegoModule for DctVideo {
             None => return Ok(()),
         };
 
-        let bpp = match frame.format {
-            VideoFormat::Rgb8 => 3,
-            VideoFormat::Bgra8 => 4,
-            VideoFormat::Yuv420 => {
-                anyhow::bail!("DCT steganography does not support YUV420 planar format");
-            }
-        };
+        anyhow::ensure!(
+            self.quant_step >= 8.0,
+            "DCT quantization step must be at least 8"
+        );
+        let bpp = frame.validate_packed_layout()?;
 
         let (blocks_x, blocks_y) = Self::block_count(frame.width, frame.height);
         let total_blocks = blocks_x * blocks_y;
@@ -209,6 +228,9 @@ impl VideoStegoModule for DctVideo {
         let data = &mut frame.data;
         let coef_linear = Self::zigzag_to_linear(self.coef_index);
 
+        // Stage only the fixed payload's blocks, not the whole carrier.
+        // A later failed decision must not leave a partially modified frame.
+        let mut staged = [[0u8; 64]; SignaturePayload::SERIALIZED_SIZE * 8];
         for (bit_idx, byte) in payload_bytes.iter().enumerate() {
             for bit_in_byte in 0..8 {
                 let bit = (byte >> bit_in_byte) & 1;
@@ -242,17 +264,26 @@ impl VideoStegoModule for DctVideo {
                     *coef = cell * quant + quant * 0.25; // lower part of cell
                 }
 
-                // Inverse DCT
                 let restored = Self::idct_2d(&coeffs);
+                let actual = Self::coefficient(&restored, coef_linear);
+                let decoded = u8::from((actual / quant).rem_euclid(1.0) >= 0.5);
+                anyhow::ensure!(
+                    decoded == bit,
+                    "DCT bit {} cannot survive integer reconstruction at q={}",
+                    payload_bit,
+                    quant
+                );
+                staged[payload_bit] = restored;
+            }
+        }
 
-                // Write back
-                for i in 0..8 {
-                    for j in 0..8 {
-                        let offset = (block_y + i) * stride + (block_x + j) * bpp + self.channel;
-                        if offset < data.len() {
-                            data[offset] = restored[i * 8 + j];
-                        }
-                    }
+        for (payload_bit, restored) in staged.iter().enumerate() {
+            let block_x = (payload_bit % blocks_x) * BLOCK_SIZE;
+            let block_y = (payload_bit / blocks_x) * BLOCK_SIZE;
+            for i in 0..8 {
+                for j in 0..8 {
+                    data[(block_y + i) * stride + (block_x + j) * bpp + self.channel] =
+                        restored[i * 8 + j];
                 }
             }
         }
@@ -270,11 +301,7 @@ impl VideoStegoModule for DctVideo {
     }
 
     fn extract(&self, frame: &VideoFrame) -> anyhow::Result<Option<SignaturePayload>> {
-        let bpp = match frame.format {
-            VideoFormat::Rgb8 => 3,
-            VideoFormat::Bgra8 => 4,
-            VideoFormat::Yuv420 => return Ok(None),
-        };
+        let bpp = frame.validate_packed_layout()?;
 
         let (blocks_x, blocks_y) = Self::block_count(frame.width, frame.height);
         let total_blocks = blocks_x * blocks_y;
@@ -309,11 +336,7 @@ impl VideoStegoModule for DctVideo {
                     }
                 }
 
-                // Forward DCT
-                let coeffs = Self::dct_2d(&block);
-
-                // Extract bit from coefficient
-                let coef = coeffs[coef_linear];
+                let coef = Self::coefficient(&block, coef_linear);
                 let quant = self.quant_step;
                 let cell_pos = (coef / quant).rem_euclid(1.0);
 

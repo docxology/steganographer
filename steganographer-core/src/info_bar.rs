@@ -24,10 +24,10 @@ const TEXT_PRIMARY: [u8; 3] = [0, 220, 255];
 const TEXT_SECONDARY: [u8; 3] = [160, 160, 170];
 /// Accent color for barcode bars.
 const BARCODE_COLOR: [u8; 3] = [0, 255, 128];
-/// QR code module color.
-const QR_COLOR: [u8; 3] = [255, 255, 255];
+/// Dark QR modules on a light background, including the quiet zone.
+const QR_COLOR: [u8; 3] = [0, 0, 0];
 /// QR code background.
-const QR_BG: [u8; 3] = [16, 16, 24];
+const QR_BG: [u8; 3] = [255, 255, 255];
 
 /// Exoteric info bar renderer.
 ///
@@ -95,134 +95,138 @@ impl InfoBar {
         frame: &mut VideoFrame,
         sig: Option<&SignaturePayload>,
     ) -> anyhow::Result<()> {
-        let bpp = match frame.format {
-            VideoFormat::Rgb8 => 3usize,
-            VideoFormat::Bgra8 => 4usize,
-            VideoFormat::Yuv420 => return Ok(()), // not supported
-        };
-
-        let bar_height = BAR_HEIGHT.min(frame.height / 4); // don't exceed 25% of frame
-        if bar_height < 20 || frame.width < 100 {
-            return Ok(());
-        }
-
+        let bpp = frame.validate_packed_layout()?;
+        let bar_height = BAR_HEIGHT.min(frame.height / 4);
+        anyhow::ensure!(bar_height >= 20, "Info bar does not fit the frame");
         let bar_top = frame.height - bar_height;
 
-        // 1. Draw background bar
-        for y in bar_top..frame.height {
-            for x in 0..frame.width {
-                let offset = (y * frame.stride + x * bpp as u32) as usize;
-                if offset + bpp <= frame.data.len() {
-                    match frame.format {
-                        VideoFormat::Rgb8 => {
-                            frame.data[offset] = BAR_BG[0];
-                            frame.data[offset + 1] = BAR_BG[1];
-                            frame.data[offset + 2] = BAR_BG[2];
-                        }
-                        VideoFormat::Bgra8 => {
-                            frame.data[offset] = BAR_BG[2];
-                            frame.data[offset + 1] = BAR_BG[1];
-                            frame.data[offset + 2] = BAR_BG[0];
-                            frame.data[offset + 3] = 230; // semi-transparent
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // 2. Top border line (accent)
-        for x in 0..frame.width {
-            let offset = (bar_top * frame.stride + x * bpp as u32) as usize;
-            if offset + bpp <= frame.data.len() {
-                Self::set_pixel(frame, offset, TEXT_PRIMARY);
-            }
-        }
-
-        let text_y = bar_top + 4;
-        let mut cursor_x = 4u32;
-
-        // 3. Timestamp
-        if self.show_timestamp {
-            let now = chrono::Local::now();
-            let ts = now.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-            cursor_x = self.render_text_small(frame, cursor_x, text_y, &ts, TEXT_PRIMARY);
-            cursor_x += 12;
-        }
-
-        // 4. Frame index
-        if let Some(payload) = sig {
-            let frame_text = format!("F:{}", payload.frame_index);
-            cursor_x = self.render_text_small(frame, cursor_x, text_y, &frame_text, TEXT_PRIMARY);
-            cursor_x += 12;
+        // Measure every requested machine-code footprint before modifying pixels.
+        let qr = if self.show_qr {
+            sig.map(|payload| {
+                let hash_hex: String = payload
+                    .hash
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                QrCode::new(format!("F:{} H:{}", payload.frame_index, hash_hex).as_bytes())
+            })
+            .transpose()?
         } else {
-            let frame_text = format!("F:{}", frame.frame_index);
-            cursor_x = self.render_text_small(frame, cursor_x, text_y, &frame_text, TEXT_PRIMARY);
-            cursor_x += 12;
+            None
+        };
+        let qr_size = if let Some(code) = &qr {
+            let modules = code.width() as u32 + 8; // Four-module quiet zone.
+            let max_size = bar_height - 8;
+            anyhow::ensure!(
+                modules <= max_size,
+                "Requested QR code does not fit the info bar"
+            );
+            modules * (max_size / modules)
+        } else {
+            0
+        };
+        let barcode_width = if self.show_barcode && sig.is_some() {
+            256
+        } else {
+            0
+        };
+        let reserved = 4
+            + if qr_size > 0 { qr_size + 8 } else { 0 }
+            + if barcode_width > 0 {
+                barcode_width + 8
+            } else {
+                0
+            };
+        let text_right = frame
+            .width
+            .checked_sub(reserved)
+            .ok_or_else(|| anyhow::anyhow!("Requested info-bar codes do not fit the frame"))?;
+        let frame_index = sig.map_or(frame.frame_index, |payload| payload.frame_index);
+        let mut line = String::new();
+        if self.show_timestamp {
+            line.push_str(
+                &chrono::Local::now()
+                    .format("%Y-%m-%d %H:%M:%S%.3f")
+                    .to_string(),
+            );
+            line.push(' ');
         }
-
-        // 5. Label
+        line.push_str(&format!("F:{}", frame_index));
         if !self.label.is_empty() {
-            let _cx = self.render_text_small(frame, cursor_x, text_y, &self.label, TEXT_SECONDARY);
+            line.push(' ');
+            line.push_str(&self.label);
         }
-
-        // 6. Second row: hash excerpt + signature status
-        let text_y2 = text_y + 12;
-        let mut cursor_x2 = 4u32;
-
+        let mut lines = vec![line];
         if let Some(payload) = sig {
-            // Show hash excerpt
             let hash_hex: String = payload
                 .hash
                 .iter()
                 .take(8)
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            let hash_text = format!("H:{}", hash_hex);
-            cursor_x2 =
-                self.render_text_small(frame, cursor_x2, text_y2, &hash_text, TEXT_SECONDARY);
-            cursor_x2 += 8;
-
-            // Show "SIGNED" indicator
-            cursor_x2 = self.render_text_small(frame, cursor_x2, text_y2, "SIGNED", BARCODE_COLOR);
-            cursor_x2 += 8;
-
-            // Show stego type indicator
-            let _cx =
-                self.render_text_small(frame, cursor_x2, text_y2, "LSB+OVERLAY", TEXT_SECONDARY);
+            lines.push(format!("H:{} SIGNED", hash_hex));
+            lines.push(if self.include_ots_indicator {
+                "109B payload | OTS configured".to_string()
+            } else {
+                "109B signature payload".to_string()
+            });
         }
-
-        // 7. Barcode from hash (right portion of bar)
-        if self.show_barcode {
-            if let Some(payload) = sig {
-                let barcode_x = frame.width.saturating_sub(200);
-                self.render_barcode(frame, barcode_x, text_y, &payload.hash, bar_height - 8);
+        anyhow::ensure!(
+            4 + lines.len() as u32 * 12 <= bar_height,
+            "Requested info-bar text does not fit its height"
+        );
+        for line in &lines {
+            let width = u32::try_from(line.chars().count())?
+                .checked_mul(8)
+                .ok_or_else(|| anyhow::anyhow!("Info-bar text width overflow"))?;
+            anyhow::ensure!(
+                width
+                    .checked_add(4)
+                    .is_some_and(|right| right <= text_right),
+                "Requested info-bar text and codes do not fit without overlap"
+            );
+        }
+        for y in bar_top..frame.height {
+            for x in 0..frame.width {
+                let offset = y as usize * frame.stride as usize + x as usize * bpp;
+                Self::set_pixel(frame, offset, BAR_BG);
             }
         }
-
-        // 8. QR code (far right)
-        if self.show_qr {
-            if let Some(payload) = sig {
-                let qr_size = (bar_height - 8).min(64);
-                let qr_x = frame.width.saturating_sub(qr_size + 4);
-                let qr_y = bar_top + 4;
-                self.render_qr(frame, qr_x, qr_y, payload, qr_size);
-            }
+        for x in 0..frame.width {
+            let offset = bar_top as usize * frame.stride as usize + x as usize * bpp;
+            Self::set_pixel(frame, offset, TEXT_PRIMARY);
         }
-
-        // 9. Third row: encoding details
-        let text_y3 = text_y2 + 12;
-        if text_y3 + 8 < frame.height && sig.is_some() {
-            let detail = "BLAKE3+Ed25519 | 109B payload";
-            let cursor_x3 = self.render_text_small(frame, 4, text_y3, detail, TEXT_SECONDARY);
-
-            // OTS status badge (right side of the third row)
-            if self.include_ots_indicator {
-                let ots_label = "OTS";
-                let badge_color = BARCODE_COLOR; // green — indicates stamping active
-                let _cx =
-                    self.render_text_small(frame, cursor_x3 + 8, text_y3, ots_label, badge_color);
-            }
+        for (row, line) in lines.iter().enumerate() {
+            self.render_text_small(
+                frame,
+                4,
+                bar_top + 4 + row as u32 * 12,
+                line,
+                if row == 0 {
+                    TEXT_PRIMARY
+                } else {
+                    TEXT_SECONDARY
+                },
+            );
+        }
+        let qr_x = frame.width - 4 - qr_size;
+        if let Some(code) = &qr {
+            self.render_qr(frame, qr_x, bar_top + 4, code, qr_size);
+        }
+        if barcode_width > 0 {
+            let barcode_x = if qr_size > 0 {
+                qr_x - 8 - 256
+            } else {
+                frame.width - 4 - 256
+            };
+            self.render_barcode(
+                frame,
+                barcode_x,
+                bar_top + 4,
+                &sig.expect("measured signed barcode").hash,
+                bar_height - 8,
+            );
         }
 
         Ok(())
@@ -251,7 +255,7 @@ impl InfoBar {
                         let px = x + ci as u32 * 8 + col;
                         let py = y + row;
                         if px < frame.width && py < frame.height {
-                            let offset = (py * frame.stride + px * bpp as u32) as usize;
+                            let offset = py as usize * frame.stride as usize + px as usize * bpp;
                             if offset + bpp <= frame.data.len() {
                                 Self::set_pixel(frame, offset, color);
                             }
@@ -260,7 +264,11 @@ impl InfoBar {
                 }
             }
         }
-        x + text.len() as u32 * 8
+        x.saturating_add(
+            u32::try_from(text.chars().count())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(8),
+        )
     }
 
     /// Render a barcode pattern from hash bytes.
@@ -299,7 +307,7 @@ impl InfoBar {
                 if y >= frame.height {
                     break;
                 }
-                let offset = (y * frame.stride + x * bpp as u32) as usize;
+                let offset = y as usize * frame.stride as usize + x as usize * bpp;
                 if offset + bpp <= frame.data.len() && is_set {
                     Self::set_pixel(frame, offset, BARCODE_COLOR);
                 }
@@ -313,7 +321,7 @@ impl InfoBar {
         frame: &mut VideoFrame,
         start_x: u32,
         start_y: u32,
-        payload: &SignaturePayload,
+        code: &QrCode,
         max_size: u32,
     ) {
         let bpp = match frame.format {
@@ -322,40 +330,31 @@ impl InfoBar {
             _ => return,
         };
 
-        // Encode frame index + hash excerpt as QR content
-        let hash_hex: String = payload
-            .hash
-            .iter()
-            .take(16)
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        let qr_content = format!("F:{} H:{}", payload.frame_index, hash_hex);
-
-        let code = match QrCode::new(qr_content.as_bytes()) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
         let matrix = code.to_colors();
         let qr_width = code.width();
-        let scale = (max_size as usize / qr_width).max(1);
+        let modules = qr_width + 8;
+        let scale = max_size as usize / modules;
 
-        for (idx, &color_val) in matrix.iter().enumerate() {
-            let qr_x = idx % qr_width;
-            let qr_y = idx / qr_width;
-            let is_dark = color_val == qrcode::Color::Dark;
+        for module_y in 0..modules {
+            for module_x in 0..modules {
+                let is_dark = module_x >= 4
+                    && module_x < qr_width + 4
+                    && module_y >= 4
+                    && module_y < qr_width + 4
+                    && matrix[(module_y - 4) * qr_width + module_x - 4] == qrcode::Color::Dark;
 
-            for sy in 0..scale {
-                for sx in 0..scale {
-                    let px = start_x + (qr_x * scale + sx) as u32;
-                    let py = start_y + (qr_y * scale + sy) as u32;
-                    if px < frame.width && py < frame.height {
-                        let offset = (py * frame.stride + px * bpp as u32) as usize;
-                        if offset + bpp <= frame.data.len() {
-                            if is_dark {
-                                Self::set_pixel(frame, offset, QR_COLOR);
-                            } else {
-                                Self::set_pixel(frame, offset, QR_BG);
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let px = start_x + (module_x * scale + sx) as u32;
+                        let py = start_y + (module_y * scale + sy) as u32;
+                        if px < frame.width && py < frame.height {
+                            let offset = py as usize * frame.stride as usize + px as usize * bpp;
+                            if offset + bpp <= frame.data.len() {
+                                if is_dark {
+                                    Self::set_pixel(frame, offset, QR_COLOR);
+                                } else {
+                                    Self::set_pixel(frame, offset, QR_BG);
+                                }
                             }
                         }
                     }
@@ -408,6 +407,93 @@ impl VideoStegoModule for InfoBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_hash_barcode_includes_the_final_bit() {
+        let mut payload = crate::crypto::Signer::generate().sign_frame(0, b"barcode", None);
+        payload.hash = [0; 32];
+        payload.hash[31] = 1;
+        let mut data = vec![0; 800 * 600 * 3];
+        let mut frame = VideoFrame {
+            width: 800,
+            height: 600,
+            stride: 2400,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        InfoBar::new(String::new())
+            .with_qr(false)
+            .with_timestamp(false)
+            .embed(&mut frame, Some(&payload))
+            .unwrap();
+        let last_bit = (520 + 4) * 2400 + (800 - 4 - 1) * 3;
+        assert_eq!(&data[last_bit..last_bit + 3], &BARCODE_COLOR);
+        assert_eq!(&data[last_bit - 3..last_bit], &BAR_BG);
+    }
+
+    #[test]
+    fn requested_codes_that_do_not_fit_fail_without_mutation() {
+        let payload = crate::crypto::Signer::generate().sign_frame(0, b"small QR", None);
+        let mut data = vec![0x80; 100 * 80 * 3];
+        let before = data.clone();
+        let mut frame = VideoFrame {
+            width: 100,
+            height: 80,
+            stride: 300,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        let mut bar = InfoBar::new(String::new())
+            .with_barcode(false)
+            .with_timestamp(false);
+        assert!(bar.embed(&mut frame, Some(&payload)).is_err());
+        assert_eq!(data, before);
+    }
+
+    #[test]
+    fn qr_matrix_and_quiet_zone_are_complete() {
+        let payload = crate::crypto::Signer::generate().sign_frame(0, b"QR", None);
+        let hash: String = payload
+            .hash
+            .iter()
+            .take(16)
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        let code = QrCode::new(format!("F:0 H:{}", hash).as_bytes()).unwrap();
+        let modules = code.width() + 8;
+        let side = modules * (72 / modules);
+        let start_x = 800 - 4 - side;
+        let mut data = vec![0x80; 800 * 600 * 3];
+        let mut frame = VideoFrame {
+            width: 800,
+            height: 600,
+            stride: 2400,
+            format: VideoFormat::Rgb8,
+            data: &mut data,
+            frame_index: 0,
+        };
+        InfoBar::new(String::new())
+            .with_barcode(false)
+            .with_timestamp(false)
+            .embed(&mut frame, Some(&payload))
+            .unwrap();
+        let scale = side / modules;
+        for y in 0..modules {
+            for x in 0..modules {
+                let dark = x >= 4
+                    && x < modules - 4
+                    && y >= 4
+                    && y < modules - 4
+                    && code[(x - 4, y - 4)] == qrcode::Color::Dark;
+                let offset = (524 + y * scale) * 2400 + (start_x + x * scale) * 3;
+                assert_eq!(
+                    &data[offset..offset + 3],
+                    if dark { &QR_COLOR } else { &QR_BG }
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_info_bar_renders_without_panic() {
@@ -476,7 +562,7 @@ mod tests {
 
         let mut bar = InfoBar::new("TEST".to_string());
         // Should not panic on small frames
-        bar.embed(&mut frame, None).unwrap();
+        assert!(bar.embed(&mut frame, None).is_err());
     }
 
     #[test]

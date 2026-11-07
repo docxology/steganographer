@@ -1,18 +1,22 @@
 //! Opt-in generic packet encode/decode CLI surface.
 
+use anyhow::Context;
 use rand::RngCore;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use steganographer_core::crypto::{decode_hex_array, encode_hex};
 use steganographer_core::encryption::EncryptionKey;
 use steganographer_core::packet::{
     AlgorithmDescriptor, DecodeLimits, GenericPacket, Locator, PayloadKind, TransformDescriptor,
     KERNEL_SPATIAL_LSB, PLACEMENT_KEYED, PLACEMENT_SEQUENTIAL,
 };
+use steganographer_core::revocation::{RevocationList, RevokedKey};
 use steganographer_core::transforms;
 use steganographer_core::transforms::{parse_kdf_argon2id_params, TRANSFORM_KDF_ARGON2ID};
 use steganographer_core::{
-    Argon2Params, AudioSpatialLsb, CarrierEmbedder, CarrierExtractor, EmbeddingConfig,
-    KeyedAudioSpatialLsb, KeyedSpatialLsb, SpatialLsb, TransformContext, DEFAULT_ECC_CHUNK_LEN,
+    Argon2Params, AudioSpatialLsb, CarrierEmbedder, CarrierError, CarrierExtractor,
+    EmbeddingConfig, ExtractReport, KeyedAudioSpatialLsb, KeyedSpatialLsb, PacketError, SpatialLsb,
+    TransformContext, DEFAULT_ECC_CHUNK_LEN,
 };
 
 use crate::media_io;
@@ -23,6 +27,9 @@ pub struct GenericEncodeOptions {
     pub mime_type: Option<String>,
     pub filename: Option<String>,
     pub input_format: Option<String>,
+    pub raw_width: Option<u32>,
+    pub raw_height: Option<u32>,
+    pub decode_limits: DecodeLimits,
     pub encrypt: bool,
     pub encryption_key: Option<String>,
     pub encryption_key_file: Option<String>,
@@ -51,6 +58,23 @@ pub struct GenericDecodeOptions {
     /// `--decryption-key` / `--decryption-key-file`.
     pub password: Option<String>,
     pub password_file: Option<String>,
+    pub decode_limits: DecodeLimits,
+    pub trusted_signer: Option<String>,
+    pub revoked_list: Option<String>,
+}
+
+pub struct ExtractOptions {
+    pub stego_type: String,
+    pub input_format: Option<String>,
+    pub embedding_key: Option<String>,
+    pub embedding_key_file: Option<String>,
+    pub encryption_key: Option<String>,
+    pub encryption_key_file: Option<String>,
+    pub password: Option<String>,
+    pub password_file: Option<String>,
+    pub trusted_signer: Option<String>,
+    pub revoked_list: Option<String>,
+    pub decode_limits: DecodeLimits,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +114,8 @@ struct GenericDecodeResult {
     error_corrected: bool,
     compressed: bool,
     signed: bool,
+    signer_public_key: Option<String>,
+    signer_trusted: bool,
     keyed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime_type: Option<String>,
@@ -147,9 +173,7 @@ pub fn encode(
         options.payload_text.as_deref(),
     ) {
         (Some(path), None) => (
-            std::fs::read(path).map_err(|error| {
-                anyhow::anyhow!("Cannot read payload file '{}': {}", path, error)
-            })?,
+            std::fs::read(path).with_context(|| format!("Cannot read payload file '{path}'"))?,
             PayloadKind::File,
             std::path::Path::new(path)
                 .file_name()
@@ -171,14 +195,22 @@ pub fn encode(
         .or(default_filename)
         .map(validate_display_filename)
         .transpose()?;
-    let limits = DecodeLimits::default();
+    let limits = options.decode_limits;
     let config = EmbeddingConfig::new(bits)?;
     let input_format = options
         .input_format
         .as_deref()
         .map(str::to_owned)
         .unwrap_or_else(|| media_io::detect_format(input, stego_type));
-    let mut media = media_io::read_input(input, &input_format, stego_type)?;
+    let mut media = media_io::read_input_with_dimensions(
+        input,
+        &input_format,
+        stego_type,
+        options.raw_width,
+        options.raw_height,
+    )?;
+    validate_media_kernel(&media, stego_type)?;
+    media_io::validate_media_output(output, &media, stego_type)?;
 
     let mut packet_id = [0u8; 16];
     let mut nonce = [0u8; 8];
@@ -241,7 +273,7 @@ pub fn encode(
         ecc_parity,
         DEFAULT_ECC_CHUNK_LEN,
     )
-    .map_err(|e| anyhow::anyhow!("transform application failed: {e}"))?;
+    .context("transform application failed")?;
     let kdf = kdf_report(&transforms)?;
     packet.body = encoded_body;
     packet.envelope.transforms = transforms;
@@ -291,7 +323,7 @@ pub fn encode(
 
     let result = GenericEncodeResult {
         protocol: "1.0-alpha",
-        packet_id: hex_encode(&packet_id),
+        packet_id: encode_hex(&packet_id),
         payload_kind: payload_kind_name(payload_kind),
         payload_bytes: packet.envelope.original_len as usize,
         packet_bytes: embed_report.packet_bytes,
@@ -326,99 +358,14 @@ pub fn decode(
         crate::envelope::activate_json_mode("decode");
     }
     validate_format(format)?;
-    // PKT-007: resolve the password path up front, before any media work,
-    // so conflicting credentials fail fast.
-    let password_bytes = resolve_password(&options.password, &options.password_file)?;
-    if password_bytes.is_some()
-        && (options.decryption_key.is_some() || options.decryption_key_file.is_some())
-    {
-        anyhow::bail!(
-            "--password/--password-file and --decryption-key/--decryption-key-file are mutually exclusive"
-        );
-    }
-    let audio = is_audio_kernel(stego_type);
-    let input_path = std::path::Path::new(input);
-    let output_path = std::path::Path::new(output);
-    let aliases_input = input == output
-        || (output_path.exists()
-            && std::fs::canonicalize(input_path).ok() == std::fs::canonicalize(output_path).ok());
-    if aliases_input {
-        anyhow::bail!("decoded payload output must differ from the carrier input");
-    }
-    if output_path.exists() && !force {
-        anyhow::bail!(
-            "refusing to overwrite existing payload output '{}'; pass --force to replace it",
-            output
-        );
-    }
-
-    let selected_format = input_format
-        .map(str::to_owned)
-        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
-    let media = media_io::read_input(input, &selected_format, stego_type)?;
-    let limits = DecodeLimits::default();
-    let candidates = bits_candidates(bits)?;
-    let embedding_key = resolve_embedding_key(options)?;
-    let mut extracted = None;
-    let mut errors = Vec::new();
-    for candidate in candidates {
-        let config = EmbeddingConfig::new(candidate)?;
-        if let Some(key) = embedding_key {
-            let keyed = if audio {
-                KeyedAudioSpatialLsb::new(key).extract_packet(&media.data, &config, &limits)
-            } else {
-                KeyedSpatialLsb::new(key).extract_packet(&media.data, &config, &limits)
-            };
-            match keyed {
-                Ok(report) => {
-                    extracted = Some(report);
-                    break;
-                }
-                Err(error) => errors.push(format!("{candidate} bits (keyed): {error}")),
-            }
-        }
-        let sequential = if audio {
-            AudioSpatialLsb.extract_packet(&media.data, &config, &limits)
-        } else {
-            SpatialLsb.extract_packet(&media.data, &config, &limits)
-        };
-        match sequential {
-            Ok(report) => {
-                extracted = Some(report);
-                break;
-            }
-            Err(error) => errors.push(format!("{candidate} bits: {error}")),
-        }
-    }
-    let report = extracted.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no valid generic packet found with requested LSB strengths ({})",
-            errors.join("; ")
-        )
-    })?;
-
-    // Reverse any recorded transforms (password-KDF + AEAD decryption,
-    // Reed-Solomon ECC) and re-verify the recovered logical payload against
-    // the envelope digest.
-    let decrypt_key = resolve_decryption_key(options)?;
-    let kdf = kdf_report(&report.packet.envelope.transforms)?;
-    let context = TransformContext {
-        packet_id: &report.packet.envelope.packet_id,
-        payload_kind: report.packet.envelope.payload_kind as u16,
-        original_len: report.packet.envelope.original_len,
-    };
-    let payload = transforms::reverse_with_password(
-        &report.packet.body,
-        &context,
-        decrypt_key.as_ref(),
-        password_bytes.as_deref(),
-        &report.packet.envelope.transforms,
-        report.packet.envelope.original_len,
-    )
-    .map_err(|e| anyhow::anyhow!("transform reversal failed: {e}"))?;
-    if !report.packet.envelope.content_digest.verify(&payload) {
-        anyhow::bail!("recovered payload digest does not match the packet envelope");
-    }
+    preflight_payload_output(Path::new(input), Path::new(output), force)?;
+    let RecoveredPacket {
+        report,
+        payload,
+        kdf,
+        signer_public_key,
+        signer_trusted,
+    } = recover_packet(input, stego_type, bits, input_format, options)?;
 
     let encrypted = report.packet.locator.flags & steganographer_core::packet::FLAG_ENCRYPTED != 0;
     let error_corrected =
@@ -429,7 +376,7 @@ pub fn decode(
         report.packet.locator.flags & steganographer_core::packet::FLAG_PAYLOAD_SIGNED != 0;
     let keyed = report.packet.locator.flags & steganographer_core::packet::FLAG_KEYED_LOCATOR != 0;
 
-    std::fs::write(output, &payload)?;
+    media_io::atomic_write(Path::new(output), &payload, force, false)?;
     let ots_meta =
         steganographer_core::OtsMetadata::from_extensions(&report.packet.envelope.extensions);
     let ots_info = if ots_meta.is_present() {
@@ -446,7 +393,7 @@ pub fn decode(
             "{}.{}-alpha",
             report.packet.locator.protocol_major, report.packet.locator.protocol_minor
         ),
-        packet_id: hex_encode(&report.packet.envelope.packet_id),
+        packet_id: encode_hex(&report.packet.envelope.packet_id),
         payload_kind: payload_kind_name(report.packet.envelope.payload_kind),
         payload_bytes: payload.len(),
         packet_bytes: report.packet.encoded_len()?,
@@ -457,6 +404,8 @@ pub fn decode(
         error_corrected,
         compressed,
         signed,
+        signer_public_key,
+        signer_trusted,
         keyed,
         mime_type: report.packet.envelope.mime_type,
         filename: report.packet.envelope.filename,
@@ -467,89 +416,228 @@ pub fn decode(
     Ok(())
 }
 
-/// SUR-002: extract the payload from a generic packet carrier straight to a
-/// file, with a saved-digest report and none of the decode-report ceremony.
-///
-/// `bits` is `None` for auto-detection (1..=4 tried in order) or an explicit
-/// LSB strength; the caller's CLI layer maps `--bits auto` to `None`.
-///
-/// When the packet records a KDF descriptor, `password` re-derives the AEAD
-/// key from it. Password and password-file are mutually exclusive.
-#[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
-pub fn run_extract_with_password(
-    input: &PathBuf,
-    output: &PathBuf,
+/// Extract through the same media, placement, transform, and trust path as decode.
+pub fn run_extract(
+    input: &Path,
+    output: &Path,
     bits: Option<u8>,
     force: bool,
-    password: Option<String>,
-    password_file: Option<String>,
     format: &str,
+    options: ExtractOptions,
 ) -> anyhow::Result<()> {
-    let output_str = output
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8"))?;
     if format == "json" {
         crate::envelope::activate_json_mode("extract");
     }
     validate_format(format)?;
+    let output_str = output
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8"))?;
     validate_extract_output_name(output_str)?;
     let input_str = input
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("input path is not valid UTF-8"))?;
-    if input == output
-        || (output.exists()
-            && std::fs::canonicalize(input).ok() == std::fs::canonicalize(output).ok())
-    {
-        anyhow::bail!("extracted payload output must differ from the carrier input");
-    }
-    let metadata = std::fs::metadata(output);
-    if let Ok(metadata) = &metadata {
-        if metadata.is_dir() {
-            anyhow::bail!(
-                "refusing to extract onto directory '{}'; choose a file path",
-                output_str
-            );
-        }
-        if !force {
-            anyhow::bail!(
-                "refusing to overwrite existing output '{}'; pass --force to replace it",
-                output_str
-            );
-        }
-    }
-
-    let candidate_bits = match bits {
-        None => bits_candidates("auto")?,
-        Some(value) => bits_candidates(&value.to_string())?,
+    preflight_payload_output(input, output, force)?;
+    let decode_options = GenericDecodeOptions {
+        decrypt: options.encryption_key.is_some() || options.encryption_key_file.is_some(),
+        decryption_key: options.encryption_key,
+        decryption_key_file: options.encryption_key_file,
+        embedding_key: options.embedding_key,
+        embedding_key_file: options.embedding_key_file,
+        password: options.password,
+        password_file: options.password_file,
+        decode_limits: options.decode_limits,
+        trusted_signer: options.trusted_signer,
+        revoked_list: options.revoked_list,
     };
-    let selected_format = media_io::detect_format(input_str, "lsb_video");
-    let media = media_io::read_input(input_str, &selected_format, "lsb_video")?;
-    let limits = DecodeLimits::default();
+    let bits = bits.map_or_else(|| "auto".to_owned(), |value| value.to_string());
+    let recovered = recover_packet(
+        input_str,
+        &options.stego_type,
+        &bits,
+        options.input_format.as_deref(),
+        &decode_options,
+    )?;
+    let digest = blake3::hash(&recovered.payload);
+    let kind = payload_kind_name(recovered.report.packet.envelope.payload_kind);
+    media_io::atomic_write(output, &recovered.payload, force, false)?;
+    if format == "json" {
+        crate::envelope::print(&crate::envelope::success(
+            "extract",
+            serde_json::json!({
+                "payload_bytes": recovered.payload.len(),
+                "payload_kind": kind,
+                "output": output_str,
+                "blake3_digest": digest.to_string(),
+                "kdf": recovered.kdf,
+                "signer_public_key": recovered.signer_public_key,
+                "signer_trusted": recovered.signer_trusted,
+            }),
+        ));
+    } else {
+        println!(
+            "Extracted payload: {} bytes (kind: {})",
+            recovered.payload.len(),
+            kind
+        );
+        println!("Saved to: {}", output_str);
+        print_kdf_line(&recovered.kdf);
+        print_signer_line(
+            recovered.signer_public_key.as_deref(),
+            recovered.signer_trusted,
+        );
+        println!("BLAKE3 digest: {}", digest);
+    }
+    Ok(())
+}
 
-    let mut extracted = None;
-    let mut errors = Vec::new();
-    for candidate in candidate_bits {
+fn preflight_payload_output(input: &Path, output: &Path, force: bool) -> anyhow::Result<()> {
+    if input == output
+        || matches!(
+            (std::fs::canonicalize(input), std::fs::canonicalize(output)),
+            (Ok(input), Ok(output)) if input == output
+        )
+    {
+        anyhow::bail!("payload output must differ from the carrier input");
+    }
+    media_io::preflight_output(output, force)
+}
+
+struct RecoveredPacket {
+    report: ExtractReport,
+    payload: Vec<u8>,
+    kdf: Option<KdfInfo>,
+    signer_public_key: Option<String>,
+    signer_trusted: bool,
+}
+
+fn recover_packet(
+    input: &str,
+    stego_type: &str,
+    bits: &str,
+    input_format: Option<&str>,
+    options: &GenericDecodeOptions,
+) -> anyhow::Result<RecoveredPacket> {
+    validate_kernel(stego_type)?;
+    let password = resolve_password(&options.password, &options.password_file)?;
+    if password.is_some()
+        && (options.decryption_key.is_some() || options.decryption_key_file.is_some())
+    {
+        anyhow::bail!(
+            "--password/--password-file and --decryption-key/--decryption-key-file are mutually exclusive"
+        );
+    }
+    let decrypt_key = resolve_decryption_key(options)?;
+    let embedding_key = resolve_embedding_key(options)?;
+    let trusted_signer = options
+        .trusted_signer
+        .as_deref()
+        .map(decode_hex_array::<32>)
+        .transpose()?;
+    let revocations = crate::key_policy::load_revocations(options.revoked_list.as_deref())?;
+    if trusted_signer
+        .as_ref()
+        .is_some_and(|key| revocations.is_revoked(key))
+    {
+        return Err(RevokedKey.into());
+    }
+    let candidates = bits_candidates(bits)?;
+    let selected_format = input_format
+        .map(str::to_owned)
+        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
+    let media = media_io::read_input(input, &selected_format, stego_type)?;
+    validate_media_kernel(&media, stego_type)?;
+    let audio = is_audio_kernel(stego_type);
+    let mut extraction_error = None;
+    let mut payload_error = None;
+    for candidate in candidates {
         let config = EmbeddingConfig::new(candidate)?;
-        let sequential = SpatialLsb.extract_packet(&media.data, &config, &limits);
-        match sequential {
-            Ok(report) => {
-                extracted = Some(report);
-                break;
+        // Supplying a key still permits a sequential packet, as in decode's
+        // original behavior. Only genuine recognition failures mean absence.
+        for keyed in [true, false] {
+            let extraction = if keyed {
+                let Some(key) = embedding_key else { continue };
+                if audio {
+                    KeyedAudioSpatialLsb::new(key).extract_packet(
+                        &media.data,
+                        &config,
+                        &options.decode_limits,
+                    )
+                } else {
+                    KeyedSpatialLsb::new(key).extract_packet(
+                        &media.data,
+                        &config,
+                        &options.decode_limits,
+                    )
+                }
+            } else if audio {
+                AudioSpatialLsb.extract_packet(&media.data, &config, &options.decode_limits)
+            } else {
+                SpatialLsb.extract_packet(&media.data, &config, &options.decode_limits)
+            };
+            match extraction {
+                Ok(report) => match reverse_packet(
+                    report,
+                    decrypt_key.as_ref(),
+                    password.as_deref(),
+                    trusted_signer.as_ref(),
+                    &revocations,
+                ) {
+                    Ok(recovered) => return Ok(recovered),
+                    Err(error) => {
+                        // A fully parsed packet's authentication failure takes
+                        // precedence over noise at other candidate strengths.
+                        if payload_error.is_none() {
+                            payload_error = Some(error);
+                        }
+                    }
+                },
+                Err(error) => {
+                    let absent = matches!(error, CarrierError::NoPacket)
+                        || (!keyed
+                            && matches!(error, CarrierError::Packet(PacketError::InvalidMagic)))
+                        || (!keyed
+                            && matches!(
+                                error,
+                                CarrierError::InsufficientCapacity { needed_bits, .. }
+                                    if needed_bits == steganographer_core::packet::LOCATOR_SIZE * 8
+                            ));
+                    if !absent && extraction_error.is_none() {
+                        let message =
+                            format!("corrupt generic packet candidate at {candidate} LSB(s)");
+                        let resource_or_unsupported = matches!(
+                            error,
+                            CarrierError::Packet(
+                                PacketError::LimitExceeded { .. }
+                                    | PacketError::NestingDepthExceeded { .. }
+                                    | PacketError::UnsupportedVersion { .. }
+                                    | PacketError::UnknownCriticalField { .. }
+                            )
+                        );
+                        let error = anyhow::Error::new(error);
+                        extraction_error = Some(if resource_or_unsupported {
+                            error.context(message)
+                        } else {
+                            error.context(crate::envelope::AuthenticationError(message))
+                        });
+                    }
+                }
             }
-            Err(error) => errors.push(format!("{candidate} bits: {error}")),
         }
     }
-    let report = extracted.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no valid generic packet found with requested LSB strengths ({})",
-            errors.join("; ")
-        )
-    })?;
-    // Fail closed on transforms: an encrypted packet cannot be extracted
-    // without the decryption key or the packet's password, so reversal runs
-    // without key material unless a password was supplied.
-    let password_bytes = resolve_password(&password, &password_file)?;
-    let kdf = kdf_report(&report.packet.envelope.transforms)?;
+    if let Some(error) = payload_error.or(extraction_error) {
+        return Err(error);
+    }
+    Err(anyhow::Error::new(CarrierError::NoPacket)
+        .context("no valid generic packet found with requested LSB strengths"))
+}
+
+fn reverse_packet(
+    report: ExtractReport,
+    decrypt_key: Option<&EncryptionKey>,
+    password: Option<&[u8]>,
+    trusted_signer: Option<&[u8; 32]>,
+    revocations: &RevocationList,
+) -> anyhow::Result<RecoveredPacket> {
     let context = TransformContext {
         packet_id: &report.packet.envelope.packet_id,
         payload_kind: report.packet.envelope.payload_kind as u16,
@@ -558,43 +646,49 @@ pub fn run_extract_with_password(
     let payload = transforms::reverse_with_password(
         &report.packet.body,
         &context,
-        None,
-        password_bytes.as_deref(),
+        decrypt_key,
+        password,
         &report.packet.envelope.transforms,
         report.packet.envelope.original_len,
-    )
-    .map_err(|e| anyhow::anyhow!("transform reversal failed: {e}"))?;
+    )?;
     if !report.packet.envelope.content_digest.verify(&payload) {
-        anyhow::bail!("recovered payload digest does not match the packet envelope");
+        return Err(transforms::TransformError::DigestMismatch.into());
     }
-
-    let digest = blake3::hash(&payload);
-    let kind = payload_kind_name(report.packet.envelope.payload_kind);
-    std::fs::write(output, &payload)?;
-    if format == "json" {
-        crate::envelope::activate_json_mode("extract");
-        crate::envelope::print(&crate::envelope::success(
-            "extract",
-            serde_json::json!({
-                "payload_bytes": payload.len(),
-                "payload_kind": kind,
-                "output": output_str,
-                "blake3_digest": digest.to_string(),
-                "kdf": kdf,
-            }),
-        ));
-    } else {
-        println!(
-            "Extracted payload: {} bytes (kind: {})",
-            payload.len(),
-            kind
-        );
-        println!("Saved to: {}", output_str);
-        print_kdf_line(&kdf);
-        println!("BLAKE3 digest: {}", digest);
+    // Core reversal has validated the descriptor layout and signature. Read
+    // the public key from those actual params, never from a label or flag.
+    let signer = report
+        .packet
+        .envelope
+        .transforms
+        .iter()
+        .find(|transform| transform.algorithm == transforms::TRANSFORM_PAYLOAD_SIGN_ED25519);
+    let signer_bytes = signer.map(|transform| {
+        <&[u8; 32]>::try_from(&transform.parameters[..32])
+            .expect("core reversal validated the signature descriptor")
+    });
+    if signer_bytes.is_some_and(|key| revocations.is_revoked(key)) {
+        return Err(RevokedKey.into());
     }
-    Ok(())
+    if let Some(expected) = trusted_signer {
+        if signer_bytes != Some(expected) {
+            return Err(
+                anyhow::Error::new(transforms::TransformError::SignatureInvalid)
+                    .context("packet is unsigned or does not match --trusted-signer"),
+            );
+        }
+    }
+    let signer_public_key = signer_bytes.map(|key| encode_hex(key));
+    let signer_trusted = trusted_signer.is_some() && signer_public_key.is_some();
+    let kdf = kdf_report(&report.packet.envelope.transforms)?;
+    Ok(RecoveredPacket {
+        report,
+        payload,
+        kdf,
+        signer_public_key,
+        signer_trusted,
+    })
 }
+
 /// The final path component of an extract target must be a safe file name;
 /// the caller supplies the directory.
 fn validate_extract_output_name(output: &str) -> anyhow::Result<()> {
@@ -647,6 +741,13 @@ fn is_audio_kernel(stego_type: &str) -> bool {
     stego_type == "lsb_audio"
 }
 
+fn validate_media_kernel(media: &media_io::MediaInput, stego_type: &str) -> anyhow::Result<()> {
+    if media.is_audio() != is_audio_kernel(stego_type) {
+        anyhow::bail!("--stego-type {stego_type} is incompatible with the input media");
+    }
+    Ok(())
+}
+
 /// Post-write verification (`FMT-005`): re-read the written carrier and confirm
 /// the same extractor recovers byte-identical packet bytes. This catches any
 /// writer that silently alters the carrier's LSBs.
@@ -677,7 +778,7 @@ fn verify_written_carrier(
     let reencoded = report
         .packet
         .encode(limits)
-        .map_err(|e| anyhow::anyhow!("post-write verification re-encode failed: {e}"))?;
+        .context("post-write verification re-encode failed")?;
     if reencoded != packet_bytes {
         anyhow::bail!(
             "post-write verification failed: re-read packet ({} bytes) differs from embedded packet ({} bytes)",
@@ -742,57 +843,37 @@ fn resolve_signing_key(
     let Some(path) = &options.signing_key else {
         return Ok(None);
     };
-    let key_hex = std::fs::read_to_string(path)?.trim().to_string();
-    let key_bytes = decode_hex_32(&key_hex)?;
-    Ok(Some(ed25519_dalek::SigningKey::from_bytes(&key_bytes)))
-}
-
-fn decode_hex_32(hex: &str) -> anyhow::Result<[u8; 32]> {
-    let trimmed = hex.trim();
-    if trimmed.len() != 64 {
-        anyhow::bail!(
-            "signing key must be 32 bytes (64 hex chars), got {} bytes",
-            trimmed.len() / 2
-        );
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in signing key: {e}"))?;
-    }
-    Ok(out)
+    crate::key_policy::load_signing_key(Path::new(path)).map(Some)
 }
 
 fn resolve_encryption_key(
     options: &GenericEncodeOptions,
     format: &str,
 ) -> anyhow::Result<Option<EncryptionKey>> {
-    if !options.encrypt {
+    if !options.encrypt && options.encryption_key.is_none() && options.encryption_key_file.is_none()
+    {
         return Ok(None);
     }
     let key = match (&options.encryption_key_file, &options.encryption_key) {
-        (Some(path), _) => {
-            let hex_str = std::fs::read_to_string(path)?.trim().to_string();
-            EncryptionKey::from_hex(&hex_str)?
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--encryption-key and --encryption-key-file are mutually exclusive");
+        }
+        (Some(path), None) => {
+            let hex_str = std::fs::read_to_string(path)?;
+            EncryptionKey::from_hex(hex_str.trim())?
         }
         (None, Some(hex_str)) => EncryptionKey::from_hex(hex_str)?,
         (None, None) => {
-            let key = EncryptionKey::generate();
-            // JSON mode must stay a single pure JSON document on stdout, so
-            // the freshly generated key is only echoed on the terminal
-            // stream there; plain mode hands the raw key to the user.
             if format == "json" {
-                eprintln!(
-                    "Generated a random encryption key (raw key shown only in \
-                     plain mode; pass --encryption-key-file to reuse it)"
-                );
-            } else {
-                println!(
-                    "Generated random encryption key (hex, save it to decrypt \
-                     later): {}",
-                    key.expose_hex()
+                anyhow::bail!(
+                    "JSON encryption requires --encryption-key, --encryption-key-file, or a password; a generated secret would be lost"
                 );
             }
+            let key = EncryptionKey::generate();
+            println!(
+                "Generated random encryption key (hex, save it to decrypt later): {}",
+                key.expose_hex()
+            );
             key
         }
     };
@@ -813,7 +894,7 @@ fn resolve_password(
         (Some(password), None) => Ok(Some(password.as_bytes().to_vec())),
         (None, Some(path)) => {
             let text = std::fs::read_to_string(path)
-                .map_err(|error| anyhow::anyhow!("Cannot read password file '{path}': {error}"))?;
+                .with_context(|| format!("Cannot read password file '{path}'"))?;
             Ok(Some(
                 text.trim_end_matches(['\r', '\n']).as_bytes().to_vec(),
             ))
@@ -848,18 +929,22 @@ fn print_kdf_line(kdf: &Option<KdfInfo>) {
     }
 }
 fn resolve_decryption_key(options: &GenericDecodeOptions) -> anyhow::Result<Option<EncryptionKey>> {
-    if !options.decrypt {
-        return Ok(None);
+    match (&options.decryption_key_file, &options.decryption_key) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--decryption-key and --decryption-key-file are mutually exclusive")
+        }
+        (Some(path), None) => {
+            let key = std::fs::read_to_string(path)?;
+            Ok(Some(EncryptionKey::from_hex(key.trim())?))
+        }
+        (None, Some(key)) => Ok(Some(EncryptionKey::from_hex(key)?)),
+        (None, None)
+            if options.decrypt && options.password.is_none() && options.password_file.is_none() =>
+        {
+            anyhow::bail!("--decrypt requires a decryption key or --password/--password-file")
+        }
+        (None, None) => Ok(None),
     }
-    let key = if let Some(ref path) = options.decryption_key_file {
-        let hex_str = std::fs::read_to_string(path)?.trim().to_string();
-        EncryptionKey::from_hex(&hex_str)?
-    } else if let Some(ref hex_str) = options.decryption_key {
-        EncryptionKey::from_hex(hex_str)?
-    } else {
-        anyhow::bail!("--decrypt requires --decryption-key <hex> or --decryption-key-file <path>");
-    };
-    Ok(Some(key))
 }
 
 fn validate_display_filename(value: String) -> anyhow::Result<String> {
@@ -883,10 +968,6 @@ fn payload_kind_name(kind: PayloadKind) -> &'static str {
         PayloadKind::FrameAttestation => "frame_attestation",
         PayloadKind::Manifest => "manifest",
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn print_encode_result(result: &GenericEncodeResult, format: &str) -> anyhow::Result<()> {
@@ -941,6 +1022,7 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
             result.signed, result.compressed, result.encrypted, result.error_corrected
         );
         print_kdf_line(&result.kdf);
+        print_signer_line(result.signer_public_key.as_deref(), result.signer_trusted);
         println!(
             "Placement: {}",
             if result.keyed { "keyed" } else { "sequential" }
@@ -948,6 +1030,20 @@ fn print_decode_result(result: &GenericDecodeResult, format: &str) -> anyhow::Re
         println!("Decoded payload: {}", result.output);
     }
     Ok(())
+}
+
+fn print_signer_line(public_key: Option<&str>, trusted: bool) {
+    if let Some(public_key) = public_key {
+        println!(
+            "Signer: {} ({})",
+            public_key,
+            if trusted {
+                "trusted identity"
+            } else {
+                "signature valid; identity not pinned"
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -979,6 +1075,9 @@ mod tests {
             mime_type: None,
             filename: None,
             input_format: None,
+            raw_width: None,
+            raw_height: None,
+            decode_limits: DecodeLimits::default(),
             encrypt: false,
             encryption_key: None,
             encryption_key_file: None,
@@ -1003,6 +1102,9 @@ mod tests {
             embedding_key_file: None,
             password,
             password_file: None,
+            decode_limits: DecodeLimits::default(),
+            trusted_signer: None,
+            revoked_list: None,
         }
     }
 
@@ -1078,6 +1180,35 @@ mod tests {
         let error =
             encode("/dev/null", "/dev/null2", "lsb_audio", 1, "plain", &options).unwrap_err();
         assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn supplied_raw_key_implies_encryption() {
+        let mut options = encode_options(None);
+        options.encryption_key = Some("01".repeat(32));
+        assert!(!options.encrypt);
+        assert!(resolve_encryption_key(&options, "json").unwrap().is_some());
+        options.encryption_key_file = Some("unused.key".to_string());
+        assert!(resolve_encryption_key(&options, "json").is_err());
+    }
+
+    #[test]
+    fn decrypt_accepts_password_sources_without_raw_key() {
+        let mut options = decode_options(Some("password".to_string()));
+        options.decrypt = true;
+        assert!(resolve_decryption_key(&options).unwrap().is_none());
+        options.password = None;
+        options.password_file = Some("password.txt".to_string());
+        assert!(resolve_decryption_key(&options).unwrap().is_none());
+        options.password_file = None;
+        assert!(resolve_decryption_key(&options).is_err());
+    }
+
+    #[test]
+    fn json_rejects_discarding_generated_encryption_key() {
+        let mut options = encode_options(None);
+        options.encrypt = true;
+        assert!(resolve_encryption_key(&options, "json").is_err());
     }
 
     #[test]

@@ -405,7 +405,8 @@ fn main() {
     );
 
     // Embed with the FIXED chip schedule (weights are irrelevant for embedding).
-    let embedder = LearnedWatermarker::with_model(LearnedConfig::default(), LearnedModel::zeroed());
+    let embedder = LearnedWatermarker::with_model(LearnedConfig::default(), LearnedModel::zeroed())
+        .expect("valid training configuration");
 
     // --- Training dataset ---
     println!(
@@ -504,7 +505,8 @@ fn main() {
         }
     }
     let model = LearnedModel::from_flat(&params.to_vec()).unwrap();
-    let decoder = LearnedWatermarker::with_model(LearnedConfig::default(), model.clone());
+    let decoder = LearnedWatermarker::with_model(LearnedConfig::default(), model.clone())
+        .expect("valid evaluation configuration");
 
     // --- Evaluation: fresh patches, MLP vs majority ---
     println!("\nevaluating on {} fresh patches per corruption...", EVAL);

@@ -26,6 +26,7 @@
 pub mod adaptive;
 pub mod audio;
 pub mod carrier;
+pub mod carrier_binding;
 pub mod config;
 pub mod crypto;
 pub mod dct_video;
@@ -51,6 +52,7 @@ pub mod overlay;
 pub mod packet;
 pub mod password;
 pub mod placement;
+pub mod revocation;
 pub mod signer_backend;
 pub mod spread_spectrum;
 pub mod steganalysis;

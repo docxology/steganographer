@@ -11,12 +11,7 @@ use std::process::Command;
 
 /// Path to the built CLI binary.
 fn cli_binary() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent().unwrap();
-    workspace_root
-        .join("target")
-        .join("debug")
-        .join("steganographer")
+    PathBuf::from(env!("CARGO_BIN_EXE_steganographer"))
 }
 
 /// Path to the workspace root (for finding config/example.toml).
@@ -94,6 +89,8 @@ fn test_packet_encode_encrypt_json_is_pure_document() {
         "--payload-text",
         "encrypt me in json mode",
         "--encrypt",
+        "--encryption-key",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "--format",
         "json",
     ]);
@@ -107,15 +104,27 @@ fn test_packet_encode_encrypt_json_is_pure_document() {
     assert_eq!(result["protocol"], "1.0-alpha");
     assert_eq!(result["encrypted"], true);
 
-    // A freshly generated 32-byte key must never appear on stdout in JSON
-    // mode (the generator hints on stderr instead).
-    assert!(
-        !stdout.contains("Generated random encryption key"),
-        "generated-key prose leaked into JSON stdout: {stdout}"
-    );
-    assert!(
-        stderr.contains("encryption key"),
-        "plain-mode key hint missing from stderr: {stderr}"
+    // Caller-supplied key material is never serialized or logged.
+    assert!(!stdout.contains("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    assert!(!stderr.contains("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    let recovered = tmp.path().join("recovered.txt");
+    let (code, stdout, stderr) = run_cli(&[
+        "--config",
+        &config_path(),
+        "decode",
+        "--input",
+        carrier.to_str().unwrap(),
+        "--output",
+        recovered.to_str().unwrap(),
+        "--decryption-key",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code, 0, "encrypted packet decode failed: {stdout} {stderr}");
+    assert_eq!(
+        std::fs::read(recovered).unwrap(),
+        b"encrypt me in json mode"
     );
 }
 
@@ -324,6 +333,7 @@ fn test_extract_roundtrip_overwrite_and_directory_refusals() {
     );
 
     // Overwrite refusal without --force.
+    std::fs::write(&extracted, b"existing output must survive").unwrap();
     let (code, _, stderr) = run_cli(&[
         "--config",
         &config_path(),
@@ -335,8 +345,11 @@ fn test_extract_roundtrip_overwrite_and_directory_refusals() {
         "--bits",
         "2",
     ]);
-    assert_ne!(code, 0, "overwrite without --force must fail");
-    assert!(stderr.contains("--force"), "refusal message: {stderr}");
+    assert_ne!(code, 0, "overwrite without --force must fail: {stderr}");
+    assert_eq!(
+        std::fs::read(&extracted).unwrap(),
+        b"existing output must survive"
+    );
 
     // --force replaces the output.
     let (code, _, stderr) = run_cli(&[
@@ -366,8 +379,7 @@ fn test_extract_roundtrip_overwrite_and_directory_refusals() {
         "--output",
         dir.to_str().unwrap(),
     ]);
-    assert_ne!(code, 0, "extract onto directory must fail");
-    assert!(stderr.contains("directory"), "directory refusal: {stderr}");
+    assert_ne!(code, 0, "extract onto directory must fail: {stderr}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

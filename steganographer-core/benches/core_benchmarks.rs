@@ -81,20 +81,24 @@ fn bench_spread_spectrum(c: &mut Criterion) {
     let key = [42u8; 32];
     let mut ss = SpreadSpectrumVideo::with_key(key);
     let payload = signer.sign_frame(0, &[0u8; 1024], None);
-    let mut data = vec![128u8; 1024 * 1024];
+    let cover = vec![128u8; 1024 * 1024 * 3];
 
-    c.bench_function("spread_spectrum_embed_1MB", |b| {
-        b.iter(|| {
-            let mut frame = VideoFrame {
-                width: 1024,
-                height: 1024,
-                stride: 1024 * 3,
-                format: VideoFormat::Rgb8,
-                data: &mut data,
-                frame_index: 0,
-            };
-            ss.embed(&mut frame, Some(&payload)).unwrap();
-        });
+    c.bench_function("spread_spectrum_embed_1024x1024_rgb", |b| {
+        b.iter_batched(
+            || cover.clone(),
+            |mut data| {
+                let mut frame = VideoFrame {
+                    width: 1024,
+                    height: 1024,
+                    stride: 1024 * 3,
+                    format: VideoFormat::Rgb8,
+                    data: &mut data,
+                    frame_index: 0,
+                };
+                ss.embed(&mut frame, Some(&payload)).unwrap();
+            },
+            criterion::BatchSize::PerIteration,
+        );
     });
 }
 
@@ -102,20 +106,24 @@ fn bench_dct(c: &mut Criterion) {
     let signer = Signer::generate();
     let mut dct = DctVideo::default();
     let payload = signer.sign_frame(0, &[0u8; 1024], None);
-    let mut data = vec![128u8; 320 * 320 * 3];
+    let cover = vec![128u8; 320 * 320 * 3];
 
     c.bench_function("dct_embed_320x320", |b| {
-        b.iter(|| {
-            let mut frame = VideoFrame {
-                width: 320,
-                height: 320,
-                stride: 320 * 3,
-                format: VideoFormat::Rgb8,
-                data: &mut data,
-                frame_index: 0,
-            };
-            dct.embed(&mut frame, Some(&payload)).unwrap();
-        });
+        b.iter_batched(
+            || cover.clone(),
+            |mut data| {
+                let mut frame = VideoFrame {
+                    width: 320,
+                    height: 320,
+                    stride: 320 * 3,
+                    format: VideoFormat::Rgb8,
+                    data: &mut data,
+                    frame_index: 0,
+                };
+                dct.embed(&mut frame, Some(&payload)).unwrap();
+            },
+            criterion::BatchSize::PerIteration,
+        );
     });
 }
 

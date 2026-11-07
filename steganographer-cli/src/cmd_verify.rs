@@ -3,17 +3,19 @@
 //! Supports all stego types, payload encryption, error correction,
 //! multi-frame spreading, and configurable hash algorithms.
 
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use anyhow::Context;
 use serde::Serialize;
-use steganographer_core::crypto::{HashAlgorithm, SignaturePayload, Verifier};
+use steganographer_core::crypto::{
+    decode_hex_array, encode_hex, HashAlgorithm, SignaturePayload, Verifier,
+};
 use steganographer_core::dct_video::DctVideo;
 use steganographer_core::encryption;
 use steganographer_core::error_correction;
+use steganographer_core::revocation::RevocationList;
 use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
-use crate::carrier_binding;
 use crate::media_io;
+use steganographer_core::carrier_binding;
 
 // ─── Options & Results ──────────────────────────────────────────────
 
@@ -21,6 +23,7 @@ use crate::media_io;
 #[derive(Clone)]
 pub struct VerifyOptions {
     pub bits: VerifyBits,
+    pub frame_index: u64,
     pub decrypt: bool,
     pub decryption_key: Option<String>,
     pub decryption_key_file: Option<String>,
@@ -32,8 +35,8 @@ pub struct VerifyOptions {
     pub input_format: Option<String>,
     pub raw_width: Option<u32>,
     pub raw_height: Option<u32>,
-    /// Path to the revoked-keys JSON list (a JSON array of lowercase-hex
-    /// public keys). `None` resolves to [`DEFAULT_REVOKED_LIST`].
+    /// Additional revoked identities as JSON hex keys. An omitted, absent
+    /// `keys/revoked.json` is optional; known compromise policy always applies.
     pub revoked_list: Option<String>,
 }
 
@@ -74,9 +77,6 @@ impl VerifyBits {
         }
     }
 }
-
-/// Default location of the revoked-keys list.
-pub const DEFAULT_REVOKED_LIST: &str = "keys/revoked.json";
 
 /// Stego types `verify` supports. Anything else is a usage error (exit 1)
 /// rather than a silent `no_signature` result.
@@ -145,6 +145,7 @@ pub struct VerifyResult {
 #[derive(Debug, Serialize)]
 pub struct OtsInfo {
     pub verified: bool,
+    pub pending: bool,
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<u64>,
@@ -152,6 +153,103 @@ pub struct OtsInfo {
 }
 
 // ─── Public entry points ────────────────────────────────────────────
+
+/// Authenticate bytes decoded from the actual published carrier, without reporting
+/// a second command result or applying local signer-revocation policy.
+pub(crate) fn authenticate_written_output(
+    input: &str,
+    stego_type: &str,
+    embedding_key: Option<&[u8; 32]>,
+    opts: &VerifyOptions,
+    hash_algo: HashAlgorithm,
+    public_key: &str,
+) -> anyhow::Result<()> {
+    use steganographer_core::multi_frame::{reconstruct_payload_bytes, GenericPayloadShard};
+    let bits = match opts.bits {
+        VerifyBits::Exact(bits) => bits,
+        VerifyBits::Auto => {
+            anyhow::bail!("Post-write authentication requires exact embedding bits")
+        }
+    };
+    let input_format = opts
+        .input_format
+        .clone()
+        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
+    let first_path = if opts.spread > 1 {
+        format!("{}_001", input)
+    } else {
+        input.to_owned()
+    };
+    let first = media_io::read_input_with_dimensions(
+        &first_path,
+        &input_format,
+        stego_type,
+        opts.raw_width,
+        opts.raw_height,
+    )?;
+    let bytes = if opts.spread > 1 {
+        let total = u8::try_from(opts.spread)?;
+        let mut shards = Vec::with_capacity(usize::from(total));
+        let first_bytes = extract_raw_lsb_video(&first.data, bits)?
+            .ok_or(steganographer_core::transforms::TransformError::SignatureInvalid)?;
+        shards.push(GenericPayloadShard {
+            frame_index: 0,
+            shard_index: 0,
+            total_shards: total,
+            data: first_bytes,
+        });
+        for index in 1..total {
+            let path = format!("{}_{:03}", input, index + 1);
+            let media = media_io::read_input_with_dimensions(
+                &path,
+                &input_format,
+                stego_type,
+                opts.raw_width,
+                opts.raw_height,
+            )?;
+            if media.width != first.width || media.height != first.height {
+                anyhow::bail!("Published spread shard descriptors do not match");
+            }
+            let data = extract_raw_lsb_video(&media.data, bits)?
+                .ok_or(steganographer_core::transforms::TransformError::SignatureInvalid)?;
+            shards.push(GenericPayloadShard {
+                frame_index: u64::from(index),
+                shard_index: index,
+                total_shards: total,
+                data,
+            });
+        }
+        reconstruct_payload_bytes(&shards)?
+    } else {
+        extract_payload(
+            &first.data,
+            first.width,
+            first.height,
+            stego_type,
+            embedding_key,
+            opts,
+            &hash_algo,
+            Some(public_key),
+        )?
+        .ok_or(steganographer_core::transforms::TransformError::SignatureInvalid)?
+        .bytes
+    };
+    if !verify_extracted_bits(
+        &first.data,
+        &bytes,
+        bits,
+        first.width,
+        first.height,
+        bytes.len(),
+        opts,
+        &hash_algo,
+        Some(public_key),
+        stego_type,
+    ) {
+        return Err(steganographer_core::transforms::TransformError::SignatureInvalid.into());
+    }
+    Ok(())
+}
 
 #[allow(dead_code)]
 pub fn run(
@@ -163,6 +261,7 @@ pub fn run(
 ) -> anyhow::Result<String> {
     let opts = VerifyOptions {
         bits: VerifyBits::Auto,
+        frame_index: 0,
         decrypt: false,
         decryption_key: None,
         decryption_key_file: None,
@@ -201,6 +300,7 @@ pub fn run_with_key(
         crate::envelope::activate_json_mode("verify");
     }
     validate_stego_type(stego_type)?;
+    crate::cmd_packet::validate_format(format)?;
     log::info!("Verifying: {}", input);
     log::info!("Stego type: {}", stego_type);
     log::info!(
@@ -210,21 +310,7 @@ pub fn run_with_key(
         opts.spread
     );
 
-    let cfg = steganographer_core::config::Config::from_file(config_path).unwrap_or_else(|e| {
-        log::warn!("Could not load config ({}), using defaults", e);
-        steganographer_core::config::Config {
-            global: steganographer_core::config::GlobalConfig {
-                log_level: Some("info".to_string()),
-                hash_algorithm: None,
-                key_file: None,
-            },
-            video: None,
-            audio: None,
-            ots: None,
-            limits: None,
-            profiles: None,
-        }
-    });
+    let cfg = steganographer_core::config::Config::load_optional(config_path)?;
 
     let configured_payload = cfg
         .video
@@ -232,6 +318,8 @@ pub fn run_with_key(
         .and_then(|video| video.pipeline.as_ref())
         .and_then(|pipeline| pipeline.payload.as_ref());
     let mut effective_opts = opts.clone();
+    effective_opts.decrypt |=
+        effective_opts.decryption_key.is_some() || effective_opts.decryption_key_file.is_some();
     if let Some(payload) = configured_payload {
         effective_opts.decrypt |= payload.encrypt_enabled();
         effective_opts.ecc |= payload
@@ -247,20 +335,50 @@ pub fn run_with_key(
         }
     }
     let opts = &effective_opts;
+    if !matches!(stego_type, "lsb_audio" | "spread_spectrum_video")
+        && (embedding_key_hex.is_some() || opts.embedding_key_file.is_some())
+    {
+        anyhow::bail!(
+            "Legacy embedding keys are supported only for lsb_audio and spread_spectrum_video"
+        );
+    }
+    if !matches!(stego_type, "lsb_video" | "lsb_audio")
+        && matches!(opts.bits, VerifyBits::Exact(bits) if bits != 1)
+    {
+        anyhow::bail!("--bits applies only to LSB kernels");
+    }
+    if !(1..=8).contains(&opts.spread) {
+        anyhow::bail!("--spread must be 1 (disabled) or 2-8");
+    }
+    if opts.spread > 1 && stego_type != "lsb_video" {
+        anyhow::bail!("Legacy --spread supports only lsb_video");
+    }
+    if stego_type == "dct_video" && (opts.decrypt || opts.ecc) {
+        anyhow::bail!(
+            "dct_video supports only direct signed payloads; decryption and ECC are unsupported"
+        );
+    }
+    if let Some(key) = public_key_hex {
+        let bytes = parse_key_32(key, "Public key")?;
+        ed25519_dalek::VerifyingKey::from_bytes(&bytes)?;
+    }
+    if opts.decrypt {
+        resolve_decryption_key(opts)?;
+    }
+    let revocations = crate::key_policy::load_revocations(opts.revoked_list.as_deref())?;
     if opts.ecc && !(1..=16).contains(&opts.ecc_parity) {
         anyhow::bail!(
             "--ecc-parity must be in the range 1-16 when ECC is enabled, got {}",
             opts.ecc_parity
         );
     }
-    let hash_algo = match opts.hash_algorithm.as_deref() {
+    let hash_algo = match opts
+        .hash_algorithm
+        .as_deref()
+        .or(cfg.global.hash_algorithm.as_deref())
+    {
         Some(value) => parse_hash_algorithm_strict(value)?,
-        None => cfg
-            .global
-            .hash_algorithm
-            .as_deref()
-            .map(HashAlgorithm::parse)
-            .unwrap_or(HashAlgorithm::Blake3),
+        None => HashAlgorithm::Blake3,
     };
 
     let input_format = opts
@@ -269,9 +387,14 @@ pub fn run_with_key(
         .map(|s| s.to_string())
         .unwrap_or_else(|| media_io::detect_format(input, stego_type));
 
-    // Read input
+    // Spread groups have no unsuffixed file: bind the first actual shard.
+    let first_input = if opts.spread > 1 {
+        format!("{}_001", input)
+    } else {
+        input.to_string()
+    };
     let media = media_io::read_input_with_dimensions(
-        input,
+        &first_input,
         &input_format,
         stego_type,
         opts.raw_width,
@@ -279,6 +402,9 @@ pub fn run_with_key(
     )?;
     let data = &media.data;
     let (width, height) = (media.width, media.height);
+    if media.is_audio() != (stego_type == "lsb_audio") {
+        anyhow::bail!("Selected stego type is incompatible with the input media");
+    }
     log::info!("Read {} decoded bytes from {}", data.len(), input);
 
     let embedding_key = resolve_embedding_key(embedding_key_hex, opts, &cfg, stego_type)?;
@@ -296,6 +422,7 @@ pub fn run_with_key(
             opts,
             &hash_algo,
             &cfg,
+            &revocations,
         );
     }
 
@@ -332,89 +459,23 @@ pub fn run_with_key(
         }
     };
 
-    let payload_data = apply_ecc_transform(&raw_data, opts)?;
-
-    // Check if the payload data looks like a valid SignaturePayload
-    if payload_data.len() >= SignaturePayload::SERIALIZED_SIZE {
-        let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
-        let len = arr.len();
-        arr.copy_from_slice(&payload_data[..len]);
-
-        if SignaturePayload::has_valid_magic(&arr) {
-            // Direct SignaturePayload
-            let payload = SignaturePayload::from_bytes(&arr)?;
-            return finish_verification(
-                payload,
-                data,
-                width,
-                height,
-                public_key_hex,
-                stego_type,
-                format,
-                false,
-                opts.ecc,
-                detected_bits,
-                raw_data.len(),
-                &hash_algo,
-                &cfg,
-                opts.revoked_list.as_deref().unwrap_or(DEFAULT_REVOKED_LIST),
-            );
-        }
-    }
-
-    // Try decryption if enabled
-    if opts.decrypt {
-        let dec_key = resolve_decryption_key(opts)?;
-        let decrypted = encryption::decrypt(&dec_key, &[0u8; 16], &payload_data, None)?;
-        log::info!(
-            "Decrypted payload: {} -> {} bytes",
-            payload_data.len(),
-            decrypted.len()
-        );
-
-        if decrypted.len() >= SignaturePayload::SERIALIZED_SIZE {
-            let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
-            let len = arr.len();
-            arr.copy_from_slice(&decrypted[..len]);
-            if SignaturePayload::has_valid_magic(&arr) {
-                let payload = SignaturePayload::from_bytes(&arr)?;
-                return finish_verification(
-                    payload,
-                    data,
-                    width,
-                    height,
-                    public_key_hex,
-                    stego_type,
-                    format,
-                    true,
-                    opts.ecc,
-                    detected_bits,
-                    decrypted.len(),
-                    &hash_algo,
-                    &cfg,
-                    opts.revoked_list.as_deref().unwrap_or(DEFAULT_REVOKED_LIST),
-                );
-            }
-        }
-    }
-
-    // If we got raw bytes but can't parse them, report what we found
-    let result = VerifyResult {
-        found: true,
-        stego_type: stego_type.to_string(),
-        frame_index: None,
-        hash: Some(hex_encode(&payload_data[..payload_data.len().min(32)])),
-        signature_preview: None,
-        status: "extracted".to_string(),
-        message: format!("Extracted {} bytes of payload data", payload_data.len()),
-        lsb_bits: detected_bits,
-        encrypted: Some(opts.decrypt),
-        ecc_corrected: Some(opts.ecc),
-        hash_algorithm: Some(hash_algo.name().to_string()),
-        ots: None,
-    };
-    print_result(&result, format)?;
-    Ok("extracted".to_string())
+    let payload = decode_signature_payload(&raw_data, opts)?;
+    finish_verification(
+        payload,
+        data,
+        width,
+        height,
+        public_key_hex,
+        stego_type,
+        format,
+        opts.decrypt,
+        opts.ecc,
+        detected_bits,
+        raw_data.len(),
+        &hash_algo,
+        &cfg,
+        &revocations,
+    )
 }
 
 // ─── Verification finalization ──────────────────────────────────────
@@ -434,10 +495,10 @@ fn finish_verification(
     embedded_payload_len: usize,
     hash_algo: &HashAlgorithm,
     cfg: &steganographer_core::config::Config,
-    revoked_list: &str,
+    revocations: &RevocationList,
 ) -> anyhow::Result<String> {
-    let hash_hex = hex_encode(&payload.hash);
-    let sig_preview = hex_encode(&payload.signature.to_bytes()[..16]);
+    let hash_hex = encode_hex(&payload.hash);
+    let sig_preview = encode_hex(&payload.signature.to_bytes()[..16]);
 
     // Compute the canonical carrier bytes once — used for both signature
     // verification and the optional OTS proof check.
@@ -451,12 +512,7 @@ fn finish_verification(
     )?;
 
     let (status, message) = if let Some(pk_hex) = public_key_hex {
-        let pk_bytes = hex_decode(pk_hex)?;
-        if pk_bytes.len() != 32 {
-            anyhow::bail!("Public key must be 32 bytes (64 hex chars)");
-        }
-        let mut pk_arr = [0u8; 32];
-        pk_arr.copy_from_slice(&pk_bytes);
+        let pk_arr = parse_key_32(pk_hex, "Public key")?;
         let verifier = Verifier::with_hash_algorithm(
             ed25519_dalek::VerifyingKey::from_bytes(&pk_arr)?,
             *hash_algo,
@@ -464,16 +520,12 @@ fn finish_verification(
         let is_valid = verifier.verify(&payload, &canonical, None);
         if is_valid {
             log::info!("Signature verification: VALID");
-            // Check if this key has been revoked. A revoked key still
-            // cryptographically validates, so the status is "valid_revoked"
-            // (exit 0): the signature is genuine but the identity is no
-            // longer trusted. Consumers must branch on the status string.
-            let revoked_warning = check_revoked_key(pk_hex, revoked_list);
-            if let Some(warning) = &revoked_warning {
-                log::warn!("{}", warning);
+            // A valid signature from a revoked identity is a policy failure.
+            if revocations.is_revoked(&pk_arr) {
+                log::warn!("Signature is valid but the signing identity is revoked");
                 (
                     "valid_revoked".to_string(),
-                    format!("Signature is valid but key has been REVOKED: {}", warning),
+                    "Signature is valid but the signing identity is REVOKED".to_string(),
                 )
             } else {
                 ("valid".to_string(), "Signature is valid".to_string())
@@ -513,18 +565,19 @@ fn finish_verification(
     // being printed as a second JSON document.
     if cfg.ots_enabled() {
         let ots_cfg = cfg.ots_config();
-        let client = steganographer_core::OTSClient::from_config(&ots_cfg);
+        let client = steganographer_core::OTSClient::from_config(&ots_cfg)?;
         let digest = steganographer_core::OTSClient::compute_sha256_digest(&canonical);
-        let digest_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        let proof_path = client.proof_path_for(&digest_hex);
+        let digest_hex = encode_hex(&digest);
+        let proof_path = client.proof_path_for(&digest_hex)?;
         if proof_path.exists() {
             log::info!("Found OTS proof at {}", proof_path.display());
-            match steganographer_core::OTSClient::load_proof(&proof_path) {
+            let rt = tokio::runtime::Runtime::new()?;
+            match rt.block_on(steganographer_core::OTSClient::load_proof(&proof_path)) {
                 Ok(proof) => {
-                    let rt = tokio::runtime::Runtime::new()?;
-                    result.ots = match rt.block_on(client.verify(&proof)) {
+                    result.ots = match rt.block_on(client.verify(&proof, &digest)) {
                         Ok(vr) => Some(OtsInfo {
                             verified: vr.verified,
+                            pending: vr.pending,
                             method: vr.method,
                             timestamp: vr.timestamp,
                             details: vr.details,
@@ -533,6 +586,7 @@ fn finish_verification(
                             log::warn!("OTS verify failed: {}", e);
                             Some(OtsInfo {
                                 verified: false,
+                                pending: false,
                                 method: client.method().as_str().to_string(),
                                 timestamp: None,
                                 details: format!("verification failed: {e}"),
@@ -563,11 +617,8 @@ struct ExtractedPayload {
 #[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
 /// Extract raw payload bytes from media.
 ///
-/// `public_key_hex` and `hash_algo` are threaded through only so auto-mode
-/// LSB extraction can *verify* each candidate strength against the real public
-/// key and pick the bits value that genuinely validates, instead of the first
-/// strength whose bytes merely parse. Without a key, candidates are matched by
-/// magic only (the historical behaviour).
+/// Auto mode selects only candidates passing ECC, requested AEAD decryption,
+/// strict payload parsing, and signature verification when a public key is supplied.
 fn extract_payload(
     data: &[u8],
     width: u32,
@@ -588,6 +639,9 @@ fn extract_payload(
                         bytes,
                         lsb_bits: Some(bits),
                     };
+                    if opts.bits != VerifyBits::Auto {
+                        return Ok(Some(extracted));
+                    }
                     // Prefer the candidate whose signature actually validates
                     // against the public key, since only the bits value used at
                     // encode time canonicalizes to the signed carrier.
@@ -609,7 +663,7 @@ fn extract_payload(
                     fallback.get_or_insert(extracted);
                 }
             }
-            Ok(verified.or(fallback))
+            select_candidate(verified, fallback, opts.bits)
         }
         "lsb_audio" => {
             let key = embedding_key.ok_or_else(|| {
@@ -623,11 +677,14 @@ fn extract_payload(
             let mut fallback = None;
             let mut verified: Option<ExtractedPayload> = None;
             for &bits in opts.bits.candidates() {
-                if let Some(bytes) = extract_raw_lsb_audio(&samples, bits, key)? {
+                if let Some(bytes) = extract_raw_lsb_audio(&samples, bits, key, opts.frame_index)? {
                     let extracted = ExtractedPayload {
                         bytes,
                         lsb_bits: Some(bits),
                     };
+                    if opts.bits != VerifyBits::Auto {
+                        return Ok(Some(extracted));
+                    }
                     if verify_extracted_bits(
                         data,
                         &extracted.bytes,
@@ -646,7 +703,7 @@ fn extract_payload(
                     fallback.get_or_insert(extracted);
                 }
             }
-            Ok(verified.or(fallback))
+            select_candidate(verified, fallback, opts.bits)
         }
         "spread_spectrum_video" => {
             let key = embedding_key.ok_or_else(|| {
@@ -684,18 +741,22 @@ fn extract_payload(
     }
 }
 
-fn parse_key_32(value: &str, label: &str) -> anyhow::Result<[u8; 32]> {
-    let bytes = hex_decode(value)?;
-    if bytes.len() != 32 {
-        anyhow::bail!(
-            "{} must be exactly 32 bytes (64 hex chars), got {} bytes",
-            label,
-            bytes.len()
-        );
+fn select_candidate(
+    verified: Option<ExtractedPayload>,
+    fallback: Option<ExtractedPayload>,
+    bits: VerifyBits,
+) -> anyhow::Result<Option<ExtractedPayload>> {
+    if verified.is_some() {
+        return Ok(verified);
     }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Ok(key)
+    if bits == VerifyBits::Auto && fallback.is_some() {
+        return Err(steganographer_core::transforms::TransformError::SignatureInvalid.into());
+    }
+    Ok(fallback)
+}
+
+fn parse_key_32(value: &str, label: &str) -> anyhow::Result<[u8; 32]> {
+    decode_hex_array(value).with_context(|| format!("Invalid {label}"))
 }
 
 #[allow(clippy::too_many_arguments)] // internal CLI orchestration entry
@@ -720,20 +781,8 @@ fn verify_extracted_bits(
     public_key_hex: Option<&str>,
     stego_type: &str,
 ) -> bool {
-    let payload_data = match apply_ecc_transform(raw_data, opts) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    if payload_data.len() < SignaturePayload::SERIALIZED_SIZE {
-        return false;
-    }
-    let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
-    arr.copy_from_slice(&payload_data[..SignaturePayload::SERIALIZED_SIZE]);
-    if !SignaturePayload::has_valid_magic(&arr) {
-        return false;
-    }
-    let payload = match SignaturePayload::from_bytes(&arr) {
-        Ok(p) => p,
+    let payload = match decode_signature_payload(raw_data, opts) {
+        Ok(payload) => payload,
         Err(_) => return false,
     };
     let canonical =
@@ -743,15 +792,10 @@ fn verify_extracted_bits(
         };
     match public_key_hex {
         Some(pk_hex) => {
-            let pk_bytes = match hex_decode(pk_hex) {
-                Ok(b) => b,
+            let pk_arr = match decode_hex_array::<32>(pk_hex) {
+                Ok(bytes) => bytes,
                 Err(_) => return false,
             };
-            if pk_bytes.len() != 32 {
-                return false;
-            }
-            let mut pk_arr = [0u8; 32];
-            pk_arr.copy_from_slice(&pk_bytes);
             let verifier = match ed25519_dalek::VerifyingKey::from_bytes(&pk_arr) {
                 Ok(k) => Verifier::with_hash_algorithm(k, *hash_algo),
                 Err(_) => return false,
@@ -760,6 +804,27 @@ fn verify_extracted_bits(
         }
         None => true,
     }
+}
+
+fn decode_signature_payload(
+    raw_data: &[u8],
+    opts: &VerifyOptions,
+) -> anyhow::Result<SignaturePayload> {
+    use steganographer_core::transforms::TransformError;
+    let corrected = apply_ecc_transform(raw_data, opts)
+        .map_err(|error| TransformError::ErrorCorrectionFailed(error.to_string()))?;
+    let plaintext = if opts.decrypt {
+        let key = resolve_decryption_key(opts)?;
+        encryption::decrypt_legacy(&key, &corrected, None)
+            .map_err(|error| TransformError::DecryptionFailed(error.to_string()))?
+    } else {
+        corrected
+    };
+    let bytes: &[u8; SignaturePayload::SERIALIZED_SIZE] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| TransformError::SignatureInvalid)?;
+    SignaturePayload::from_bytes(bytes).map_err(|_| TransformError::SignatureInvalid.into())
 }
 
 fn apply_ecc_transform(raw_data: &[u8], opts: &VerifyOptions) -> anyhow::Result<Vec<u8>> {
@@ -800,9 +865,10 @@ fn extract_raw_lsb_video(data: &[u8], bits: u8) -> anyhow::Result<Option<Vec<u8>
     for &bit in &all_bits[..32] {
         len = (len << 1) | bit as u32;
     }
-    if len == 0 || len > 100_000 {
+    if len == 0 || len > 800_000 || !len.is_multiple_of(8) {
         return Ok(None); // sanity check
     }
+    let len = len / 8;
 
     let total_bits = 32 + len as usize * 8;
     if all_bits.len() < total_bits {
@@ -825,16 +891,22 @@ fn extract_raw_lsb_audio(
     samples: &[i16],
     bits: u8,
     key: &[u8; 32],
+    frame_index: u64,
 ) -> anyhow::Result<Option<Vec<u8>>> {
+    if samples.len() < 32usize.div_ceil(bits as usize) {
+        return Ok(None);
+    }
     // Generate permutation
     let mut seed = [0u8; 32];
-    let frame_bytes = 0u64.to_le_bytes();
+    let frame_bytes = frame_index.to_le_bytes();
     for (i, byte) in key.iter().enumerate() {
         seed[i] = byte ^ frame_bytes[i % 8];
     }
-    let mut rng = rand::rngs::StdRng::from_seed(seed);
-    let mut indices: Vec<usize> = (0..samples.len()).collect();
-    indices.shuffle(&mut rng);
+    let indices = steganographer_core::placement::KeyedPermutation::try_new(
+        samples.len(),
+        seed,
+        b"legacy-audio-v4",
+    )?;
 
     // Read 32 bits for length prefix
     let len_bits_needed = 32usize.div_ceil(bits as usize);
@@ -844,7 +916,8 @@ fn extract_raw_lsb_audio(
 
     let mut all_bits = Vec::new();
     let mut bit_count = 0;
-    for &idx in &indices {
+    for logical in 0..len_bits_needed {
+        let idx = indices.permute(logical);
         if bit_count >= 32 {
             break;
         }
@@ -861,15 +934,17 @@ fn extract_raw_lsb_audio(
     for &bit in &all_bits[..32] {
         len = (len << 1) | bit as u32;
     }
-    if len == 0 || len > 100_000 {
+    if len == 0 || len > 800_000 || !len.is_multiple_of(8) {
         return Ok(None);
     }
+    let len = len / 8;
 
     // Read full payload
     let total_bits = 32 + len as usize * 8;
     all_bits.clear();
     bit_count = 0;
-    for &idx in &indices {
+    for logical in 0..total_bits.div_ceil(bits as usize).min(indices.len()) {
+        let idx = indices.permute(logical);
         if bit_count >= total_bits {
             break;
         }
@@ -918,7 +993,7 @@ fn extract_raw_ss_video(data: &[u8], key: &[u8; 32]) -> anyhow::Result<Option<Ve
         if start + spread > data.len() {
             return Ok(None);
         }
-        let bit = ss.extract_bit(data, start, bit_pos, 0);
+        let bit = ss.extract_bit(data, start, bit_pos, 0)?;
         len = (len << 1) | bit as u32;
     }
     if len == 0 || len > 100_000 {
@@ -936,7 +1011,7 @@ fn extract_raw_ss_video(data: &[u8], key: &[u8; 32]) -> anyhow::Result<Option<Ve
         for bit_in_byte in 0..8 {
             let payload_bit = 32 + byte_idx * 8 + bit_in_byte;
             let start = payload_bit * spread;
-            let bit = ss.extract_bit(data, start, payload_bit, 0);
+            let bit = ss.extract_bit(data, start, payload_bit, 0)?;
             *slot |= bit << bit_in_byte;
         }
     }
@@ -956,88 +1031,101 @@ fn verify_multi_frame(
     opts: &VerifyOptions,
     hash_algo: &HashAlgorithm,
     cfg: &steganographer_core::config::Config,
+    revocations: &RevocationList,
 ) -> anyhow::Result<String> {
-    let n = opts.spread as usize;
-    log::info!("Multi-frame verify: reading {} shards", n);
-
+    use steganographer_core::multi_frame::{reconstruct_payload_bytes, GenericPayloadShard};
+    let n = u8::try_from(opts.spread)?;
+    let input_format = opts
+        .input_format
+        .clone()
+        .unwrap_or_else(|| media_io::detect_format(input, stego_type));
+    let mut media_shards = Vec::with_capacity(usize::from(n));
+    for index in 0..n {
+        let path = format!("{}_{:03}", input, index + 1);
+        media_shards.push(media_io::read_input_with_dimensions(
+            &path,
+            &input_format,
+            stego_type,
+            opts.raw_width,
+            opts.raw_height,
+        )?);
+    }
+    let mut fallback = None;
     for &bits in opts.bits.candidates() {
-        let mut shards: Vec<Vec<u8>> = Vec::new();
-        for i in 0..n {
-            let shard_path = format!("{}_{:03}", input, i + 1);
-            let shard_data = std::fs::read(&shard_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read shard {}: {}", i + 1, e))?;
-            match extract_raw_lsb_video(&shard_data, bits)? {
-                Some(shard) => shards.push(shard),
-                None => {
-                    shards.clear();
-                    break;
-                }
+        let mut shards = Vec::with_capacity(usize::from(n));
+        for (index, media) in media_shards.iter().enumerate() {
+            if media.width != width || media.height != height || media.is_audio() {
+                anyhow::bail!("Spread shard media descriptors do not match");
+            }
+            match extract_raw_lsb_video(&media.data, bits)? {
+                Some(bytes) => shards.push(GenericPayloadShard {
+                    frame_index: index as u64,
+                    shard_index: index as u8,
+                    total_shards: n,
+                    data: bytes,
+                }),
+                None => break,
             }
         }
-        if shards.len() != n {
+        if shards.len() != usize::from(n) {
             continue;
         }
-
-        let mut payload_bytes = vec![0u8; shards[0].len()];
-        for shard in &shards {
-            for j in 0..payload_bytes.len().min(shard.len()) {
-                payload_bytes[j] ^= shard[j];
-            }
-        }
-
-        let payload_data = apply_ecc_transform(&payload_bytes, opts)?;
-        let (payload_data, was_encrypted) = if opts.decrypt {
-            let key = resolve_decryption_key(opts)?;
-            (
-                encryption::decrypt(&key, &[0u8; 16], &payload_data, None)?,
-                true,
-            )
-        } else {
-            (payload_data, false)
+        let payload_bytes = match reconstruct_payload_bytes(&shards) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
         };
-
-        if payload_data.len() >= SignaturePayload::SERIALIZED_SIZE {
-            let mut arr = [0u8; SignaturePayload::SERIALIZED_SIZE];
-            let len = arr.len();
-            arr.copy_from_slice(&payload_data[..len]);
-            if SignaturePayload::has_valid_magic(&arr) {
-                let payload = SignaturePayload::from_bytes(&arr)?;
-                return finish_verification(
-                    payload,
-                    data,
-                    width,
-                    height,
-                    public_key_hex,
-                    stego_type,
-                    format,
-                    was_encrypted,
-                    opts.ecc,
-                    Some(bits),
-                    payload_bytes.len(),
-                    hash_algo,
-                    cfg,
-                    opts.revoked_list.as_deref().unwrap_or(DEFAULT_REVOKED_LIST),
-                );
-            }
+        if verify_extracted_bits(
+            data,
+            &payload_bytes,
+            bits,
+            width,
+            height,
+            payload_bytes.len(),
+            opts,
+            hash_algo,
+            public_key_hex,
+            stego_type,
+        ) {
+            let payload = decode_signature_payload(&payload_bytes, opts)?;
+            return finish_verification(
+                payload,
+                data,
+                width,
+                height,
+                public_key_hex,
+                stego_type,
+                format,
+                opts.decrypt,
+                opts.ecc,
+                Some(bits),
+                payload_bytes.len(),
+                hash_algo,
+                cfg,
+                revocations,
+            );
         }
+        fallback.get_or_insert((payload_bytes, bits));
     }
-
-    let result = VerifyResult {
-        found: false,
-        stego_type: stego_type.to_string(),
-        frame_index: None,
-        hash: None,
-        signature_preview: None,
-        status: "no_signature".to_string(),
-        message: "Reconstructed payload is not a valid signature".to_string(),
-        lsb_bits: None,
-        encrypted: None,
-        ecc_corrected: None,
-        hash_algorithm: Some(hash_algo.name().to_string()),
-        ots: None,
-    };
-    print_result(&result, format)?;
-    Ok("no_signature".to_string())
+    if let Some((bytes, bits)) = fallback {
+        let payload = decode_signature_payload(&bytes, opts)?;
+        return finish_verification(
+            payload,
+            data,
+            width,
+            height,
+            public_key_hex,
+            stego_type,
+            format,
+            opts.decrypt,
+            opts.ecc,
+            Some(bits),
+            bytes.len(),
+            hash_algo,
+            cfg,
+            revocations,
+        );
+    }
+    Err(steganographer_core::transforms::TransformError::SignatureInvalid.into())
 }
 
 // ─── Key resolution ─────────────────────────────────────────────────
@@ -1100,25 +1188,24 @@ fn print_result(result: &VerifyResult, format: &str) -> anyhow::Result<()> {
     match format {
         "json" => {
             let value = serde_json::to_value(result)?;
-            if result.status == "invalid" {
-                // Verification ran fine, but the signature failed: status
-                // "error" with the stable verification_failed code, exit 3
-                // (set by the caller). The full result is still attached.
-                crate::envelope::print(&crate::envelope::error_with_result(
-                    "verify",
-                    crate::envelope::VERIFICATION_FAILED,
-                    "signature verification failed",
-                    Some(value),
-                ));
-            } else {
-                let warnings = if result.status == "valid_revoked" {
-                    vec![result.message.clone()]
-                } else {
-                    Vec::new()
-                };
-                crate::envelope::print(&crate::envelope::success_with_warnings(
-                    "verify", value, warnings,
-                ));
+            match result.status.as_str() {
+                "invalid" | "valid_revoked" => {
+                    crate::envelope::print(&crate::envelope::error_with_result(
+                        "verify",
+                        crate::envelope::VERIFICATION_FAILED,
+                        &result.message,
+                        Some(value),
+                    ));
+                }
+                "no_signature" => {
+                    crate::envelope::print(&crate::envelope::error_with_result(
+                        "verify",
+                        crate::envelope::PACKET_NOT_FOUND,
+                        &result.message,
+                        Some(value),
+                    ));
+                }
+                _ => crate::envelope::print(&crate::envelope::success("verify", value)),
             }
         }
         _ => print_plain(result),
@@ -1199,46 +1286,186 @@ fn print_plain(result: &VerifyResult) {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Check if a public key has been revoked by looking it up in a revoked-keys
-/// JSON list (an array of hex-encoded public keys). `list_path` defaults to
-/// [`DEFAULT_REVOKED_LIST`] at the call sites.
-/// Returns Some(warning_message) if the key is revoked, None otherwise.
-fn check_revoked_key(public_key_hex: &str, list_path: &str) -> Option<String> {
-    let revoked_path = std::path::Path::new(list_path);
-    if !revoked_path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(revoked_path).ok()?;
-    let revoked: Vec<String> = serde_json::from_str(&content).ok()?;
-    let key_lower = public_key_hex.to_lowercase();
-    if revoked.iter().any(|k| k.to_lowercase() == key_lower) {
-        Some(format!(
-            "Public key {} is in the revoked-keys list ({})",
-            public_key_hex, list_path
-        ))
-    } else {
-        None
-    }
-}
-
-fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        anyhow::bail!("Hex string must have even length");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))
-        })
-        .collect()
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_verify_options() -> VerifyOptions {
+        VerifyOptions {
+            bits: VerifyBits::Auto,
+            frame_index: 0,
+            decrypt: false,
+            decryption_key: None,
+            decryption_key_file: None,
+            embedding_key_file: None,
+            ecc: false,
+            ecc_parity: 4,
+            spread: 1,
+            hash_algorithm: None,
+            input_format: None,
+            raw_width: None,
+            raw_height: None,
+            revoked_list: None,
+        }
+    }
+
+    #[test]
+    fn encrypted_ecc_auto_bits_and_descriptor_spread_roundtrip() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        std::fs::write(&config, "[global]\n").unwrap();
+        let input = directory.path().join("cover.png");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([128; 3]))
+            .save(&input)
+            .unwrap();
+        let signer = steganographer_core::crypto::Signer::generate();
+        let signing_key = directory.path().join("signing.key");
+        std::fs::write(&signing_key, encode_hex(&signer.signing_key_bytes())).unwrap();
+        let revoked = directory.path().join("revoked.json");
+        std::fs::write(&revoked, "[]").unwrap();
+        let public_key = encode_hex(&signer.verifying_key().to_bytes());
+        let encryption_key = "ab".repeat(32);
+        for spread in [1, 2] {
+            let output = directory.path().join(format!("encoded-{spread}.png"));
+            let options = crate::cmd_encode::EncodeOptions {
+                encrypt: true,
+                encryption_key: Some(encryption_key.clone()),
+                encryption_key_file: None,
+                embedding_key: None,
+                embedding_key_file: None,
+                ecc: true,
+                ecc_parity: 4,
+                spread,
+                hash_algorithm: None,
+                signing_key: Some(signing_key.to_str().unwrap().to_owned()),
+                input_format: None,
+                raw_width: None,
+                raw_height: None,
+                quiet_report: true,
+            };
+            crate::cmd_encode::run(
+                config.to_str().unwrap(),
+                input.to_str().unwrap(),
+                output.to_str().unwrap(),
+                "lsb_video",
+                2,
+                "json",
+                &options,
+            )
+            .unwrap();
+            let mut verify_options = plain_verify_options();
+            verify_options.decrypt = true;
+            verify_options.decryption_key = Some(encryption_key.clone());
+            verify_options.ecc = true;
+            verify_options.spread = spread;
+            verify_options.revoked_list = Some(revoked.to_str().unwrap().to_owned());
+            assert_eq!(
+                run_with_key(
+                    config.to_str().unwrap(),
+                    output.to_str().unwrap(),
+                    Some(&public_key),
+                    "lsb_video",
+                    "json",
+                    None,
+                    &verify_options
+                )
+                .unwrap(),
+                "valid"
+            );
+        }
+    }
+
+    #[test]
+    fn keyed_audio_extracts_core_recording_at_requested_frame_index() {
+        use steganographer_core::{AudioBuffer, AudioStegoModule};
+        let key = [7; 32];
+        let mut samples = vec![128i16; 4096];
+        let original: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let canonical = carrier_binding::canonicalize(
+            &original,
+            "lsb_audio",
+            2,
+            4096,
+            1,
+            SignaturePayload::SERIALIZED_SIZE,
+        )
+        .unwrap();
+        let signer = steganographer_core::crypto::Signer::generate();
+        let payload = signer.sign_frame(77, &canonical, None);
+        let mut kernel = steganographer_core::lsb_audio::LsbAudio::try_new(2, key).unwrap();
+        kernel
+            .embed(
+                &mut AudioBuffer {
+                    samples: &mut samples,
+                    channels: 1,
+                    sample_rate: 44100,
+                    frame_index: 77,
+                },
+                Some(&payload),
+            )
+            .unwrap();
+        let data: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let extracted = extract_raw_lsb_audio(&samples, 2, &key, 77)
+            .unwrap()
+            .unwrap();
+        let mut options = plain_verify_options();
+        options.frame_index = 77;
+        let public_key = encode_hex(&signer.verifying_key().to_bytes());
+        assert!(verify_extracted_bits(
+            &data,
+            &extracted,
+            2,
+            4096,
+            1,
+            extracted.len(),
+            &options,
+            &HashAlgorithm::Blake3,
+            Some(&public_key),
+            "lsb_audio"
+        ));
+    }
+
+    #[test]
+    fn key_sets_preflight_and_malformed_revocations_preserve_existing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = directory.path().join("signer");
+        std::fs::write(prefix.with_extension("pub"), "existing-public-key").unwrap();
+        assert!(crate::cmd_encode::keygen(prefix.to_str().unwrap(), "plain").is_err());
+        assert!(!prefix.with_extension("key").exists());
+        assert_eq!(
+            std::fs::read_to_string(prefix.with_extension("pub")).unwrap(),
+            "existing-public-key"
+        );
+        let derived = directory.path().join("derived");
+        std::fs::create_dir(&derived).unwrap();
+        std::fs::write(derived.join("encryption.key"), "existing-secret").unwrap();
+        assert!(crate::cmd_encode::derive_keys(
+            &"ab".repeat(32),
+            derived.to_str().unwrap(),
+            "plain"
+        )
+        .is_err());
+        assert!(!derived.join("signing.key").exists());
+        assert_eq!(
+            std::fs::read_to_string(derived.join("encryption.key")).unwrap(),
+            "existing-secret"
+        );
+        let revoked = directory.path().join("revoked.json");
+        std::fs::write(&revoked, "not-json").unwrap();
+        assert!(crate::cmd_encode::revoke_key(
+            &"ab".repeat(32),
+            revoked.to_str().unwrap(),
+            "plain"
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(revoked).unwrap(), "not-json");
+    }
 
     #[test]
     fn verify_bits_parse_accepts_auto_and_one_to_four() {
@@ -1302,21 +1529,6 @@ mod tests {
     }
 
     #[test]
-    fn check_revoked_key_matches_list_case_insensitively() {
-        let tmp = tempfile::tempdir().unwrap();
-        let list = tmp.path().join("revoked.json");
-        std::fs::write(&list, r#"["ABCD1234"]"#).unwrap();
-        assert!(check_revoked_key("abcd1234", list.to_str().unwrap()).is_some());
-        assert!(check_revoked_key("abcd1234", list.to_str().unwrap())
-            .unwrap()
-            .contains(list.to_str().unwrap()));
-        assert!(check_revoked_key("ffff00", list.to_str().unwrap()).is_none());
-        // A missing list file must never mark a key revoked.
-        let missing = tmp.path().join("missing.json");
-        assert!(check_revoked_key("abcd1234", missing.to_str().unwrap()).is_none());
-    }
-
-    #[test]
     fn ss_extraction_roundtrips_core_host_canceling_embed() {
         // Length-prefixed payload: 32-bit length MSB-first, then payload bits
         // LSB-first within each byte (the legacy spread-spectrum wire format:
@@ -1338,7 +1550,7 @@ mod tests {
         let ss = steganographer_core::spread_spectrum::SpreadSpectrumVideo::with_key(key);
         for (bit_pos, &bit) in bits.iter().enumerate() {
             let start = bit_pos * SS_SPREAD_FACTOR;
-            ss.embed_bit(&mut data, start, bit, bit_pos, 0);
+            ss.embed_bit(&mut data, start, bit, bit_pos, 0).unwrap();
         }
 
         let extracted = extract_raw_ss_video(&data, &key)

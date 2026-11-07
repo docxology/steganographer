@@ -8,17 +8,19 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```
 //! use steganographer_core::kdf;
 //!
-//! let master = b"my secret master key phrase";
-//! let keys = kdf::derive_all(master);
+//! // Generate and retain a high-entropy master; use password::derive_all_from_password
+//! // for human passwords instead of feeding a phrase directly to this fast KDF.
+//! let master = zeroize::Zeroizing::new(rand::random::<[u8; 32]>());
+//! let keys = kdf::derive_all(master.as_ref());
 //! // keys.signing_key  → 32 bytes for Ed25519
 //! // keys.encryption_key → 32 bytes for ChaCha20-Poly1305
 //! // keys.embedding_key → 32 bytes for LSB PRNG
 //! ```
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Context strings for BLAKE3 derive_key.
 /// These are fixed and must not change between encode and verify.
@@ -57,17 +59,17 @@ impl std::fmt::Debug for DerivedKeys {
 
 /// Derive the Ed25519 signing key from a master secret.
 pub fn derive_signing_key(master: &[u8]) -> [u8; 32] {
-    blake3::derive_key(SIGNING_CONTEXT, master)
+    derive_secret(SIGNING_CONTEXT, master)
 }
 
 /// Derive the ChaCha20-Poly1305 encryption key from a master secret.
 pub fn derive_encryption_key(master: &[u8]) -> [u8; 32] {
-    blake3::derive_key(ENCRYPTION_CONTEXT, master)
+    derive_secret(ENCRYPTION_CONTEXT, master)
 }
 
 /// Derive the LSB embedding key from a master secret.
 pub fn derive_embedding_key(master: &[u8]) -> [u8; 32] {
-    blake3::derive_key(EMBEDDING_CONTEXT, master)
+    derive_secret(EMBEDDING_CONTEXT, master)
 }
 
 /// Derive the keyed-locator subkey from an embedding key.
@@ -75,12 +77,12 @@ pub fn derive_embedding_key(master: &[u8]) -> [u8; 32] {
 /// Keyed-locator placement uses a separate domain label so the locator
 /// schedule never shares key material with body placement or encryption.
 pub fn derive_locator_key(embedding_key: &[u8; 32]) -> [u8; 32] {
-    blake3::derive_key(LOCATOR_CONTEXT, embedding_key)
+    derive_secret(LOCATOR_CONTEXT, embedding_key)
 }
 
 /// Derive the keyed body-placement subkey from an embedding key.
 pub fn derive_placement_key(embedding_key: &[u8; 32]) -> [u8; 32] {
-    blake3::derive_key(PLACEMENT_CONTEXT, embedding_key)
+    derive_secret(PLACEMENT_CONTEXT, embedding_key)
 }
 
 /// Derive a frame-scoped embedding key for keyed carriers whose placement is
@@ -96,11 +98,10 @@ pub fn derive_frame_embedding_key(embedding_key: &[u8; 32], frame_index: u64) ->
     if frame_index == 0 {
         return *embedding_key;
     }
-    blake3::derive_key(
+    derive_indexed(
         "steganographer-frame-placement-v1",
-        [embedding_key.as_slice(), &frame_index.to_le_bytes()]
-            .concat()
-            .as_slice(),
+        embedding_key,
+        frame_index,
     )
 }
 
@@ -115,20 +116,34 @@ pub fn derive_all(master: &[u8]) -> DerivedKeys {
 
 /// Derive a per-session signing key from a master secret and a session counter.
 ///
-/// This enables forward secrecy: each session uses a different signing key.
-/// `session_counter` should be unique per session (e.g., a timestamp or
-/// sequential counter).
+/// This separates sessions, but does NOT provide forward secrecy: retaining the
+/// master permits regeneration of past keys. Use a unique counter per session.
 pub fn derive_session_signing_key(master: &[u8], session_counter: u64) -> [u8; 32] {
-    let mut input = master.to_vec();
-    input.extend_from_slice(&session_counter.to_le_bytes());
-    blake3::derive_key("steganographer-session-signing-v1", &input)
+    derive_indexed("steganographer-session-signing-v1", master, session_counter)
 }
 
 /// Derive a per-session encryption key from a master secret and a session counter.
 pub fn derive_session_encryption_key(master: &[u8], session_counter: u64) -> [u8; 32] {
-    let mut input = master.to_vec();
-    input.extend_from_slice(&session_counter.to_le_bytes());
-    blake3::derive_key("steganographer-session-encryption-v1", &input)
+    derive_indexed(
+        "steganographer-session-encryption-v1",
+        master,
+        session_counter,
+    )
+}
+
+fn derive_secret(context: &str, master: &[u8]) -> [u8; 32] {
+    let mut hasher = Zeroizing::new(blake3::Hasher::new_derive_key(context));
+    hasher.update(master);
+    let hash = Zeroizing::new(hasher.finalize());
+    *hash.as_bytes()
+}
+
+fn derive_indexed(context: &str, master: &[u8], index: u64) -> [u8; 32] {
+    let mut hasher = Zeroizing::new(blake3::Hasher::new_derive_key(context));
+    hasher.update(master);
+    hasher.update(&index.to_le_bytes());
+    let hash = Zeroizing::new(hasher.finalize());
+    *hash.as_bytes()
 }
 
 #[cfg(test)]

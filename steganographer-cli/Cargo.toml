@@ -5,10 +5,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "steganographer"
 path = "src/main.rs"
+
+[[example]]
+name = "release"
+path = "examples/release.rs"
+test = true
 
 [features]
 # `gst` enables the live `video`/`audio` GStreamer pipelines. It is on by
@@ -36,13 +42,24 @@ rand = { workspace = true }
 image = { workspace = true }
 hound = "3.5"
 blake3 = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
 gstreamer = { version = "0.23", features = ["v1_22"], optional = true }
+tempfile = "3"
 
 [build-dependencies]
 clap = { workspace = true }
+steganographer-core = { path = "../steganographer-core", default-features = false }
 clap_complete = "4"
 clap_mangen = "0.2"
 
-[dev-dependencies]
-tempfile = "3"
+
+# Run workspace-wide tagging and changelog changes exactly once.
+[package.metadata.release]
+tag = true
+tag-name = "v{{version}}"
+pre-release-replacements = [
+    { file = "../CHANGELOG.md", search = "(?m)^## \\[Unreleased\\]$", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
+    { file = "../CHANGELOG.md", search = "(?m)^\\[Unreleased\\]:.*$", replace = "[Unreleased]: {{repository}}/compare/v{{version}}...HEAD\n[{{version}}]: {{repository}}/releases/tag/v{{version}}", exactly = 1 },
+]
