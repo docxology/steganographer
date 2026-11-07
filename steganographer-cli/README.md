@@ -40,7 +40,10 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 | `cmd_scan` | `src/cmd_scan.rs` | Bounded forensic scan over files and directory trees |
 | `cmd_ots` | `src/cmd_ots.rs` | OpenTimestamps `stamp` / `verify` attestation |
 | `media_io` | `src/media_io.rs` | Descriptor-preserving image/WAV/raw I/O and output policy |
-| `carrier_binding` | `src/carrier_binding.rs` | Kernel-canonical carrier bytes for signing |
+
+Canonical carrier binding comes from
+[`steganographer_core::carrier_binding`](../steganographer-core/src/carrier_binding.rs),
+shared with native workflows.
 
 ## Usage
 

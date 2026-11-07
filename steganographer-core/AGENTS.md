@@ -13,6 +13,7 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519, Ethereu
 | `src/audio.rs` | `AudioBuffer` | `AudioStegoModule` | 45 |
 | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, codecs, limits/errors, `FIELD_PARENT_ID` nesting, `GenericPacket::decode_nested` (bounded chain decode) | `PacketCodec` | 2069 |
 | `src/carrier.rs` | `CarrierDescriptor`, `EmbeddingConfig`, reports, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels | `CarrierEmbedder`, `CarrierExtractor` | 1625 |
+| `src/carrier_binding.rs` | `canonicalize` — shared offline/native kernel binding over packed logical carrier bytes | — | — |
 | `src/crypto.rs` | `Signer`, `Verifier`, `SignaturePayload`, `HashAlgorithm` | — | 600 |
 | `src/revocation.rs` | `RevocationList`, `RevokedKey`, `is_known_compromised_key`, `check_known_revocations` | — | 167 |
 | `src/signer_backend.rs` | `SignerBackend`, `Ed25519Backend`, `Ed25519Verifier`, `MlDsaBackend`, `MlDsaVerifier`, `HybridBackend`, `HybridVerifier`, `EthereumBackend`*, `EthereumVerifier`* | `SignerBackend` | 1020 |

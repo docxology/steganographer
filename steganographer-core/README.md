@@ -9,6 +9,7 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 | -------- | ------ | ------------- |
 | `packet` | `src/packet.rs` | `GenericPacket`, `Locator`, `PacketEnvelope`, `PacketCodec`, bounded `decode_nested` (PKT-009) — generic packet v1 alpha |
 | `carrier` | `src/carrier.rs` | `CarrierDescriptor`, `SpatialLsb`, `AudioSpatialLsb`, keyed kernels — carrier embed/extract |
+| `carrier_binding` | `src/carrier_binding.rs` | Shared canonical carrier representation for offline and native signing/verification; never hashes row padding |
 | `placement` | `src/placement.rs` | `KeyedPermutation` — Feistel-network keyed slot placement; `InterleavedSchedule` — coprime-stride interleaved schedule (`PLACEMENT_INTERLEAVED`, PLC-001) |
 | `video` | `src/video.rs` | `VideoFrame` struct, `VideoFormat` enum, `VideoStegoModule` trait |
 | `audio` | `src/audio.rs` | `AudioBuffer` struct, `AudioStegoModule` trait |
@@ -58,6 +59,7 @@ chrono = "0.4"
 lib.rs
 ├── packet.rs            → GenericPacket / Locator / PacketEnvelope codec (+ bounded decode_nested)
 ├── carrier.rs           → CarrierDescriptor / SpatialLsb / keyed kernels
+├── carrier_binding.rs   → shared kernel-canonical carrier representation
 ├── video.rs             → VideoFrame / VideoStegoModule trait
 ├── audio.rs             → AudioBuffer / AudioStegoModule trait
 ├── crypto.rs            → Signer + Verifier (BLAKE3 hash, Ed25519 sign)

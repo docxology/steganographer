@@ -81,8 +81,7 @@
 - Rejects lossy/destructive output combinations; accepts explicit raw RGB
   dimensions
 
-### carrier_binding.rs
+### Shared carrier binding
 
-- `canonicalize()` — produces the kernel-canonical carrier representation for
-  signing and verification so mutable embedding slots cannot invalidate their
-  own signature
+Canonicalization lives in `steganographer_core::carrier_binding`; CLI callers use
+the shared core implementation, not a private `src/carrier_binding.rs` copy.
