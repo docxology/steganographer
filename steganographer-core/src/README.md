@@ -43,5 +43,11 @@ Verification-only (no private key): Ed25519Verifier · MlDsaVerifier · HybridVe
 - Inline unit tests exercise boundaries and failure behavior; see the canonical workspace totals in [`../../AGENTS.md`](../../AGENTS.md).
 - Error handling via `anyhow::Result`
 - Logging via `log::debug!()` / `log::warn!()`
-- No I/O operations — all methods operate on in-memory buffers
+- Packet/carrier/media kernels are in-memory; optional OTS performs bounded network/proof I/O
 - Thread-safe metrics via atomic operations (no locks for GStreamer callback compatibility)
+- Nested decode requires explicit identifiable parent linkage, not just STG3 magic.
+- Compression admission is 64 MiB shared logical input; CLI limits may be lower.
+- Adaptive selection keeps the framing-sized stable best prefix, not all candidates.
+- Forensic incompleteness includes detector budgets independently of supplied bytes.
+- OTS `verify_with_upgrade` returns changed bytes for optional append-only
+  publication; Bitcoin-attested proofs skip calendars, not explorer verification.

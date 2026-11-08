@@ -44,7 +44,7 @@ made: removing files/history cannot revoke copies or repair external trust.
 | Legacy frame integrity | `SignaturePayload` v4 hashes a domain, frame index, explicit video/audio lengths and audio presence; strict Ed25519 verifies the digest |
 | Generic payload integrity | Optional Ed25519 transform signs recovered logical payload bytes, not arbitrary envelope metadata |
 | Expected signer | A separately trusted full public-key pin; a self-supplied packet key alone proves no authorship |
-| Exact-artifact commitment | CLI OTS uses SHA256 of the entire input file; different file bytes require a different commitment |
+| Exact-artifact commitment | Dedicated CLI OTS hashes the entire input file; legacy optional hooks hash canonical media, dashboard video hashes delivered PNG, audio raw signed PCM rather than WAV |
 | Confidentiality | Optional authenticated encryption of the payload, not the visible/audible carrier or every metadata field |
 | Ordering | Signed indices can support an external sequence policy; isolated frame verification does not prove stream completeness or freshness |
 
@@ -56,7 +56,7 @@ Weak imported Ed25519 keys are rejected and verification uses strict checks. The
 
 - **Live signed native pipelines:** Ed25519 with exactly one supported invisible signing kernel. Encryption, ECC or spreading settings that would be ignored are rejected. Invisible signing combined with a visible overlay/info bar is rejected rather than reporting false output verification. Standalone rendering/kernel APIs are separate.
 - **Native spread-spectrum signing:** the trait kernel's channel mapping differs from offline scalar binding; this signing composition is rejected. Do not treat the presence of a plain kernel API as end-to-end signature support.
-- **Offline generic spreading:** RGB LSB only, with shard count 2–8 (1 means unspread), actual first-shard binding and body-length-aware recovery. Audio, spread-spectrum and DCT sharding compositions are unsupported and reject before output.
+- **Offline legacy spreading:** RGB LSB only, shard count 2–8 (1 unspread), actual first-shard binding and body-length-aware recovery. Generic packets and audio/SS/DCT sharding reject unsupported compositions before output.
 - **Dashboard:** Ed25519 and supported LSB settings, not Ethereum/MetaMask signing. Unsupported backend, crypto and kernel selections fail explicitly. Preview opacity is a UI effect, not a burned-in authenticated overlay; unavailable overlay controls are disabled.
 - **Lossless artifacts:** native file paths preserve RGB in Matroska and PCM in WAV. Dashboard recording archives contain exact signed PNG snapshots or signed PCM WAV chunks plus an extraction manifest in stored ZIP. These are not continuous signed WebM recordings.
 
@@ -73,7 +73,7 @@ The machine-readable envelope is `steganographer.cli/v1`. Its top-level `status`
 | 2 | Packet/signature not found or decoding unavailable |
 | 3 | Authentication/signature verification failure, including a revoked otherwise-valid signer |
 | 4 | Scan findings meet the selected failure threshold |
-| 5 | Resource/coverage cutoff leaves a scan inconclusive without qualifying findings |
+| 5 | No usable statistical method, or a resource/coverage cutoff leaves a scan inconclusive without qualifying findings |
 | 6 | Internal/runtime error, including unexpected I/O failures |
 
 `verify` **without a public key** is extraction-only and reports `not_verified`. Exit 0 must not be used as a shortcut for trusted verification. A missing signature is `packet_not_found`/exit 2, and authentication failure is `verification_failed`/exit 3. Generic `decode`/`extract --trusted-signer` requires a matching signed payload; inspect `signer_public_key` and `signer_trusted` separately.
@@ -86,11 +86,23 @@ paths (including that literal default name), malformed files and dangling symlin
 fail closed. Generic packets signed by a revoked identity fail before payload
 publication, even without `--trusted-signer`; a pin never overrides revocation.
 
+Revocation mutation holds a persistent `<registry>.lock` companion over
+read/merge/atomic replacement. Never remove its inode during use; advisory
+locking serializes cooperating writers, not unrelated filesystem changes.
+
 ### Filesystem boundary
 
 Offline media, payload and key output helpers stage in a private same-directory temporary file and publish atomically. Existing paths, including dangling symlinks, are refused by default. Where `--force` is supported, replacement changes the directory entry rather than truncating a symlink target or another hard link to the carrier. Secret files are created with mode 0600 on Unix before bytes are written. Key destinations are preflighted before generation/publication.
 
 These guarantees are not a transactional commit across several output files, nor a sandbox against an attacker controlling parent directories, the process account or the filesystem. Use trusted output directories and secure permissions; retain backups before deliberate replacement. Native media pipelines have their own output/codec constraints and are not covered by a blanket claim that every writer shares the offline helper.
+
+Native convenience file APIs now require trailing `overwrite: bool`; there is
+no old-signature shim. They reject aliases and privately stage output until
+successful EOS. The CLI grants replacement only for its own outer temporary.
+Filesink reopens a pathname: trusted output directories remain a prerequisite.
+Packed video checks actual mapped span/offset/full stride extent including
+trailing padding before dependency plane slicing; metadata acceptance alone
+does not establish safe backing.
 
 ## OpenTimestamps: pending is not verified
 
@@ -102,6 +114,11 @@ A calendar receipt with `pending: true` and `verified: false` is not Bitcoin-con
 
 Proof parsing, HTTP bytes, operations/depth, requests and deadlines are bounded. Proofs are capped at 1 MiB. Proof I/O pins a trusted parent directory and uses no-follow regular/single-link file checks, complete-file reads and atomic hard-link no-clobber publication. It requires a hard-link-capable filesystem and preserves earlier receipts when publishing distinct upgrades/forced proofs. Parent-directory configuration remains trusted; this is not unrestricted-path sandboxing. CLI omitted `--proof` verification uses the digest-derived configured proof path, matching stamping.
 
+`verify_with_upgrade` skips calendar contact for Bitcoin-attested proofs but
+still verifies them through the trusted explorer; pending-only proofs may upgrade.
+Optional changed proof bytes preserve prior branches and publish append-only.
+CLI verify's `proof_file` remains the selected receipt, not the upgraded copy.
+
 ## Bounded forensics and honest statistics
 
 A forensic report contains **findings**, a content-derived **`detected`** indicator and independent **`incomplete` / `incomplete_reasons`** fields. Evidence can be positive even if the rest of the examination is incomplete. Display caps do not clear an already latched positive. Conversely, an empty retained findings list or unavailable statistical result is not proof of a clean input.
@@ -112,6 +129,11 @@ Current coverage includes inline `STEG`/`STG3` magic, bounded Unicode/text patte
 - Statistical/entropy observations: first 64 MiB. Text analysis: bounded 1 MiB windows.
 - ZIP/OOXML: up to 4,096 entries, 4 MiB inflated per entry and 8 MiB per package, bounded findings. Local/central structure, CRC/deflate and XML decoding are checked within supported formats. Unsupported archive features, malformed structures and budget exhaustion are reported as incomplete rather than a clean negative.
 - PDF: bounded lexical objects, strings and selected streams, not full rendering, glyph/CMap interpretation or universal object-stream/filter support. Unsupported interpretation and cutoffs are incomplete.
+- Detector-specific byte/finding/attempt budgets mark incompleteness even if the
+  CLI read every byte; increasing `--max-bytes` does not remove detector ceilings.
+- Directory scans use pinned-directory no-follow opens and post-open regular-file
+  checks. Only explicit top-level link following is allowed. Skipped deeper
+  directories at `--max-depth` are incomplete; findings retain exit 4 precedence.
 
 `detector_registry()` documents per-detector scope, budgets and false-positive caveats. ZIP inventory, entropy, file-family observations, DOC-001 topology anomalies and PDF structural observations do not alone set the concealment verdict. Inline magic may also occur in ordinary text; a finding is not necessarily a recovered valid packet, malware or malicious intent. Keyed placement may hide the unkeyed magic signature; a negative scan cannot rule it out.
 
@@ -125,6 +147,20 @@ Statistical fields need particular care:
 | Combined confidence | Method-specific score aggregation, not a posterior probability or security verdict |
 
 Synthetic replacement controls exercise RS estimator behavior; historical ramp fixtures exercise defined observations. Neither establishes accuracy on natural images, a detector ROC curve, or calibrated detection probabilities. Low embedding rate, keyed/interleaved placement or choosing one LSB does not prove statistical invisibility. Cachin's distributional/KL-divergence framework is useful theory, not a measured security bound for this implementation.
+
+
+Compression admission shares a 64 MiB logical ceiling; configured limits may
+be lower, and descriptors record compression only on shrinkage. Sequential/keyed
+locator policy must match placement. Nested decode treats packet-looking bytes
+as opaque until an identifiable parent-id field opts in, then strictly checks
+child framing, complete span, parent/depth/aggregate/cycle limits.
+
+RTC exact artifacts use bounded JSON/base64 and STGO 20-byte chunk framing,
+not raw binary JPEG. Whole chunks are ≤16 KiB and full serialized requests
+≤4 MiB; oversize pre-send errors recommend smaller resolution or WebSocket.
+Browser verdicts remain server-reported; encode request/epoch and archive
+submission ownership prevent stale current labeling, not malicious-server forgery.
+Use separate trusted-key verification of exported artifacts.
 
 ## Key and deployment responsibilities
 

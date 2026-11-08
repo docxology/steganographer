@@ -14,14 +14,15 @@ mod ooxml;
 mod pdf;
 
 pub use ooxml::{
-    analyze_package, OoxmlError, ZipArchive, ZipEntry, CONTAINER_MAX_ENTRIES,
+    analyze_package, OoxmlError, ZipArchive, ZipEntry, ZipReadBudget,
+    CONTAINER_MAX_DECODE_ATTEMPTS, CONTAINER_MAX_DECODE_INPUT_TOTAL, CONTAINER_MAX_ENTRIES,
     CONTAINER_MAX_ENTRY_NAME_BYTES, CONTAINER_MAX_EOCD_SCAN_BYTES, CONTAINER_MAX_FINDINGS,
     CONTAINER_MAX_INFLATE_PER_ENTRY, CONTAINER_MAX_INFLATE_TOTAL, DOC_001_FAMILY, DOC_002_FAMILY,
     DOC_003_FAMILY, ZIP_TOPOLOGY_FAMILY,
 };
 pub use pdf::{
-    analyze_pdf, DOC_004_FAMILY, PDF_FAMILY, PDF_MAX_FILE_BYTES, PDF_MAX_OBJECTS_SCANNED,
-    PDF_MAX_STRING_LENGTH,
+    analyze_pdf, DOC_004_FAMILY, PDF_FAMILY, PDF_MAX_DECODE_INPUT_TOTAL, PDF_MAX_FILE_BYTES,
+    PDF_MAX_OBJECTS_SCANNED, PDF_MAX_STRING_LENGTH,
 };
 
 /// Shannon entropy of a byte buffer, in bits per byte (`0.0 ..= 8.0`).
@@ -384,7 +385,7 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
         DetectorInfo {
             id: "DOC-001",
             summary: "OOXML package topology anomalies: duplicate entries, encrypted entries, oversized claimed sizes, inflate-budget rejections, media entries claiming text. Observation, not concealment.",
-            budget: "in-memory central-directory parse with hostile bounds; inflate capped at ooxml::CONTAINER_MAX_INFLATE_PER_ENTRY (4 MiB) per entry and ooxml::CONTAINER_MAX_INFLATE_TOTAL (8 MiB) per package",
+            budget: "bounded central-directory parse; entry reads reserve at most 4 MiB output per entry, 8 MiB output per package, 16 MiB compressed/stored input and 256 attempts, including failures and duplicate ranges",
             fp_limits: "zip-bomb and corrupt-package evidence is security-relevant but does not set the steganographic `detected` verdict; text-like media extensions in legitimately mixed packages can flag",
             calibration: "benign: minimal clean docx (no DOC-001 findings); triggered: docx whose main part claims 2 GiB uncompressed (corpus DOC-001)",
         },
@@ -399,13 +400,13 @@ pub fn detector_registry() -> &'static [DetectorInfo] {
             id: "DOC-003",
             summary: "Extended OOXML part coverage: pptx slides/notes and presentation header/footer placeholders, xlsx sharedStrings/worksheets, docx headers/footers, and embedded-media entry anomalies.",
             budget: "parts inflated within the DOC-001 budgets (4 MiB per entry, 8 MiB package total); text analysis capped at unicode_text::MAX_TEXT_SCAN_BYTES (1048576) bytes per part",
-            fp_limits: "presentation.xml placeholder markup is structural evidence and flags on masters-style packages; media entries with unrecognized extensions can flag on legitimately mixed packages",
+            fp_limits: "presentation placeholder facts use parsed elements and scoped PresentationML namespace bindings (transitional/strict), not schema validation or rendering; media entries with unrecognized extensions can flag on legitimately mixed packages",
             calibration: "benign: minimal clean pptx (no DOC-003 findings); triggered: pptx with a zero-width-laced slide (corpus DOC-003)",
         },
         DetectorInfo {
             id: "DOC-004",
             summary: "Bounded lexical PDF scan: escaped names, objects/comments/strings, all direct URI values, stream filters, final EOF, UTF-8 and BOM-marked UTF-16 text.",
-            budget: "first 64 MiB; 8192 objects, 64 KiB object windows, 4096 decoded bytes/string, 1 MiB text; streams searched within 8 MiB, zlib output 256 KiB/stream and 1 MiB total, 16 inflates; 64 findings including cap sentinel",
+            budget: "first 64 MiB; 8192 objects, 64 KiB object windows, 4096 decoded bytes/string, 1 MiB text; streams searched within 8 MiB, zlib output 256 KiB/stream and 1 MiB total, 16 attempts and 16 MiB compressed input including failures; 64 findings including cap sentinel",
             fp_limits: "AcroForm, ordinary URI links and malformed structure stay observational; unsupported filters/object streams/encodings and resource cutoffs are incomplete; no renderer, CMap, glyph or invisible-text interpretation",
             calibration: "benign: minimal clean PDF (no DOC-004 findings); triggered: PDF with an /EmbeddedFile object (corpus DOC-004)",
         },

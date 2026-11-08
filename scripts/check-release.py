@@ -32,6 +32,25 @@ def check_gzip(path):
     require(decoder.eof, f"incomplete gzip member: {path.name}")
 
 
+def archive_members(tar):
+    members = tar.getmembers()
+    paths = {}
+    for member in members:
+        path = PurePosixPath(member.name)
+        require(path.parts and not path.is_absolute() and ".." not in path.parts, f"unsafe archive path: {member.name}")
+        require(member.isfile() or member.isdir(), f"unsupported archive entry: {member.name}")
+        require(not {".git", ".hg", ".svn", "keys", "target", "dist"}.intersection(path.parts), f"excluded archive path: {member.name}")
+        require(path not in paths, f"duplicate normalized archive path: {member.name}")
+        paths[path] = member
+    # Check implicit parent directories too, regardless of archive entry order.
+    for path in paths:
+        for parent in path.parents:
+            require(parent not in paths or paths[parent].isdir(), f"archive file/directory collision: {parent}")
+    roots = {path.parts[0] for path in paths}
+    require(len(roots) == 1, "archive must have one root")
+    return members, next(iter(roots))
+
+
 def check(directory):
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
@@ -49,15 +68,7 @@ def check(directory):
     for archive in sorted(directory.glob("*.tar.gz")):
         check_gzip(archive)
         with tarfile.open(archive, mode="r:gz") as tar, tempfile.TemporaryDirectory() as temporary:
-            members = tar.getmembers()
-            for member in members:
-                path = PurePosixPath(member.name)
-                require(not path.is_absolute() and ".." not in path.parts, f"unsafe archive path: {member.name}")
-                require(member.isfile() or member.isdir(), f"unsupported archive entry: {member.name}")
-                require(not {".git", ".hg", ".svn", "keys", "target", "dist"}.intersection(path.parts), f"excluded archive path: {member.name}")
-            roots = {PurePosixPath(member.name).parts[0] for member in members}
-            require(len(roots) == 1, f"archive must have one root: {archive}")
-            package_root = next(iter(roots))
+            members, package_root = archive_members(tar)
             if archive.name.endswith("-source.tar.gz"):
                 files = {str(PurePosixPath(m.name).relative_to(package_root)): m for m in members if m.isfile()}
                 require(set(files) == set(inventory), "source inventory differs from archive")
@@ -79,7 +90,7 @@ def check(directory):
                 reported = subprocess.check_output([str(package / "steganographer"), "--version"], text=True).strip()
                 require(reported == f"steganographer {version}", f"CLI version mismatch: {reported}")
                 require(len(list((package / "completions").iterdir())) == 5, "incomplete completions")
-                require(len(list((package / "man").glob("*.1"))) == (18 if kind == "native" else 16), "incomplete manuals")
+                require(len(list((package / "man").glob("*.1"))) == (19 if kind == "native" else 17), "incomplete manuals")
                 if kind == "native":
                     libraries = [*package.glob("*.dylib"), *package.glob("*.so")]
                     require(len(libraries) == 1, "native archive must contain one plugin library")

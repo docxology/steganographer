@@ -10,6 +10,9 @@ For current managed CLI verification and recovery:
 - `--revoked-list` adds a JSON array of hex public keys for `verify`, `decode` and `extract`. Omission reads `keys/revoked.json` when present. Explicit missing paths, malformed/unreadable files and dangling symlinks are errors.
 - A revoked signature is a verification failure, **exit 3**, even when its mathematics is valid. Missing payload is **exit 2**. Do not treat either as success.
 - Add a compromised key with `steganographer revoke --public-key <old-public-key-hex> --output keys/revoked.json`, distribute the policy through a trusted channel, then provision/pin a fresh signer separately.
+- Registry updates use a persistent `<output>.lock` companion inode across the
+  read/merge/atomic-publication transaction. Keep it in place; unlinking it splits
+  cooperating lock owners. Advisory locking does not constrain unrelated writers.
 - Generic decode/extract uses `--trusted-signer` for explicit pinning and applies revocation before payload publication, even without a pin. A pin never overrides revocation.
 - The exposed identity below is always revoked by the shared core policy, independently of missing or empty local registries. Managed CLI signing, native signed pipelines and dashboard router/processing APIs reject it.
 

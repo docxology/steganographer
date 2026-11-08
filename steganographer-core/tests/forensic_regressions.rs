@@ -144,9 +144,85 @@ fn structural_image_subtype_not_title_prose_controls_stream_exemption() {
 
 #[test]
 fn nested_image_names_cannot_exempt_the_outer_stream() {
-    let object = stream(b"(\\342\\200\\256)", "/Note<</Subtype/Image>>");
-    let result = analyze_pdf(&pdf(&[object], b""));
-    assert!(has(&result, "BIDI_CONTROLS"));
+    for note in [
+        "/Note<</Subtype/Image>>",
+        "/Note[/Subtype/Image]",
+        "/Note[[/Subtype/Image]<</Subtype/Image>>]",
+        "/Note/Subtype/Image/NotAnImage",
+        "/Note[/Filter/ASCII85Decode/DecodeParms<</Anything 1>>/Length 999]",
+    ] {
+        let object = stream(b"(\\342\\200\\256)", note);
+        let result = analyze_pdf(&pdf(&[object], b""));
+        assert!(has(&result, "BIDI_CONTROLS"), "{note}: {:?}", result);
+        assert!(result.incomplete_reasons.is_empty(), "{note}: {:?}", result);
+    }
+}
+
+#[test]
+fn actual_image_subtype_and_outer_filter_values_keep_their_scope() {
+    let result = analyze_pdf(&pdf(
+        &[stream(
+            b"(\\342\\200\\256)",
+            "/Subtype/Image/Note[/Subtype/Text]",
+        )],
+        b"",
+    ));
+    assert!(!has(&result, "BIDI_CONTROLS"));
+    assert!(result.incomplete_reasons.is_empty());
+
+    let mut zlib = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    zlib.write_all(b"(\\342\\200\\256)").unwrap();
+    let zlib = zlib.finish().unwrap();
+    for filter in [
+        "/Note[/Subtype/Image]/Filter[/FlateDecode]",
+        "/Note<</Filter/ASCII85Decode>>/Filter/FlateDecode",
+        "/Note[/DecodeParms<</Bad 1>>]/Filter/FlateDecode/DecodeParms null",
+    ] {
+        let result = analyze_pdf(&pdf(&[stream(&zlib, filter)], b""));
+        assert!(has(&result, "BIDI_CONTROLS"), "{filter}: {:?}", result);
+        assert!(
+            result.incomplete_reasons.is_empty(),
+            "{filter}: {:?}",
+            result
+        );
+    }
+    for metadata in [
+        "/Note[/Subtype/Image]/Filter/ASCII85Decode",
+        "/Note[/Subtype/Image]/DecodeParms<</Predictor 12>>",
+        "/Note[/Subtype/Image>>",
+        "/Filter[/FlateDecode[/ASCII85Decode]]",
+    ] {
+        let result = analyze_pdf(&pdf(&[stream(&zlib, metadata)], b""));
+        assert!(
+            !result.incomplete_reasons.is_empty(),
+            "{metadata}: {:?}",
+            result
+        );
+    }
+}
+
+#[test]
+fn pdf_compressed_input_budget_is_charged_for_valid_and_failed_decodes() {
+    // Zlib wrapping of many byte-aligned empty DEFLATE blocks, Adler32(empty)=1.
+    let mut compressed = vec![0x78, 0x01];
+    compressed.extend_from_slice(&[0, 0, 0, 255, 255].repeat(1_258_291));
+    let last = compressed.len() - 5;
+    compressed[last] = 1;
+    compressed.extend_from_slice(&[0, 0, 0, 1]);
+    for valid in [true, false] {
+        if !valid {
+            compressed[0] = 0; // A failed header still consumes its input reservation.
+        }
+        let mut objects = vec![b"<</Title<E280AE>>>".to_vec()];
+        for _ in 0..3 {
+            objects.push(stream(&compressed, "/Filter/FlateDecode"));
+        }
+        let result = analyze_pdf(&pdf(&objects, b""));
+        assert!(has(&result, "BIDI_CONTROLS"));
+        assert!(partial(&result, "pdf_decode_input_budget"), "{:?}", result);
+        assert_eq!(partial(&result, "pdf_flate_invalid"), !valid);
+        assert!(!partial(&result, "pdf_inflate_limit"));
+    }
 }
 
 #[test]

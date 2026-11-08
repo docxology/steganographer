@@ -1197,10 +1197,10 @@ impl GenericPacket {
     /// Decodes `input` as a packet and, while its *logical payload* (transforms
     /// reversed) is itself a generic packet whose [`FIELD_PARENT_ID`] chains to
     /// the carrying packet's identifier, recursively expands it. Nesting is
-    /// opt-in: a packet-shaped payload whose parent identifier is absent is
-    /// returned as the terminal logical payload, and a parent identifier that
-    /// does not match the carrier is a protocol violation — so single-level
-    /// packets decode identically through this entry point.
+    /// opt-in: a payload without an identifiable parent-id field is returned as
+    /// terminal opaque bytes, even if it starts with `STG3`. Once that field is
+    /// identifiable, all child framing is checked strictly, and a parent
+    /// identifier that does not match the carrier is a protocol violation.
     ///
     /// Every expansion is bounded by [`check_nesting`]: chain depth against
     /// [`DecodeLimits::max_nesting_depth`] and the running aggregate byte count
@@ -1262,11 +1262,11 @@ impl GenericPacket {
                 return Err(PacketError::DigestMismatch);
             }
 
-            if !looks_like_packet(&payload) {
+            if !has_nested_parent_field(&payload) {
                 return Ok(NestedDecode { chain, payload });
             }
-            // Establish opt-in linkage from bounded framing and metadata,
-            // without allocating a child body or charging an expansion yet.
+            // A parent-id TLV establishes nesting intent, not validity. Do not
+            // swallow checksum, version, limit or body errors after this point.
             let child_locator = Locator::from_bytes(&payload, limits)?;
             let child_envelope = decode_packet_envelope(&payload, child_locator, limits)?;
             match child_envelope.parent_id {
@@ -1351,9 +1351,35 @@ fn decode_packet_envelope(
     Ok(envelope)
 }
 
-/// Cheap gate before treating a logical payload as a nested packet.
-fn looks_like_packet(bytes: &[u8]) -> bool {
-    bytes.len() >= LOCATOR_SIZE && bytes[..4] == PACKET_MAGIC
+/// Recognize nesting intent without trusting child framing or allocating.
+/// Only walk complete TLV headers inside the declared, available envelope;
+/// arbitrary `STG3`-prefixed data is not itself an opt-in marker. A malformed
+/// parent field still opts in, so strict decoding reports its corruption.
+fn has_nested_parent_field(bytes: &[u8]) -> bool {
+    if bytes.len() < LOCATOR_SIZE || bytes[..4] != PACKET_MAGIC {
+        return false;
+    }
+    let declared = u32::from_be_bytes(bytes[8..12].try_into().expect("fixed locator slice"));
+    let available = &bytes[LOCATOR_SIZE..];
+    let envelope = &available[..available.len().min(declared as usize)];
+    let mut cursor = 0usize;
+    while envelope.len() - cursor >= TLV_HEADER_SIZE {
+        let raw_id = u16::from_be_bytes([envelope[cursor], envelope[cursor + 1]]);
+        if raw_id & FIELD_ID_MASK == FIELD_PARENT_ID {
+            return true;
+        }
+        let length = u32::from_be_bytes(
+            envelope[cursor + 2..cursor + TLV_HEADER_SIZE]
+                .try_into()
+                .expect("fixed TLV header"),
+        ) as usize;
+        cursor += TLV_HEADER_SIZE;
+        if length > envelope.len() - cursor {
+            return false;
+        }
+        cursor += length;
+    }
+    false
 }
 fn validate_untransformed_body(envelope: &PacketEnvelope, body: &[u8]) -> Result<(), PacketError> {
     if !envelope.transforms.is_empty() {
@@ -2458,6 +2484,77 @@ mod tests {
         let nested = GenericPacket::decode_nested(&root_bytes, &limits, None, None).unwrap();
         assert_eq!(nested.chain.len(), 1);
         assert_eq!(nested.payload, inner_bytes);
+    }
+
+    #[test]
+    fn malformed_packet_shaped_payloads_are_opaque_until_parent_opt_in() {
+        let limits = DecodeLimits::default();
+        let root_id = [1; 16];
+        for parent in [None, Some(root_id)] {
+            let mut child = packet(b"child payload");
+            child.envelope.packet_id = [2; 16];
+            child.envelope.parent_id = parent;
+            refresh_locator(&mut child);
+            let valid = child.encode(&limits).unwrap();
+            let mut variants = Vec::new();
+            let mut version = valid.clone();
+            version[4] = 2;
+            variants.push(version);
+            let mut flags = valid.clone();
+            flags[6] |= 0x80;
+            variants.push(flags);
+            let mut crc = valid.clone();
+            crc[20] ^= 1;
+            variants.push(crc);
+            let mut truncated_body = valid.clone();
+            truncated_body.pop();
+            variants.push(truncated_body);
+            let mut over_limit = valid.clone();
+            over_limit[12..20].copy_from_slice(&((limits.max_body_len as u64) + 1).to_be_bytes());
+            variants.push(over_limit);
+            let mut bad_digest = valid.clone();
+            *bad_digest.last_mut().unwrap() ^= 1;
+            variants.push(bad_digest);
+            if parent.is_some() {
+                let mut malformed_parent = valid.clone();
+                let parent_header =
+                    LOCATOR_SIZE + child.locator.envelope_len as usize - 16 - TLV_HEADER_SIZE;
+                assert_eq!(
+                    &malformed_parent[parent_header..parent_header + 2],
+                    &FIELD_PARENT_ID.to_be_bytes()
+                );
+                malformed_parent[parent_header + 2..parent_header + 6]
+                    .copy_from_slice(&15u32.to_be_bytes());
+                // Keep CRC correct so the actual malformed parent field is checked.
+                let end = LOCATOR_SIZE + child.locator.envelope_len as usize;
+                let crc = crc32c(&malformed_parent[LOCATOR_SIZE..end]);
+                malformed_parent[20..24].copy_from_slice(&crc.to_be_bytes());
+                variants.push(malformed_parent);
+            }
+            for opaque in variants {
+                let expected_error = GenericPacket::decode(&opaque, &limits).unwrap_err();
+                let mut root = packet(&opaque);
+                root.envelope.packet_id = root_id;
+                refresh_locator(&mut root);
+                let encoded = root.encode(&limits).unwrap();
+                let result = GenericPacket::decode_nested(&encoded, &limits, None, None);
+                if parent.is_some() {
+                    assert_eq!(result.unwrap_err(), expected_error);
+                } else {
+                    let terminal = result.unwrap();
+                    assert_eq!(terminal.chain.len(), 1);
+                    assert_eq!(terminal.payload, opaque);
+                }
+            }
+        }
+        for length in [4, LOCATOR_SIZE, LOCATOR_SIZE + 17] {
+            let mut opaque = vec![0xFF; length];
+            opaque[..4].copy_from_slice(&PACKET_MAGIC);
+            let root = packet(&opaque).encode(&limits).unwrap();
+            let terminal = GenericPacket::decode_nested(&root, &limits, None, None).unwrap();
+            assert_eq!(terminal.chain.len(), 1);
+            assert_eq!(terminal.payload, opaque);
+        }
     }
 
     #[test]

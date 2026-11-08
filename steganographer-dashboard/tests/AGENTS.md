@@ -1,4 +1,6 @@
 # AGENTS.md — `steganographer-dashboard/tests/`
 
-- Single file `dashboard_tests.rs` (verified 2026-08-29); tests hit the real
-  Axum app, no mocks.
+- HTTP/WebSocket/RTC suites exercise actual handlers and delivered media.
+  Node lifecycle scenarios supplement Rust tests; no pinned per-file counts.
+- Preserve behavioral ownership/cache/archive/budget assertions, not source-text
+  or wording echoes. Integration owns execution after all writers stop.

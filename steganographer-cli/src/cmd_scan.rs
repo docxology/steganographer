@@ -4,6 +4,8 @@
 //! statistical detectors in [`steganographer_core::steganalysis`] over one file
 //! or a directory tree, and emits deterministic machine-readable findings.
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
@@ -193,9 +195,15 @@ impl ScanDetectors {
 
 /// Read at most `max_bytes` from a file, reporting the true size and whether
 /// the buffer was truncated.
-fn read_bounded(path: &Path, max_bytes: usize) -> std::io::Result<(Vec<u8>, usize, bool)> {
-    let file = std::fs::File::open(path)?;
-    let total = file.metadata()?.len() as usize;
+fn read_bounded(file: std::fs::File, max_bytes: usize) -> std::io::Result<(Vec<u8>, usize, bool)> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "scan input is not a regular file",
+        ));
+    }
+    let total = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
     let mut reader = file.take(max_bytes as u64);
     let mut data = Vec::with_capacity(max_bytes.min(total));
     reader.read_to_end(&mut data)?;
@@ -203,12 +211,33 @@ fn read_bounded(path: &Path, max_bytes: usize) -> std::io::Result<(Vec<u8>, usiz
     Ok((data, total, truncated))
 }
 
+// Open relative to a pinned directory. Nonblocking open prevents a raced FIFO
+// from hanging before the descriptor's regular-file check.
+fn open_scan_file(dir: &Dir, name: &std::ffi::OsStr) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = dir.open_with(Path::new(name), &options)?.into_std();
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "scan input is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 fn scan_one(
     path: &Path,
+    file: std::fs::File,
     max_bytes: usize,
     detectors: &ScanDetectors,
 ) -> anyhow::Result<ScanFinding> {
-    let (data, size, truncated) = read_bounded(path, max_bytes)?;
+    let (data, size, truncated) = read_bounded(file, max_bytes)?;
     let scan = forensics::scan_bytes(&data);
     Ok(ScanFinding::from_scan(
         path, size, truncated, scan, detectors,
@@ -219,6 +248,7 @@ fn scan_one(
 /// Bounded, non-following directory walk.
 fn walk(
     dir: &Path,
+    directory: &Dir,
     depth: u32,
     max_depth: u32,
     max_files: usize,
@@ -238,7 +268,7 @@ fn walk(
         }
         return;
     }
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => {
             errors.push(format!("{}: {error}", dir.display()));
@@ -253,9 +283,10 @@ fn walk(
                 continue;
             }
         };
-        let path = entry.path();
-        // `file_type` does not follow symlinks, so links and special files are
-        // skipped rather than opened.
+        let name = entry.file_name();
+        let path = dir.join(&name);
+        // Discovery metadata is only a hint; every subsequent open is
+        // descriptor-relative and refuses a replaced final symlink.
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
@@ -264,8 +295,25 @@ fn walk(
             }
         };
         if file_type.is_dir() {
+            if depth >= max_depth {
+                if !incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "max_depth")
+                {
+                    incomplete_reasons.push("max_depth".to_string());
+                }
+                continue;
+            }
+            let child = match directory.open_dir_nofollow(&name) {
+                Ok(child) => child,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
             walk(
                 &path,
+                &child,
                 depth + 1,
                 max_depth,
                 max_files,
@@ -287,7 +335,10 @@ fn walk(
                 return;
             }
             *files_scanned += 1;
-            match scan_one(&path, max_bytes, detectors) {
+            match open_scan_file(directory, &name)
+                .map_err(anyhow::Error::from)
+                .and_then(|file| scan_one(&path, file, max_bytes, detectors))
+            {
                 Ok(finding) => findings.push(finding),
                 Err(error) => errors.push(format!("{}: {error}", path.display())),
             }
@@ -347,7 +398,7 @@ pub fn run(
     );
     let path = Path::new(input);
     check_input_symlink(path, follow_input_symlink).map_err(anyhow::Error::msg)?;
-    let metadata = std::fs::metadata(path).map_err(|error| {
+    let input_error = |error: std::io::Error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             anyhow::Error::new(error).context(crate::envelope::UsageError(format!(
                 "cannot access '{input}': input path not found"
@@ -355,7 +406,27 @@ pub fn run(
         } else {
             anyhow::Error::new(error).context(format!("cannot access '{input}'"))
         }
-    })?;
+    };
+    let resolved = if follow_input_symlink {
+        std::fs::canonicalize(path).map_err(input_error)?
+    } else {
+        path.to_path_buf()
+    };
+    let (parent, name) = match resolved.file_name() {
+        Some(name) => (
+            resolved
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+            name,
+        ),
+        None => (resolved.as_path(), std::ffi::OsStr::new(".")),
+    };
+    let directory =
+        Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(input_error)?;
+    let metadata = directory
+        .symlink_metadata(Path::new(name))
+        .map_err(input_error)?;
 
     let detectors = profile
         .map(ScanDetectors::from_profile)
@@ -371,13 +442,18 @@ pub fn run(
 
     if metadata.is_file() {
         files_scanned = 1;
-        match scan_one(path, max_bytes, &detectors) {
+        match open_scan_file(&directory, name)
+            .map_err(anyhow::Error::from)
+            .and_then(|file| scan_one(path, file, max_bytes, &detectors))
+        {
             Ok(finding) => findings.push(finding),
             Err(error) => errors.push(format!("{input}: {error}")),
         }
     } else if metadata.is_dir() {
+        let root = directory.open_dir_nofollow(Path::new(name))?;
         walk(
             path,
+            &root,
             0,
             max_depth,
             max_files,
@@ -575,6 +651,51 @@ mod tests {
     use super::*;
     use steganographer_core::config::ScanProfileConfig;
     use steganographer_core::unicode_text::HOMOGLYPH_SUSPECT;
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_pinning_survives_directory_and_file_replacement() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        let moved = root.path().join("moved");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(tree.join("file"), b"original").unwrap();
+        std::fs::write(outside.join("file"), b"outside secret").unwrap();
+        let pinned = Dir::open_ambient_dir(&tree, cap_std::ambient_authority()).unwrap();
+        let file = open_scan_file(&pinned, OsStr::new("file")).unwrap();
+        // Replace the discovered directory path with an off-tree symlink.
+        std::fs::rename(&tree, &moved).unwrap();
+        symlink(&outside, &tree).unwrap();
+        let reopened = open_scan_file(&pinned, OsStr::new("file")).unwrap();
+        assert_eq!(read_bounded(reopened, 100).unwrap().0, b"original");
+        // Replace the discovered regular entry after opening its descriptor.
+        std::fs::remove_file(moved.join("file")).unwrap();
+        symlink(outside.join("file"), moved.join("file")).unwrap();
+        assert_eq!(read_bounded(file, 100).unwrap().0, b"original");
+        assert!(open_scan_file(&pinned, OsStr::new("file")).is_err());
+        assert!(pinned.open_dir_nofollow("file").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raced_fifo_is_rejected_without_waiting_for_a_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input");
+        std::fs::write(&path, b"discovered regular file").unwrap();
+        let dir = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        assert!(dir.symlink_metadata("input").unwrap().is_file());
+        std::fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(open_scan_file(&dir, std::ffi::OsStr::new("input")).is_err());
+    }
 
     fn profile_with_detectors(ids: &[&str]) -> ProfileConfig {
         ProfileConfig {

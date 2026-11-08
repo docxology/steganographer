@@ -4,17 +4,21 @@ Source modules for GStreamer integration.
 
 ## Files
 
-| File | Lines | Purpose |
-| ------ | ------- | --------- |
-| `lib.rs` | 107 | `init()` wraps `gstreamer::init()` (plus macOS NSApplication setup), `launch()` helper, module declarations |
-| `video_filter.rs` | 488 | `run_video_filter()` — frame-by-frame AppSink/AppSrc with signing; `extract_from_source()` for verification; `process_video_file()` / `process_audio_file()` offline helpers |
-| `audio_filter.rs` | 204 | `run_audio_filter()` — buffer-by-buffer AppSink/AppSrc with signing; `extract_from_source()` for verification |
-| `elements.rs` | 424 | `StegoVideo` — native in-place `BaseTransform` element (`stegovideo`); `register()` adds it to the GStreamer registry |
-| `plugin.rs` | 50 | `register_elements()` — plugin registration entry point with metadata constants; delegates to `elements::register()` |
+| File | Purpose |
+| --- | --- |
+| `lib.rs` | GStreamer-only init, launch helper, actual-map plane-span guard, private file staging/publication and bridge lifecycle |
+| `video_filter.rs` | Video AppSink/AppSrc signing/extraction; exact Matroska/PCM WAV convenience helpers |
+| `audio_filter.rs` | Interleaved S16LE buffer signing/extraction with preserved boundaries |
+| `elements.rs`, `audio_element.rs` | Native generic packet video/audio elements |
+| `plugin.rs` | Both element registrations and plugin metadata |
 
 ## Key Patterns
 
 - Buffer mapping via `buffer.make_mut().map_writable()` / `buffer.map_readable()`
 - Format negotiation from caps: `VideoInfo::from_caps()` / `AudioInfo::from_caps()`
-- Audio byte-to-i16 conversion via `unsafe std::slice::from_raw_parts_mut`
-- Progress logging every 100 video frames / 1000 audio buffers
+- Aligned complete-frame S16LE sample storage; no arbitrary byte-to-i16 cast
+- File helpers require trailing `overwrite: bool` (no shim), reject aliases and
+  publish private sibling output after EOS. Filesink reopens the pathname:
+  output directories must be trusted.
+- Plane access checks actual mapped span, offset and full stride extent before
+  dependency slicing, not merely negotiated/forged metadata sizes.

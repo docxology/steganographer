@@ -199,34 +199,175 @@ fn source_paths(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn snapshot_file(
+    destination: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    permissions: fs::Permissions,
+) -> Result<Value> {
+    safe_relative(relative)?;
+    // Filename checks are supplemented by the repository's real secret scanner.
+    ensure!(
+        !bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.starts_with(b"-----BEGIN ") && line.ends_with(b"PRIVATE KEY-----")),
+        "private key content in {}",
+        relative.display()
+    );
+    let output = destination.join(relative);
+    fs::create_dir_all(output.parent().context("source parent")?)?;
+    write_new(&output, bytes)?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.mode()
+    };
+    #[cfg(not(unix))]
+    let mode = u32::from(permissions.readonly());
+    fs::set_permissions(&output, permissions)?;
+    Ok(json!({"sha256": sha(bytes), "bytes": bytes.len(), "mode": mode}))
+}
+
 fn snapshot(root: &Path, destination: &Path, paths: &[PathBuf]) -> Result<Value> {
     fs::create_dir(destination)?;
     let mut inventory = BTreeMap::new();
     for relative in paths {
         no_symlink_path(&root.join(relative))?;
-        let bytes = fs::read(root.join(relative))?;
-        // Filename checks are supplemented by the repository's real secret scanner.
-        ensure!(!bytes.split(|byte| *byte == b'\n').any(|line|
-            line.starts_with(b"-----BEGIN ") && line.ends_with(b"PRIVATE KEY-----")),
-            "private key content in {}", relative.display());
-        let output = destination.join(relative);
-        fs::create_dir_all(output.parent().context("source parent")?)?;
-        write_new(&output, &bytes)?;
-        let permissions = fs::metadata(root.join(relative))?.permissions();
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            permissions.mode()
-        };
-        #[cfg(not(unix))]
-        let mode = u32::from(permissions.readonly());
-        fs::set_permissions(&output, permissions)?;
-        inventory.insert(
-            relative.to_string_lossy().into_owned(),
-            json!({"sha256": sha(&bytes), "bytes": bytes.len(), "mode": mode}),
-        );
+        let mut file = File::open(root.join(relative))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let entry = snapshot_file(
+            destination,
+            relative,
+            &bytes,
+            file.metadata()?.permissions(),
+        )?;
+        inventory.insert(relative.to_string_lossy().into_owned(), entry);
     }
     Ok(serde_json::to_value(inventory)?)
+}
+
+#[cfg(unix)]
+fn committed_snapshot(root: &Path, destination: &Path, head: &str) -> Result<Value> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Enumerate the captured object, never HEAD again or the mutable index.
+    // Unlike git archive, this does not apply export-ignore/export-subst attributes.
+    let tree = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "--full-tree", head])
+        .current_dir(root)
+        .output()?;
+    ensure!(
+        tree.status.success(),
+        "git committed source inventory failed"
+    );
+    fs::create_dir(destination)?;
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut requests = child.stdin.take().context("git object input")?;
+    let mut objects = BufReader::new(child.stdout.take().context("git object output")?);
+    let captured = (|| -> Result<Value> {
+        let mut inventory = BTreeMap::new();
+        let mut response = String::new();
+        let mut bytes = Vec::new();
+        for entry in tree
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let separator = entry
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .context("git tree entry")?;
+            let header = std::str::from_utf8(&entry[..separator])?;
+            let (mode, object) = header.split_once(' ').context("git tree mode")?;
+            let (kind, oid) = object.split_once(' ').context("git tree object")?;
+            ensure!(
+                kind == "blob" && matches!(mode, "100644" | "100755"),
+                "unsupported committed source entry: {header}"
+            );
+            let relative = Path::new(
+                std::str::from_utf8(&entry[separator + 1..])
+                    .context("non-UTF-8 source filename")?,
+            );
+            safe_relative(relative)?;
+            writeln!(requests, "{oid}")?;
+            requests.flush()?;
+            response.clear();
+            objects.read_line(&mut response)?;
+            let mut fields = response.split_whitespace();
+            ensure!(
+                fields.next() == Some(oid) && fields.next() == Some("blob"),
+                "unexpected git object response"
+            );
+            let size: usize = fields.next().context("git object size")?.parse()?;
+            ensure!(fields.next().is_none(), "invalid git object response");
+            bytes.resize(size, 0);
+            objects.read_exact(&mut bytes)?;
+            let mut terminator = [0];
+            objects.read_exact(&mut terminator)?;
+            ensure!(terminator == *b"\n", "invalid git object terminator");
+            let permissions =
+                fs::Permissions::from_mode(if mode == "100755" { 0o100755 } else { 0o100644 });
+            let record = snapshot_file(destination, relative, &bytes, permissions)?;
+            ensure!(
+                inventory
+                    .insert(relative.to_string_lossy().into_owned(), record)
+                    .is_none(),
+                "duplicate committed source path"
+            );
+        }
+        Ok(serde_json::to_value(inventory)?)
+    })();
+    drop(requests);
+    if captured.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().context("reaping git object reader")?;
+    let inventory = captured?;
+    ensure!(status.success(), "git committed source read failed");
+    Ok(inventory)
+}
+
+#[cfg(not(unix))]
+fn committed_snapshot(_root: &Path, _destination: &Path, _head: &str) -> Result<Value> {
+    bail!("committed release capture requires a supported Unix host")
+}
+
+struct SourceSnapshot {
+    inventory: Value,
+    dirty: bool,
+    kind: &'static str,
+    binding: &'static str,
+}
+
+fn capture_source(
+    root: &Path,
+    destination: &Path,
+    head: &str,
+    allow_dirty: bool,
+) -> Result<SourceSnapshot> {
+    if allow_dirty {
+        Ok(SourceSnapshot {
+            inventory: snapshot(root, destination, &source_paths(root)?)?,
+            // This is an explicitly mutable worktree capture even if the
+            // admission status was clean or a transient edit is later restored.
+            dirty: true,
+            kind: "working-tree",
+            binding: "SOURCE.json records captured working-tree bytes/modes; base_commit is only a reference revision, not a source identity; capture is not a point-in-time worktree snapshot",
+        })
+    } else {
+        Ok(SourceSnapshot {
+            inventory: committed_snapshot(root, destination, head)?,
+            dirty: false,
+            kind: "committed-tree",
+            binding: "SOURCE.json records the full regular-file bytes/modes of the captured base_commit Git tree; mutable worktree/index bytes and export attributes are not used",
+        })
+    }
 }
 
 fn metadata(root: &Path, full: bool) -> Result<Value> {
@@ -544,12 +685,11 @@ fn main() -> Result<()> {
         .to_owned();
     let cargo = text(&root, "cargo", &["--version"])?;
     let scanner = text(&root, "gitleaks", &["version"])?;
-    let paths = source_paths(&root)?;
     let temporary = tempfile::tempdir()?;
     let canonical_stage = temporary.path().canonicalize()?;
     let stage = canonical_stage.as_path();
     let source = stage.join("source");
-    let inventory = snapshot(&root, &source, &paths)?;
+    let captured = capture_source(&root, &source, &head, args.allow_dirty)?;
     let meta = metadata(&source, false)?;
     let packages = meta["packages"].as_array().context("Cargo packages")?;
     let version = packages
@@ -576,7 +716,7 @@ fn main() -> Result<()> {
         ],
     )?;
     let output = reserve_output(&args.output)?;
-    write_json(&output.join("SOURCE.json"), &inventory)?;
+    write_json(&output.join("SOURCE.json"), &captured.inventory)?;
     let inventory_bytes = fs::read(output.join("SOURCE.json"))?;
     let source_name = format!("steganographer-{version}-source");
     fs::rename(&source, stage.join(&source_name))?;
@@ -622,7 +762,8 @@ fn main() -> Result<()> {
     write_json(
         &output.join("PROVENANCE.json"),
         &json!({"schema": "steganographer.release.v1", "version": version, "base_commit": head,
-        "dirty": !status.is_empty(), "source_status": status, "source_inventory_sha256": sha(&inventory_bytes), "source_binding": "SOURCE.json records the exact bytes built, including explicitly allowed dirty/untracked source; base_commit is not a dirty snapshot identity",
+        "dirty": captured.dirty, "source_status": status, "source_status_scope": "admission-only; not a capture-time worktree attestation",
+        "source_capture": captured.kind, "source_inventory_sha256": sha(&inventory_bytes), "source_binding": captured.binding,
         "host": host, "rustc": rustc, "cargo": cargo, "gitleaks": scanner, "variants": variants, "commands": commands,
         "validation": "fresh compilation, matching CLI version and generated-artifact presence; no claim of full tests, JavaScript runtime checks, cross-host execution or publication"}),
     )?;
@@ -649,6 +790,167 @@ fn main() -> Result<()> {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
+
+    fn committed_fixture(root: &Path) -> Result<String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::create_dir(root)?;
+        run(root, "git", &["init", "--quiet"])?;
+        run(
+            root,
+            "git",
+            &["config", "user.name", "Release safety fixture"],
+        )?;
+        run(
+            root,
+            "git",
+            &["config", "user.email", "release-safety@example.invalid"],
+        )?;
+        run(root, "git", &["config", "core.filemode", "true"])?;
+        write_new(&root.join("tracked"), b"committed")?;
+        write_new(&root.join("runner"), b"#!/bin/sh\nexit 0\n")?;
+        write_new(&root.join("binary"), b"\0\xff\r\n$Format:%H$\n")?;
+        fs::set_permissions(root.join("runner"), fs::Permissions::from_mode(0o755))?;
+        write_new(
+            &root.join(".gitattributes"),
+            b"binary -text export-subst\nrunner export-ignore\n",
+        )?;
+        run(root, "git", &["add", "."])?;
+        run(
+            root,
+            "git",
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        )?;
+        text(root, "git", &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn clean_capture_uses_admitted_commit_despite_worktree_and_index_races() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+        let root = directory.path().join("repository");
+        let head = committed_fixture(&root)?;
+        let status = text(
+            &root,
+            "git",
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        assert!(status.is_empty());
+        // Deterministic interleaving: mutate after clean admission, before capture.
+        fs::write(root.join("tracked"), b"uncommitted index")?;
+        run(&root, "git", &["add", "tracked"])?;
+        fs::write(root.join("tracked"), b"uncommitted worktree")?;
+        fs::set_permissions(root.join("runner"), fs::Permissions::from_mode(0o644))?;
+        write_new(&root.join("untracked"), b"not committed")?;
+        fs::remove_file(root.join("binary"))?;
+        let destination = directory.path().join("snapshot");
+        let captured = capture_source(&root, &destination, &head, false)?;
+        assert_eq!(fs::read(destination.join("tracked"))?, b"committed");
+        assert_eq!(
+            fs::read(destination.join("runner"))?,
+            b"#!/bin/sh\nexit 0\n"
+        );
+        assert_eq!(
+            fs::read(destination.join("binary"))?,
+            b"\0\xff\r\n$Format:%H$\n"
+        );
+        assert_eq!(
+            fs::metadata(destination.join("runner"))?
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755
+        );
+        assert_eq!(captured.inventory["tracked"]["sha256"], sha(b"committed"));
+        assert_eq!(
+            captured.inventory["runner"]["mode"].as_u64().unwrap() & 0o7777,
+            0o755
+        );
+        assert!(!destination.join("untracked").exists());
+        assert_eq!(captured.inventory.as_object().unwrap().len(), 4);
+        assert!(!captured.dirty);
+        assert_eq!(captured.kind, "committed-tree");
+        assert_eq!(text(&root, "git", &["rev-parse", "HEAD"])?, head);
+        Ok(())
+    }
+
+    #[test]
+    fn allowed_worktree_capture_never_claims_clean_after_transient_edit() -> Result<()> {
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+        let root = directory.path().join("repository");
+        let head = committed_fixture(&root)?;
+        let status = text(
+            &root,
+            "git",
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        assert!(status.is_empty());
+        fs::write(root.join("tracked"), b"transient uncommitted bytes")?;
+        let destination = directory.path().join("snapshot");
+        let captured = capture_source(&root, &destination, &head, true)?;
+        fs::write(root.join("tracked"), b"committed")?;
+        assert!(text(
+            &root,
+            "git",
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        )?
+        .is_empty());
+        assert_eq!(
+            fs::read(destination.join("tracked"))?,
+            b"transient uncommitted bytes"
+        );
+        assert_eq!(
+            captured.inventory["tracked"]["sha256"],
+            sha(b"transient uncommitted bytes")
+        );
+        assert!(captured.dirty);
+        assert_eq!(captured.kind, "working-tree");
+        // Even a worktree capture that happens to match HEAD is not commit-bound.
+        let unchanged = capture_source(&root, &directory.path().join("unchanged"), &head, true)?;
+        assert!(unchanged.dirty);
+        assert_eq!(unchanged.kind, "working-tree");
+        Ok(())
+    }
+
+    #[test]
+    fn committed_capture_rejects_symlinks_and_private_bytes() -> Result<()> {
+        for symlink in [false, true] {
+            let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)?;
+            let root = directory.path().join("repository");
+            committed_fixture(&root)?;
+            if symlink {
+                std::os::unix::fs::symlink("tracked", root.join("link"))?;
+            } else {
+                fs::write(root.join("tracked"), b"-----BEGIN PRIVATE KEY-----")?;
+            }
+            run(&root, "git", &["add", "."])?;
+            run(
+                &root,
+                "git",
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "unsafe fixture",
+                ],
+            )?;
+            let head = text(&root, "git", &["rev-parse", "HEAD"])?;
+            assert!(
+                capture_source(&root, &directory.path().join("snapshot"), &head, false).is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn archive_is_one_complete_gzip_member() -> Result<()> {

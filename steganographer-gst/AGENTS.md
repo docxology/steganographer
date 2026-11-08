@@ -57,11 +57,18 @@ GStreamer integration for real-time media pipeline processing.
   pipelines on every exit.
 - `video_filter::process_video_file` writes exact raw RGB Matroska `.mkv`;
   `video_filter::process_audio_file` writes exact S16LE PCM `.wav`. Both take
-  explicit `signing_kernel` after `signer`, then the frame/buffer limit.
+  explicit `signing_kernel` after `signer`, then frame/buffer limit and trailing
+  `overwrite: bool`. No old-signature shim; false means no-clobber.
   File audio gathers selected PCM bounded to 64 MiB and embeds once at index 0;
   absent `max_buffers` means complete file, not silent truncation. Verify the
   whole delivered PCM, not decoder chunks. Paths are literal quoted properties.
 - Parent release evidence includes delivered RGB Matroska/WAV and real
   downstream failures. It does not establish physical-camera or Windows runs.
+- File helpers reject aliases, stage private sibling output and publish only
+  after successful EOS; failures preserve existing files. CLI passes true only
+  for its outer owned staging path, not the final user destination.
+- Filesink reopens the temporary pathname, so output directories must be trusted.
+- Before dependency plane slicing, validate actual mapped span/offset and full
+  stride × height including final row padding; claimed metadata is not backing.
 
 Line inventory above is maintained by release integration, not API edits.

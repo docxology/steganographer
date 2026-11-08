@@ -14,8 +14,8 @@ second schema in `main.rs` or tests.
 | `cli.rs` | Clap commands/arguments |
 | `main.rs` | Early machine mode, validated config/effective limits, dispatch, exit policy, macOS application-loop ownership |
 | `envelope.rs` | `steganographer.cli/v1`, typed error classification |
-| `cmd_encode.rs` | Legacy encode, key generation/derivation, capacity, analysis, revocation |
-| `cmd_packet.rs` | Generic encode and shared decode/extract recovery |
+| `cmd_encode.rs` | Legacy encode, key generation/derivation, info, analysis, locked revocation updates |
+| `cmd_packet.rs` | Generic encode, exact sequential logical capacity and shared decode/extract recovery |
 | `cmd_verify.rs` | Legacy signature recovery, authentication and revocation |
 | `cmd_scan.rs` | Bounded forensic file/directory scan and completeness |
 | `cmd_ots.rs` | Real standard OpenTimestamps file stamp/verify |
@@ -66,6 +66,17 @@ a private CLI copy. Hex helpers are shared core crypto APIs.
 - OTS commits SHA-256(input), supports Bitcoin only, and defaults to
   `proof_dir/<digest-hex>.ots` for both stamp/verify. Pending is not verified;
   canonical-chain verification trusts the configured Esplora provider.
+- Capacity accounts for exact metadata/optional signature/locator/envelope sizes
+  under effective limits; failed framing is not a successful empty capacity.
+- `analyze` exposes availability; no usable method means partial JSON / exit 5.
+  Scan detector and max-depth budgets remain incomplete without findings; a
+  positive finding still takes exit 4. Scan opens are descriptor-relative/no-follow.
+- Keep the persistent revocation `.lock` companion inode across atomic registry
+  replacement. Advisory locks serialize cooperating writers, not arbitrary edits.
+- OTS uses `verify_with_upgrade`; completed Bitcoin proofs skip calendars but
+  still require explorer verification. `proof_file` identifies the selected
+  receipt; changed proof bytes publish append-only. Legacy optional hooks hash
+  canonical media, while dedicated OTS commands hash exact files.
 
 ## Features and checks
 

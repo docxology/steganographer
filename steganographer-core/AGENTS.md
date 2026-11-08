@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519, Ethereum, FIPS 204 ML-DSA, hybrid), payload encryption, error correction, metrics, forensic scanning, and config parsing.
+In-memory steganography/crypto/packet/forensic algorithms and config parsing, plus optional bounded OpenTimestamps network/proof I/O. No GStreamer dependency.
 
 ## Module Map
 
@@ -48,7 +48,20 @@ Pure, zero-I/O steganography algorithms, cryptographic signing (Ed25519, Ethereu
 - Encryption: ChaCha20-Poly1305 AEAD (256-bit key, 96-bit nonce derived from a fresh random salt + the 16-byte `packet_id` — never the public locator nonce)
 - Error correction: evaluation-form Reed-Solomon over GF(2⁸), bounded Berlekamp-Welch correction
 - Multi-frame: XOR n-of-n secret sharing
-- Packet flags ⇔ transform descriptors are checked for mutual consistency at decode (no silent downgrades); unknown non-critical envelope fields are preserved; PKT-009 full bounded nested decode: `GenericPacket::decode_nested` expands parent-id chains with `max_nesting_depth` (3) and `max_aggregate_nested_bytes` (64 MiB), cycle detection included
+- Flags and transform descriptors, plus keyed-locator/placement policy, must agree.
+  Nested decode expands only identifiable parent-id-linked children; bare STG3
+  payloads remain opaque. Enforce complete child span, matching parent, cycle,
+  depth and aggregate encoded-byte limits (root included).
+- Compression writers/readers share the 64 MiB logical ceiling; configured
+  CLI limits may be lower. Record compression only when it shrinks the body.
+- Adaptive selection retains only the framing-sized best prefix, preserving
+  descending variance and stable original-order ties with O(k) retained memory.
+- Forensics latches detection separately from evidence caps and propagates
+  detector input/decode/finding limits as incompleteness. Unavailable statistical
+  methods are not clean negatives.
+- OTS `verify_with_upgrade` returns verdict plus optional changed bytes;
+  completed Bitcoin proofs skip calendars, not explorer/header verification.
+  Consumers publish upgrades append-only without replacing original receipts.
 - Spread-spectrum: host-canceling differential-pair modulation (pre-0.8 absolute-correlation embeds are no longer extractable — re-embed)
 
 ## Features

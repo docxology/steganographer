@@ -1,7 +1,7 @@
 # steganographer-core
 
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-Pure, media-agnostic algorithms for steganographic embedding, cryptographic signing, and configuration. This is the foundational crate with zero GStreamer or I/O dependencies.
+Media algorithms, generic packets, cryptographic signing and bounded forensic analysis without GStreamer dependencies. Most kernels are in-memory; optional OpenTimestamps support performs bounded network/proof I/O.
 
 ## Modules
 
@@ -27,6 +27,22 @@ Pure, media-agnostic algorithms for steganographic embedding, cryptographic sign
 | `forensics` | `src/forensics.rs` | `ForensicScan`, `scan_bytes`, stable `detector_registry()` (FOR-001) — structural + statistical + container findings + calibration corpus mapping |
 | `forensics/ooxml` | `src/forensics/ooxml.rs` | Dependency-free in-memory ZIP reader + OOXML/WordprocessingML container analysis (DOC-001 package anomalies, DOC-002 concealment; `ZIP_TOPOLOGY` inventory) |
 | `unicode_text` | `src/unicode_text.rs` | Unicode/text steganography detectors (FOR-005: zero-width, variation selectors, bidi controls, whitespace anomalies, homoglyph suspects) |
+| `adaptive` | `src/adaptive.rs` | Masked local variance with framing-sized heap selection; stable tie order, no full candidate sort |
+| `ots_client` | `src/ots_client.rs` | Standard detached proof lifecycle; `verify_with_upgrade` returns verdict and optional changed bytes |
+
+## Bounded contracts
+
+Sequential/keyed locator flags must agree with placement. Compression admits
+at most 64 MiB logical input and records only shrinkage; readers preflight
+transforms and enforce decode limits. CLI limits can be lower.
+Nested decode is opt-in through an identifiable parent-id field, not a mere
+STG3 prefix; linked children must occupy the complete logical payload and obey
+parent/depth/aggregate/cycle checks. Parentless packet-shaped bytes stay opaque.
+
+Forensics reports coverage/incomplete reasons separately from positive evidence;
+detector byte/finding/decode budgets apply even when all input was supplied.
+Statistical `available` is not a detection verdict or calibrated probability.
+See [Algorithms](../docs/algorithms.md) and [API Reference](../docs/api-reference.md).
 
 ## Tests
 

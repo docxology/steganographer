@@ -31,7 +31,7 @@ use gstreamer::subclass::prelude::*;
 use gstreamer_base::subclass::base_transform::BaseTransformImpl;
 use gstreamer_base::subclass::BaseTransformMode;
 use gstreamer_base::BaseTransform;
-use gstreamer_video::{VideoFormat, VideoFrameExt, VideoFrameRef, VideoInfo};
+use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
 use std::sync::Arc;
 use steganographer_core::carrier::{
     CarrierEmbedder, CarrierError, EmbeddingConfig, KeyedSpatialLsb, SpatialLsb,
@@ -423,32 +423,21 @@ mod imp {
                 );
                 gstreamer::FlowError::Error
             })?;
-            // GstVideoFrame incorporates the actual buffer's VideoMeta offset
-            // and stride. Reject negative/overflowing layouts before obtaining
-            // a plane slice (whose dependency implementation uses stride * h).
-            let stride_bytes = usize::try_from(frame.plane_stride()[0])
-                .map_err(|_| gstreamer::FlowError::Error)?;
-            let row_units = (frame.width() as usize)
+            let row_units = (info.width() as usize)
                 .checked_mul(bpp)
                 .ok_or(gstreamer::FlowError::Error)?;
-            let height = frame.height() as usize;
-            let extent = stride_bytes
-                .checked_mul(height)
-                .filter(|extent| *extent <= u32::MAX as usize)
-                .ok_or(gstreamer::FlowError::Error)?;
-            if stride_bytes < row_units || row_units == 0 || height == 0 {
-                return Err(gstreamer::FlowError::Error);
-            }
+            let height = info.height() as usize;
+            let stride_bytes =
+                crate::checked_packed_plane(&frame, &info, row_units).map_err(|error| {
+                    self.note_skip(
+                        SkipReason::FrameSize,
+                        &format!("invalid mapped video plane: {error}"),
+                    );
+                    gstreamer::FlowError::Error
+                })?;
             let data = frame
                 .plane_data_mut(0)
                 .map_err(|_| gstreamer::FlowError::Error)?;
-            if data.len() < extent {
-                self.note_skip(
-                    SkipReason::FrameSize,
-                    "mapped plane is smaller than its layout",
-                );
-                return Err(gstreamer::FlowError::Error);
-            }
 
             embed_into_packed_frame(
                 self,

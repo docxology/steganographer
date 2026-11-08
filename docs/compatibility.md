@@ -2,11 +2,44 @@
 
 ## Versioning
 
-The workspace is on the 0.8 release line. Before 1.0, a minor release may make
+These docs target proposed 0.9.0; version metadata/publication are separate.
+Before 1.0, a minor release may make
 breaking Rust/API or legacy format changes with an explicit migration note;
 patch releases do not change wire contracts or MSRV. Generic packet protocol
 versioning is independent of the crate version. See [CHANGELOG](../CHANGELOG.md)
 for release changes and [CLI Reference](cli-reference.md) for current flags.
+
+## 0.8 to proposed 0.9 cutover
+
+- Native convenience callers must pass
+  `process_video_file(input, output, stego, signer, signing_kernel, max_frames, overwrite)`
+  or `process_audio_file(input, output, stego, signer, signing_kernel, max_buffers, overwrite)`.
+  Use `false` for new user outputs; `true` only when replacement is intended.
+  Input/output aliases always reject. Both helpers stage a private sibling and
+  publish after successful EOS; failures preserve an existing destination.
+  Filesink reopens that pathname, so the output directory must remain trusted.
+  There is no old-signature overload or compatibility shim.
+- Use `capacity`, not raw `info` capacity minus a guessed constant, for
+  sequential generic logical payload sizing. Match filename/MIME/signing
+  policy exactly between sizing and encoding. See [CLI Reference](cli-reference.md).
+- An unavailable `analyze` result is now partial/inconclusive, exit 5, not a
+  clean negative. Scan detector/traversal cutoffs remain incomplete even when
+  all input bytes were read; positive findings still take exit 4 precedence.
+- Generic wire-v1 fixtures remain unchanged. Compression uses a shared 64 MiB
+  logical admission ceiling (CLI limits may be lower); sequential/keyed flags
+  must match placement. Nested decode treats STG3-shaped bytes as opaque until
+  an identifiable parent-id field opts in, then requires strict complete linkage.
+- OTS `verify_with_upgrade(proof, expected_digest)` returns the verdict plus
+  optional changed proof bytes. Completed Bitcoin proofs skip calendars but
+  still verify through the configured trusted explorer. Preserve old receipts
+  on publication; `verify` discards returned upgrade bytes if not needed.
+- RTC is JSON/base64 over a data channel, not raw JPEG binary. Migrate custom
+  clients to `jpeg_b64` encode requests and STGO 20-byte chunk headers.
+  The 4 MiB limit covers serialized JSON/base64; chunks are at most 16 KiB.
+  WebSocket image input remains raw binary; signed replies contain PNG.
+- Default release builds capture committed Git-tree blobs/modes. Explicit
+  `--allow-dirty` captures the working tree, even if clean, and is not
+  commit-bound. It is not a shortcut to a qualified/published release.
 
 ## 0.7 to 0.8 cutover
 
@@ -145,11 +178,11 @@ are maintained in root `AGENTS.md`, not copied into this policy.
 
 ## MSRV
 
-The 0.8 workspace MSRV is **Rust 1.91**, increased in this minor release because
-the updated RTC dependency uses
+The workspace MSRV remains **Rust 1.91**, raised in 0.8 because the RTC
+dependency uses
 [`Ipv4Addr::from_octets`](https://doc.rust-lang.org/1.91.0/std/net/struct.Ipv4Addr.html#method.from_octets),
-stabilized in 1.91. The current OpenH264 wrapper also requires a newer floor
-than 1.88. CI checks the locked all-feature workspace on 1.91; dependencies
+stabilized in 1.91. CI is configured for the locked all-feature workspace on
+1.91; that configuration is not evidence of a current hosted run. Dependencies
 are not vendored or silently downgraded to preserve an inaccurate MSRV.
 
 ## Platform boundaries

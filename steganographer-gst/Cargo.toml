@@ -20,6 +20,6 @@ gstreamer-app = { version = "0.23", features = ["v1_22"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
-
-[dev-dependencies]
+same-file = "1"
 tempfile = "3"
+

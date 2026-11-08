@@ -164,9 +164,8 @@ pub fn verify(
     let rt = tokio::runtime::Runtime::new()?;
     let verification = rt.block_on(async {
         let proof = OTSClient::load_proof(path).await?;
-        let upgraded = client.upgrade(&proof, &digest).await?;
-        let result = client.verify_attestations(&upgraded, &digest).await?;
-        if upgraded != proof {
+        let (result, upgraded) = client.verify_with_upgrade(&proof, &digest).await?;
+        if let Some(upgraded) = upgraded {
             client.save_proof_to(&upgraded, path).await?;
         }
         Ok::<_, steganographer_core::OTSError>(result)

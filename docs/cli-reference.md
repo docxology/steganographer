@@ -1,6 +1,6 @@
 # CLI Reference
 
-This reference describes the 0.8 CLI. The authoritative argument schema is
+This reference describes the proposed 0.9.0 CLI behavior. The authoritative argument schema is
 `steganographer-cli/src/cli.rs`, shared with completion/manual generation.
 Run `steganographer <command> --help` for argument spelling in your build.
 `video` and `audio` exist only with the default `gst` feature enabled.
@@ -236,6 +236,42 @@ PCM WAV chunks plus extraction manifests in stored ZIP archives. Lossy H.264
 preview is not the signed evidence surface. The displayed public identity is
 the actual runtime signer, not a verified human/organization identity.
 
+## `capacity`: exact generic logical payload bound
+
+```bash
+steganographer capacity --carrier-units 12288 --stego-type lsb_video \
+  --bits 1 --filename payload.bin --mime-type application/octet-stream --format json
+# Alternatively decode an actual carrier:
+steganographer capacity -i cover.png --bits 2 --filename payload.bin \
+  --signing-key mykey.key --format json
+```
+
+Select exactly one of `--carrier-units N` or `--input/-i FILE`. Units are
+decoded RGB bytes (width × height × 3), or S16 samples across all channels,
+**not** encoded file bytes or PCM byte count. `--stego-type` accepts
+`lsb_video` (default) or `lsb_audio`; `--bits` is 1–4 (default 1).
+Actual input accepts `--input-format` and paired raw-RGB `--width/--height`.
+
+This sizes an uncompressed, unencrypted, non-ECC **sequential generic file
+packet**, optionally signed with the actual `--signing-key` policy. It uses
+the core 32-byte locator and canonical envelope encoding, including variable-width
+logical length and metadata TLVs, under effective decode limits. Ed25519 adds
+96 bytes of public-key/signature parameters **plus** their transform-descriptor
+and envelope framing; the report sizes all of it, not a guessed 64-byte deduction.
+It is not `info`'s raw packet budget or a bound for keyed/transformed packets.
+If even empty framing cannot fit, it fails rather than advertising an
+embeddable zero-byte payload.
+
+The JSON `steganographer.cli/v1` envelope has `command: "capacity"` and
+`result` fields `max_payload_bytes`, `max_packet_bytes`,
+`packet_overhead_bytes`, `carrier_units`, `bits`, `signed`, `filename`,
+`mime_type` (absent metadata is null). `max_packet_bytes` is the encoded
+packet size at the reported maximum logical payload; overhead is their
+difference, not a universal constant. Pass identical `--filename`,
+`--mime-type`, bit depth and signing key to encode; file encoding otherwise
+derives filename metadata from the payload path. Capacity does not generate
+an identity or allocate the advertised logical payload.
+
 ## Other commands
 
 - `keygen --output/-o <BASE> [--format plain|json]`: writes `<BASE>.key` and
@@ -254,17 +290,30 @@ the actual runtime signer, not a verified human/organization identity.
   including limits and every named profile; no pipeline is started.
 - `revoke --public-key <HEX> [--output/-o <PATH>] [--format plain|json]`:
   updates a JSON array of hex public keys (default `keys/revoked.json`).
-  Malformed existing data fails rather than being discarded.
+  Malformed existing data fails rather than being discarded. A persistent
+  `<output>.lock` companion serializes cooperating read/merge/atomic-publication
+  operations across registry replacement. Do not unlink it: replacing its
+  inode splits lock ownership. This advisory lock does not constrain unrelated
+  writers that ignore the protocol.
 - `analyze -i <FILE> [--analysis-type combined|chi_squared|sample_pairs|rs]
   [--format plain|json]`: statistical evidence, not a calibrated probability of
-  hidden content in natural media; unavailable analysis is inconclusive.
+  hidden content in natural media. Results expose overall and per-method
+  `available`; unavailable individual methods are not negative findings.
+  Combined analysis is available if at least one method is usable. With none,
+  plain output says inconclusive, JSON is `status: "partial"`, and exit is 5.
 - `scan -i <PATH> [--max-depth 8] [--max-files 10000] [--max-bytes 67108864]
   [--profile <NAME>] [--follow-input-symlink] [--format plain|json|jsonl]`:
-  bounded structural/statistical/text/container analysis. Recursion never
-  follows links; the flag permits only the top-level link target. Profiles
-  select supported detector IDs; container findings always contribute.
-  Reports retain findings and incompleteness separately. JSONL streams
-  findings with a summary on stderr; a cutoff is not a clean scan.
+  bounded structural/statistical/text/container analysis. Recursion opens
+  files/directories relative to pinned directories with no-follow checks,
+  validates regular files after opening, and never follows recursive links.
+  The flag permits only the top-level link target. Skipped subdirectories at
+  `--max-depth` mark `max_depth` incompleteness, not a clean result.
+  Profiles select supported detector IDs; container findings always contribute.
+  Reports retain findings and incompleteness separately, including detector
+  budgets even when the CLI read was not truncated. Positive findings take
+  exit 4 precedence over an incomplete negative's exit 5. JSONL emits one
+  schema-wrapped file record plus a final summary envelope on stdout. Plain
+  summaries go to stdout; plain error/coverage diagnostics go to stderr.
 
 ## `ots`: Bitcoin OpenTimestamps
 
@@ -277,9 +326,14 @@ CLI stamping commits **SHA-256 of the exact input file**. `stamp` accepts
 `--input/-i`, `--output-dir`, `--method` (Bitcoin only), `--force`, `--format`.
 `verify` accepts `--input/-i`, optional `--proof`, and `--format`.
 The default proof path is the configured proof directory plus
-`<sha256-hex>.ots`, for both commands, not `<input>.ots`. Pending is not
-verified. See [OTS Integration](ots-integration.md) for standard detached proof,
-calendar upgrade, safe proof I/O and trusted Esplora verification boundaries.
+`<sha256-hex>.ots`, for both commands, not `<input>.ots`. This exact-file
+`sha256-file` scheme differs from the optional legacy encode/verify OTS hook's
+SHA-256 of kernel-canonical media. Dashboard video commits delivered PNG file
+bytes; dashboard audio commits raw signed PCM, not its exported WAV wrapper.
+Pending is not verified. Completed Bitcoin proofs skip calendar upgrades but
+still require trusted explorer verification. Changed upgrades are saved
+append-only; verify's `proof_file` still identifies the selected input receipt.
+See [OTS Integration](ots-integration.md) for the lifecycle and trust boundary.
 Dashboard routes are `/ots/status`, `/ots/stamp`, `/ots/verify`.
 
 ## Machine output and exit codes
@@ -292,12 +346,12 @@ not serialized.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Success; verify may still be extraction-only |
+| 0 | Success; verify may still be extraction-only and OTS may still be pending |
 | 1 | User/configuration/format error |
 | 2 | Packet/signature absent or decode unavailable |
 | 3 | Authentication/signature/pinned-signer or revocation failure |
 | 4 | Scan findings |
-| 5 | Inconclusive resource-limited analysis with no positive finding |
+| 5 | Inconclusive analysis (no usable statistical method, or incomplete scan without a positive finding) |
 | 6 | Unexpected internal/runtime/I/O error |
 
 ## 0.8 migration
@@ -308,3 +362,5 @@ payloads now require the version-1 `STGE` wrapper containing a fresh 128-bit
 packet ID (41-byte overhead); there is no raw zero-ID decryption fallback.
 Generic STG3 protocol-v1 wire bytes remain compatible. See
 [Compatibility](compatibility.md) for Rust/WASM and platform migration notes.
+
+For the 0.9 API/transport cutover, see [Compatibility](compatibility.md#08-to-proposed-09-cutover).

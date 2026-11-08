@@ -360,9 +360,6 @@ pub fn run(
             .error_correction
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("reed_solomon"));
-        if effective_opts.spread == 1 {
-            effective_opts.spread = payload.spread_count();
-        }
         if effective_opts.encryption_key_file.is_none() && effective_opts.encryption_key.is_none() {
             effective_opts.encryption_key_file = payload.encryption_key_file.clone();
             effective_opts.encryption_key = payload.encryption_key.clone();
@@ -1249,6 +1246,32 @@ pub fn revoke_key(public_key_hex: &str, output_path: &str, format: &str) -> anyh
 
     // Missing lists start empty; malformed or unreadable evidence is preserved.
     let path = std::path::Path::new(output_path);
+    // The companion inode is stable across registry replacements. Hold its
+    // advisory lock over the complete read/merge/atomic-publish transaction.
+    // Never remove this file: unlinking would split concurrent lock owners.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut lock_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("revocation output requires a filename"))?
+        .to_os_string();
+    lock_name.push(".lock");
+    let mut lock_options = std::fs::OpenOptions::new();
+    lock_options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+    let registry_lock = lock_options.open(parent.join(lock_name))?;
+    registry_lock.lock()?;
     let mut revoked: steganographer_core::revocation::RevocationList =
         match std::fs::read_to_string(path) {
             Ok(content) => serde_json::from_str(&content)?,
@@ -1281,9 +1304,6 @@ pub fn revoke_key(public_key_hex: &str, output_path: &str, format: &str) -> anyh
     }
 
     // Write back
-    if let Some(parent) = std::path::Path::new(output_path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(&revoked)?;
     media_io::atomic_write(path, json.as_bytes(), true, false)?;
 
@@ -1388,11 +1408,7 @@ pub fn analyze(input: &str, analysis_type: &str, format: &str) -> anyhow::Result
             );
         }
     };
-    let inconclusive = matches!(analysis_type, "rs" | "rs_analysis")
-        && result
-            .rs_analysis
-            .as_ref()
-            .is_some_and(|detector| !detector.available);
+    let inconclusive = !result.available;
 
     match format {
         "json" if inconclusive => envelope::print(&envelope::partial(

@@ -3,7 +3,7 @@
 ![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
 User-facing command-line binary for all steganographic functions.
 
-Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands.
+Built with the shared [Clap](https://docs.rs/clap) schema, including exact generic capacity; live video/audio commands are gated on `gst`.
 
 ## Commands
 
@@ -17,13 +17,14 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 | `verify` | Extract and verify steganographic signatures (`--format plain\|json`) |
 | `keygen` | Generate a new Ed25519 signing key pair |
 | `info` | Report steganographic capacity of a media file |
+| `capacity` | Exact sequential generic RGB/PCM logical payload bound, with matching metadata/signing overhead and effective limits |
 | `analyze` | Analyze a file for steganographic artifacts |
 | `scan` | Bounded forensic scan of files and directories (plain/JSON/JSONL output) |
 | `derive` | Derive keys (signing, encryption, embedding) from a master secret |
 | `config` | Validate a TOML configuration file |
 | `revoke` | Add a signing identity to a revoked-key list |
 | `dashboard` | Launch the live round-trip verification dashboard (web GUI) |
-| `ots` | OpenTimestamps attestation: `stamp` or `verify` a file's Merkle root |
+| `ots` | Standard exact-file SHA-256 timestamp `stamp` / `verify`; pending is not confirmed |
 
 ## Modules
 
@@ -36,7 +37,7 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 | `cmd_audio` | `src/cmd_audio.rs` | Config-driven GStreamer audio pipeline launch |
 | `cmd_encode` | `src/cmd_encode.rs` | Offline LSB video/audio encoding + keygen, info, analyze, derive, revoke |
 | `cmd_verify` | `src/cmd_verify.rs` | Signature extraction + `--format plain\|json` output |
-| `cmd_packet` | `src/cmd_packet.rs` | Opt-in generic packet encode/decode |
+| `cmd_packet` | `src/cmd_packet.rs` | Generic encode/decode/extract and exact sequential capacity |
 | `cmd_scan` | `src/cmd_scan.rs` | Bounded forensic scan over files and directory trees |
 | `cmd_ots` | `src/cmd_ots.rs` | OpenTimestamps `stamp` / `verify` attestation |
 | `media_io` | `src/media_io.rs` | Descriptor-preserving image/WAV/raw I/O and output policy |
@@ -44,6 +45,11 @@ Built with [Clap](https://docs.rs/clap) for argument parsing with 15 subcommands
 Canonical carrier binding comes from
 [`steganographer_core::carrier_binding`](../steganographer-core/src/carrier_binding.rs),
 shared with native workflows.
+
+See [CLI Reference](../docs/cli-reference.md) for capacity JSON fields and matching
+filename/MIME policy, unavailable analysis exit 5, detector/traversal
+incompleteness and revocation companion-lock semantics. Default publication is
+no-clobber; native helpers receive overwrite permission only for CLI-owned staging.
 
 ## Usage
 

@@ -145,6 +145,7 @@ pub fn process_video_file(
     signer: Option<&Signer>,
     signing_kernel: Option<SigningKernel>,
     max_frames: Option<u64>,
+    overwrite: bool,
 ) -> anyhow::Result<()>;
 
 pub fn process_audio_file(
@@ -154,6 +155,7 @@ pub fn process_audio_file(
     signer: Option<&Signer>,
     signing_kernel: Option<SigningKernel>,
     max_buffers: Option<u64>,
+    overwrite: bool,
 ) -> anyhow::Result<()>;
 ```
 
@@ -169,6 +171,26 @@ complete file; the limit, empty input, or midstream caps changes are errors,
 not successful truncation. An explicit `max_buffers` selects a prefix.
 Extract from the whole delivered WAV PCM at index 0, not decoder-sized chunks.
 EOS drain finalizes the output container before success.
+
+This is a breaking convenience-API change: append `false` for a fresh output or
+`true` for deliberate replacement; there is no old-signature shim.
+Both helpers reject input/output aliases, including hard links and symlinks.
+They process into a private same-directory temporary, synchronize and publish
+the destination entry only after successful processing and downstream EOS.
+Failure leaves existing output unchanged; no-clobber is the `false` policy.
+The CLI passes `true` only for its own outer private temporary; final user
+publication still uses the CLI's no-clobber policy.
+
+**Trusted-directory boundary:** native filesink reopens the owned temporary
+pathname rather than an already-open descriptor. Do not grant untrusted writers
+access to the output directory during processing/publication.
+
+Before dependency plane access, native video validates plane offset and the
+complete stride × height extent (including trailing row padding) against the
+actual mapped `GstMapInfo.size`, not claimed `VideoInfo`/`VideoMeta` sizes or
+whole-buffer size. This project guard is necessary even when dependency mapping
+accepts forged metadata; it is not a claim that upstream GStreamer is fixed or
+that a remote exploit was demonstrated.
 
 Release validation delivered and independently checked 17 RGB Matroska frames
 (including padded RGB) and 14,336 WAV samples, plus downstream-error propagation.

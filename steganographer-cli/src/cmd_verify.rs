@@ -326,9 +326,6 @@ pub fn run_with_key(
             .error_correction
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("reed_solomon"));
-        if effective_opts.spread == 1 {
-            effective_opts.spread = payload.spread_count();
-        }
         if effective_opts.decryption_key_file.is_none() && effective_opts.decryption_key.is_none() {
             effective_opts.decryption_key_file = payload.encryption_key_file.clone();
             effective_opts.decryption_key = payload.encryption_key.clone();
@@ -633,8 +630,11 @@ fn extract_payload(
         "lsb_video" => {
             let mut fallback = None;
             let mut verified: Option<ExtractedPayload> = None;
+            let mut parsed_candidates = 0usize;
+            let mut saw_candidate = false;
             for &bits in opts.bits.candidates() {
                 if let Some(bytes) = extract_raw_lsb_video(data, bits)? {
+                    saw_candidate = true;
                     let extracted = ExtractedPayload {
                         bytes,
                         lsb_bits: Some(bits),
@@ -660,10 +660,13 @@ fn extract_payload(
                         verified = Some(extracted);
                         break;
                     }
-                    fallback.get_or_insert(extracted);
+                    if decode_signature_payload(&extracted.bytes, opts).is_ok() {
+                        parsed_candidates += 1;
+                        fallback.get_or_insert(extracted);
+                    }
                 }
             }
-            select_candidate(verified, fallback, opts.bits)
+            select_candidate(verified, fallback, parsed_candidates, saw_candidate)
         }
         "lsb_audio" => {
             let key = embedding_key.ok_or_else(|| {
@@ -676,8 +679,11 @@ fn extract_payload(
             let samples: Vec<i16> = pcm_chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
             let mut fallback = None;
             let mut verified: Option<ExtractedPayload> = None;
+            let mut parsed_candidates = 0usize;
+            let mut saw_candidate = false;
             for &bits in opts.bits.candidates() {
                 if let Some(bytes) = extract_raw_lsb_audio(&samples, bits, key, opts.frame_index)? {
+                    saw_candidate = true;
                     let extracted = ExtractedPayload {
                         bytes,
                         lsb_bits: Some(bits),
@@ -700,10 +706,13 @@ fn extract_payload(
                         verified = Some(extracted);
                         break;
                     }
-                    fallback.get_or_insert(extracted);
+                    if decode_signature_payload(&extracted.bytes, opts).is_ok() {
+                        parsed_candidates += 1;
+                        fallback.get_or_insert(extracted);
+                    }
                 }
             }
-            select_candidate(verified, fallback, opts.bits)
+            select_candidate(verified, fallback, parsed_candidates, saw_candidate)
         }
         "spread_spectrum_video" => {
             let key = embedding_key.ok_or_else(|| {
@@ -744,12 +753,15 @@ fn extract_payload(
 fn select_candidate(
     verified: Option<ExtractedPayload>,
     fallback: Option<ExtractedPayload>,
-    bits: VerifyBits,
+    parsed_candidates: usize,
+    saw_candidate: bool,
 ) -> anyhow::Result<Option<ExtractedPayload>> {
     if verified.is_some() {
         return Ok(verified);
     }
-    if bits == VerifyBits::Auto && fallback.is_some() {
+    // Only a unique, fully parsed failure candidate can be reported. Random
+    // magic matches and ambiguous parses are never promoted to payload evidence.
+    if parsed_candidates > 1 || (saw_candidate && fallback.is_none()) {
         return Err(steganographer_core::transforms::TransformError::SignatureInvalid.into());
     }
     Ok(fallback)

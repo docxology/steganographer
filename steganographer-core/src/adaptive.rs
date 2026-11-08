@@ -9,10 +9,13 @@
 //! - [`AdaptiveLsbVideo`] implements [`VideoStegoModule`].
 //! - For each frame, local variance is computed over a sliding window.
 //! - Pixels with variance ≥ `threshold` are selected as embedding candidates.
-//! - Candidates are sorted by variance (highest first) and LSB-embedded.
+//! - Only the payload-sized best prefix is retained, highest variance first.
 //!
 //! This makes detection harder because changes are concentrated in noisy
 //! regions where statistical anomalies are harder to spot.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use crate::crypto::SignaturePayload;
 use crate::video::{VideoFormat, VideoFrame, VideoStegoModule};
@@ -22,6 +25,9 @@ const WINDOW: usize = 3;
 
 /// Header bits: 32-bit length prefix (same as LsbVideo).
 const HEADER_BITS: usize = 32;
+const PAYLOAD_BITS: usize = SignaturePayload::SERIALIZED_SIZE * 8;
+const TOTAL_BITS: usize = HEADER_BITS + PAYLOAD_BITS;
+const STREAM_BYTES: usize = TOTAL_BITS / 8;
 
 /// Adaptive LSB video steganography module.
 ///
@@ -69,16 +75,9 @@ impl AdaptiveLsbVideo {
         self.bits
     }
 
-    /// Compute local variance for each pixel position in the frame.
-    ///
-    /// Returns a vector of `(byte_offset, variance)` for all pixel byte
-    /// positions, where variance is computed over a `WINDOW x WINDOW`
-    /// neighborhood of pixel indices.
-    ///
-    /// The low `bits_per_byte` LSBs of each byte are masked out before
-    /// computing variance, so the variance map is stable across
-    /// embed/extract (embedding only modifies those LSBs).
-    fn compute_variance_map(frame: &VideoFrame, bits_per_byte: u8) -> Vec<(usize, u32)> {
+    /// Visit candidates in original row/pixel/channel order. Masking low bits
+    /// keeps variance stable across embedding and extraction.
+    fn visit_variances(frame: &VideoFrame, bits_per_byte: u8, mut visit: impl FnMut(usize, u32)) {
         let bpp = frame.format.bytes_per_pixel().unwrap_or(1);
         let w = frame.width as usize;
         let h = frame.height as usize;
@@ -86,8 +85,6 @@ impl AdaptiveLsbVideo {
         let data = &frame.data;
         let half = WINDOW / 2;
         let mask = !((1u8 << bits_per_byte) - 1);
-
-        let mut result: Vec<(usize, u32)> = Vec::with_capacity(w * h * bpp);
 
         for y in 0..h {
             for x in 0..w {
@@ -120,52 +117,34 @@ impl AdaptiveLsbVideo {
                     }
                     let off = base_offset + b;
                     if off < data.len() {
-                        result.push((off, variance));
+                        visit(off, variance);
                     }
                 }
             }
         }
-
-        result
     }
 
-    /// Select embedding positions sorted by variance (highest first),
-    /// filtering out positions below the threshold.
+    /// Retain only the fixed framing-sized best prefix. The heap's maximum
+    /// is the worst retained candidate: lowest variance, then latest offset.
+    /// Offsets increase in scan order, preserving the old stable-sort ties.
     fn select_positions(&self, frame: &VideoFrame) -> Vec<usize> {
-        let mut variance_map = Self::compute_variance_map(frame, self.bits);
-
-        // Filter by threshold
-        variance_map.retain(|(_, v)| *v >= self.threshold);
-
-        // Sort by variance descending (highest variance = least detectable)
-        variance_map.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-        // Extract positions
-        variance_map.into_iter().map(|(pos, _)| pos).collect()
-    }
-
-    /// Convert a byte slice to a bit vector (MSB first per byte).
-    fn bytes_to_bits(bytes: &[u8]) -> Vec<u8> {
-        bytes
-            .iter()
-            .flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1))
-            .collect()
-    }
-
-    /// Convert a bit vector back to bytes (MSB first per byte).
-    fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(bits.len().div_ceil(8));
-        for chunk in bits.chunks(8) {
-            let mut byte = 0u8;
-            for &bit in chunk {
-                byte = (byte << 1) | (bit & 1);
+        let needed = TOTAL_BITS.div_ceil(self.bits as usize);
+        let mut best = BinaryHeap::with_capacity(needed);
+        Self::visit_variances(frame, self.bits, |offset, variance| {
+            if variance < self.threshold {
+                return;
             }
-            // Pad remaining bits with zeros
-            let pad = 8 - chunk.len();
-            byte <<= pad;
-            result.push(byte);
-        }
-        result
+            let candidate = (Reverse(variance), offset);
+            if best.len() < needed {
+                best.push(candidate);
+            } else if best.peek().is_some_and(|worst| candidate < *worst) {
+                *best.peek_mut().expect("full candidate heap") = candidate;
+            }
+        });
+        best.into_sorted_vec()
+            .into_iter()
+            .map(|(_, offset)| offset)
+            .collect()
     }
 }
 
@@ -175,60 +154,37 @@ impl VideoStegoModule for AdaptiveLsbVideo {
         frame: &mut VideoFrame,
         sig: Option<&SignaturePayload>,
     ) -> anyhow::Result<()> {
-        let payload_bytes = match sig {
-            Some(s) => s.to_bytes().to_vec(),
-            None => return Ok(()), // No payload to embed
+        let payload = match sig {
+            Some(sig) => sig.to_bytes(),
+            None => return Ok(()),
         };
         frame.validate_packed_layout()?;
-
-        let payload_bits = Self::bytes_to_bits(&payload_bytes);
-        let total_bits = HEADER_BITS + payload_bits.len();
-
-        // Select positions based on variance
         let positions = self.select_positions(frame);
-
-        // Build the bit stream: 32-bit length prefix + payload bits
-        let len_bits = Self::bytes_to_bits(&(payload_bits.len() as u32).to_le_bytes());
-        let mut all_bits = len_bits;
-        all_bits.extend_from_slice(&payload_bits);
-
-        let positions_needed = total_bits.div_ceil(self.bits as usize);
-        if positions.len() < positions_needed {
+        let needed = TOTAL_BITS.div_ceil(self.bits as usize);
+        if positions.len() < needed {
             anyhow::bail!(
                 "Insufficient positions for {}-bit embedding: need {}, found {}",
                 self.bits,
-                positions_needed,
+                needed,
                 positions.len()
             );
         }
 
-        // Pack bits into groups of `bits_per_byte`
-        let packed_values: Vec<u8> = all_bits
-            .chunks(self.bits as usize)
-            .map(|chunk| {
-                let mut val = 0u8;
-                for &b in chunk {
-                    val = (val << 1) | (b & 1);
-                }
-                // Left-pad if chunk is short
-                let pad = (self.bits as usize).saturating_sub(chunk.len());
-                val <<= pad;
-                val
-            })
-            .collect();
-
-        // Use only the first `positions_needed` positions
-        let embed_positions = &positions[..positions_needed];
-
-        // Write
+        let mut stream = [0u8; STREAM_BYTES];
+        stream[..HEADER_BITS / 8].copy_from_slice(&(PAYLOAD_BITS as u32).to_le_bytes());
+        stream[HEADER_BITS / 8..].copy_from_slice(&payload);
         let mask = (1u8 << self.bits) - 1;
-        for (i, &val) in packed_values.iter().enumerate() {
-            let pos = embed_positions[i];
-            if pos < frame.data.len() {
-                frame.data[pos] = (frame.data[pos] & !mask) | (val & mask);
+        for (unit, &position) in positions.iter().enumerate() {
+            let mut value = 0u8;
+            for bit in 0..self.bits as usize {
+                let index = unit * self.bits as usize + bit;
+                value <<= 1;
+                if index < TOTAL_BITS {
+                    value |= (stream[index / 8] >> (7 - index % 8)) & 1;
+                }
             }
+            frame.data[position] = (frame.data[position] & !mask) | value;
         }
-
         Ok(())
     }
 
@@ -236,94 +192,30 @@ impl VideoStegoModule for AdaptiveLsbVideo {
         frame.validate_packed_layout()?;
         let positions = self.select_positions(frame);
 
-        let min_header_positions = HEADER_BITS.div_ceil(self.bits as usize);
-        if positions.len() < min_header_positions {
+        let header_positions = HEADER_BITS.div_ceil(self.bits as usize);
+        if positions.len() < header_positions {
             return Ok(None);
         }
-
-        let mask = (1u8 << self.bits) - 1;
-
-        // Read header (32 bits = 4 bytes)
-        let header_positions_needed = HEADER_BITS.div_ceil(self.bits as usize);
-        let mut header_vals: Vec<u8> = Vec::with_capacity(header_positions_needed);
-        for &pos in positions.iter().take(header_positions_needed) {
-            if pos < frame.data.len() {
-                header_vals.push(frame.data[pos] & mask);
-            } else {
-                return Ok(None);
-            }
+        let read_bit = |index: usize| {
+            let unit = index / self.bits as usize;
+            let shift = self.bits as usize - 1 - index % self.bits as usize;
+            (frame.data[positions[unit]] >> shift) & 1
+        };
+        let mut header = [0u8; HEADER_BITS / 8];
+        for index in 0..HEADER_BITS {
+            header[index / 8] |= read_bit(index) << (7 - index % 8);
         }
-
-        // Unpack header values back to bits
-        let mut header_bits: Vec<u8> = Vec::with_capacity(HEADER_BITS);
-        for val in &header_vals {
-            for i in (0..self.bits as usize).rev() {
-                header_bits.push((val >> i) & 1);
-            }
-        }
-        header_bits.truncate(HEADER_BITS);
-
-        let header_bytes = Self::bits_to_bytes(&header_bits);
-        if header_bytes.len() < 4 {
+        if u32::from_le_bytes(header) != PAYLOAD_BITS as u32 {
             return Ok(None);
         }
-        let payload_bit_count = u32::from_le_bytes([
-            header_bytes[0],
-            header_bytes[1],
-            header_bytes[2],
-            header_bytes[3],
-        ]) as usize;
-
-        let expected = SignaturePayload::SERIALIZED_SIZE * 8;
-        if payload_bit_count != expected {
-            log::trace!(
-                "Adaptive LSB: length prefix {} != expected {}",
-                payload_bit_count,
-                expected
-            );
+        if positions.len() < TOTAL_BITS.div_ceil(self.bits as usize) {
             return Ok(None);
         }
-
-        // Read payload
-        let total_bits = HEADER_BITS + payload_bit_count;
-        let total_positions_needed = total_bits.div_ceil(self.bits as usize);
-        if positions.len() < total_positions_needed {
-            return Ok(None);
+        let mut payload = [0u8; SignaturePayload::SERIALIZED_SIZE];
+        for index in 0..PAYLOAD_BITS {
+            payload[index / 8] |= read_bit(HEADER_BITS + index) << (7 - index % 8);
         }
-
-        let mut all_vals: Vec<u8> = Vec::with_capacity(total_positions_needed);
-        for &pos in positions.iter().take(total_positions_needed) {
-            if pos < frame.data.len() {
-                all_vals.push(frame.data[pos] & mask);
-            } else {
-                return Ok(None);
-            }
-        }
-
-        // Unpack all values to bits
-        let mut all_bits: Vec<u8> = Vec::with_capacity(total_positions_needed * 4);
-        for val in &all_vals {
-            for i in (0..self.bits as usize).rev() {
-                all_bits.push((val >> i) & 1);
-            }
-        }
-        all_bits.truncate(total_bits);
-
-        // Extract payload bits (skip header)
-        let payload_bits = &all_bits[HEADER_BITS..];
-        let payload_bytes = Self::bits_to_bytes(payload_bits);
-
-        if payload_bytes.len() < SignaturePayload::SERIALIZED_SIZE {
-            return Ok(None);
-        }
-
-        let mut buf = [0u8; SignaturePayload::SERIALIZED_SIZE];
-        buf.copy_from_slice(&payload_bytes[..SignaturePayload::SERIALIZED_SIZE]);
-
-        match SignaturePayload::from_bytes(&buf) {
-            Ok(sig) => Ok(Some(sig)),
-            Err(_) => Ok(None),
-        }
+        Ok(SignaturePayload::from_bytes(&payload).ok())
     }
 }
 
@@ -606,23 +498,101 @@ mod tests {
         };
 
         let mod_low = AdaptiveLsbVideo::new(0, 1);
-        let mod_high = AdaptiveLsbVideo::new(5000, 1);
-
-        let pos_low = mod_low.select_positions(&frame);
-        let pos_high = mod_high.select_positions(&frame);
-
-        assert!(
-            pos_low.len() > pos_high.len(),
-            "low threshold should have more positions"
-        );
+        let mod_high = AdaptiveLsbVideo::new(u32::MAX, 1);
+        assert_eq!(mod_low.select_positions(&frame).len(), TOTAL_BITS);
+        assert!(mod_high.select_positions(&frame).is_empty());
     }
 
     #[test]
-    fn test_bytes_to_bits_roundtrip() {
-        let original = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let bits = AdaptiveLsbVideo::bytes_to_bits(&original);
-        let recovered = AdaptiveLsbVideo::bits_to_bytes(&bits);
-        assert_eq!(original, recovered);
+    fn bounded_prefix_matches_stable_sort_and_legacy_carrier_bytes() {
+        let payload = make_payload(7);
+        for format in [VideoFormat::Rgb8, VideoFormat::Bgra8] {
+            let bpp = format.bytes_per_pixel().unwrap();
+            for bits in 1..=4 {
+                for threshold in [0, 1000, u32::MAX] {
+                    for flat in [false, true] {
+                        let width = 37usize;
+                        let height = 19usize;
+                        let stride = width * bpp + 11;
+                        let mut data = vec![0xA5; stride * height + 17];
+                        for y in 0..height {
+                            for x in 0..width {
+                                for channel in 0..bpp {
+                                    data[y * stride + x * bpp + channel] = if flat {
+                                        0x80
+                                    } else {
+                                        ((x * 73 + y * 31 + channel * 47) % 256) as u8
+                                    };
+                                }
+                            }
+                        }
+                        let before = data.clone();
+                        let mut frame = VideoFrame {
+                            width: width as u32,
+                            height: height as u32,
+                            stride: stride as u32,
+                            format,
+                            data: &mut data,
+                            frame_index: 7,
+                        };
+                        let mut reference = Vec::new();
+                        AdaptiveLsbVideo::visit_variances(&frame, bits, |offset, variance| {
+                            if variance >= threshold {
+                                reference.push((offset, variance));
+                            }
+                        });
+                        // This is the previous full stable-sort selection.
+                        reference.sort_by_key(|&(_, variance)| Reverse(variance));
+                        let needed = TOTAL_BITS.div_ceil(bits as usize);
+                        let expected: Vec<_> = reference
+                            .iter()
+                            .take(needed)
+                            .map(|&(offset, _)| offset)
+                            .collect();
+                        let mut module = AdaptiveLsbVideo::new(threshold, bits);
+                        assert_eq!(module.select_positions(&frame), expected);
+                        if expected.len() < needed {
+                            assert!(module.embed(&mut frame, Some(&payload)).is_err());
+                            assert_eq!(frame.data, before);
+                            continue;
+                        }
+                        let mut legacy = before.clone();
+                        let mut bytes = (PAYLOAD_BITS as u32).to_le_bytes().to_vec();
+                        bytes.extend_from_slice(&payload.to_bytes());
+                        let wire_bits: Vec<_> = bytes
+                            .iter()
+                            .flat_map(|byte| (0..8).rev().map(move |shift| (byte >> shift) & 1))
+                            .collect();
+                        for (chunk, &offset) in wire_bits.chunks(bits as usize).zip(&expected) {
+                            let value = chunk.iter().fold(0, |value, bit| (value << 1) | bit)
+                                << (bits as usize - chunk.len());
+                            let mask = (1u8 << bits) - 1;
+                            legacy[offset] = (legacy[offset] & !mask) | value;
+                        }
+                        module.embed(&mut frame, Some(&payload)).unwrap();
+                        assert_eq!(frame.data, legacy);
+                        assert_eq!(module.select_positions(&frame), expected);
+                        assert_eq!(
+                            module.extract(&frame).unwrap().unwrap().to_bytes(),
+                            payload.to_bytes()
+                        );
+                        for y in 0..height {
+                            assert_eq!(
+                                &frame.data[y * stride + width * bpp..(y + 1) * stride],
+                                &before[y * stride + width * bpp..(y + 1) * stride]
+                            );
+                            if format == VideoFormat::Bgra8 {
+                                for x in 0..width {
+                                    let alpha = y * stride + x * bpp + 3;
+                                    assert_eq!(frame.data[alpha], before[alpha]);
+                                }
+                            }
+                        }
+                        assert_eq!(&frame.data[stride * height..], &before[stride * height..]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -648,7 +618,10 @@ mod tests {
             frame_index: 0,
         };
 
-        let variances = AdaptiveLsbVideo::compute_variance_map(&frame, 1);
+        let mut variances = Vec::new();
+        AdaptiveLsbVideo::visit_variances(&frame, 1, |offset, variance| {
+            variances.push((offset, variance));
+        });
         // Should have w*h*bpp = 27 entries
         assert_eq!(variances.len(), w * h * bpp);
 
@@ -731,7 +704,10 @@ mod tests {
             data: &mut data,
             frame_index: 0,
         };
-        let variances = AdaptiveLsbVideo::compute_variance_map(&frame, 1);
+        let mut variances = Vec::new();
+        AdaptiveLsbVideo::visit_variances(&frame, 1, |offset, variance| {
+            variances.push((offset, variance));
+        });
         // One entry per non-alpha byte: w * h * (bpp - 1).
         assert_eq!(variances.len(), w * h * (bpp - 1));
         // No alpha offset (byte index % 4 == 3) may appear.

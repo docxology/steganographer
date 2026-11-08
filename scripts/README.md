@@ -59,15 +59,20 @@ GStreamer cdylib; `--variant wasm` produces both Node.js and browser bindings.
 triple: no other architecture, OS, Windows execution, or static-library
 portability is claimed. Native dependencies are **not** bundled.
 
-Every invocation captures current tracked and nonignored untracked source
-bytes, scans that snapshot with the repository's actual gitleaks policy, and
-builds only from that frozen snapshot using fresh, isolated target directories.
-No existing `target/` executable or historical `dist/` candidate is selected.
-Clean source is required unless `--allow-dirty` is explicit; dirty artifacts
-record HEAD as a **base**, not the identity of the bytes built. Deleted tracked
-files remain deleted. Source history, build/output directories, private-key
-filenames/material and source/output symlinks are rejected; ignored credentials
-are never enumerated. A changing HEAD aborts assembly.
+By default, source bytes and executable modes come from the captured commit's
+Git tree (`ls-tree` / blob reads), not the mutable worktree/index or export
+attributes. Clean admission is required. `--allow-dirty` instead enumerates
+tracked/nonignored untracked working-tree files, preserves deletions and records
+`dirty: true`, `source_capture: "working-tree"` even if admission was clean.
+This mode is **not commit-bound or a point-in-time worktree snapshot**:
+`base_commit` is only a reference, while `SOURCE.json` identifies captured bytes.
+
+The captured snapshot is scanned with the repository gitleaks policy and built
+in isolated fresh target directories. No existing executable or historical
+candidate is selected. Source history, build/output directories, private-key
+filenames/material and source/output symlinks are rejected; default Git-tree
+capture admits only regular blobs with 100644/100755 modes, not submodules.
+A changing HEAD aborts assembly.
 
 Each output directory contains:
 
@@ -90,21 +95,27 @@ release. Inspect it, then choose a new directory; the tool never cleans old
 candidates. Archives are source-bound, not a claim of byte-for-byte archive
 reproducibility across operating systems/toolchains.
 
-CLI generation continues to use the single Clap schema: the full CLI currently
-has 18 manuals and five shell completions (portable has 16 manuals/five
-completions). Manuals identify the actual package version and omit the optional
-revision date rather than baking one historical date into later releases.
+Archives contain exactly one complete gzip member; truncated trailers,
+concatenated members and trailing padding reject. The checker rejects duplicate
+**normalized** member paths before inventory-map construction/extraction, plus
+file/directory collisions. Checksums do not make an unsafe archive safe.
+
+CLI generation uses the single Clap schema for native and portable manuals and
+five shell completions. Manuals identify the actual package version and omit
+the optional revision date rather than baking historical dates into releases.
 The Docker image still builds this same schema/generator from its copied CLI
 sources; it does not invoke the release helper or require Git/scanner/WASM tools.
 
-The existing packaging-metadata CI job runs this workflow and real artifact
-consumer checks in addition to its metadata gate. For a reproducible local
-safety regression run before assembly:
+The packaging-metadata CI job is configured to run assembly and real artifact
+consumer checks; configuration does not establish a current hosted run passed.
+For a local safety regression before assembly:
 
 ```bash
 cargo test -p steganographer-cli --example release --no-default-features --locked
 ```
 
-Those tests exercise no-clobber preservation, symlink boundaries, private-key/
-history exclusion and dirty/untracked source capture. Full workspace/MSRV/
-static checks remain separate release gates; assembly does not attest they ran.
+Those tests cover no-clobber, symlink/private-key/history boundaries, committed
+blob/mode capture versus mutable working-tree capture and dirty provenance.
+The Python release-checker safety tests exercise normalized duplicate paths and
+archive conflicts. Full workspace/MSRV/static checks remain separate gates;
+assembly does not attest they ran or establish Linux/Windows qualification.

@@ -60,6 +60,10 @@ pub const CONTAINER_MAX_EOCD_SCAN_BYTES: usize = 66_000;
 pub const CONTAINER_MAX_INFLATE_PER_ENTRY: usize = 4 * 1024 * 1024;
 /// Maximum total inflated bytes accepted across all entries in one analysis.
 pub const CONTAINER_MAX_INFLATE_TOTAL: usize = 8 * 1024 * 1024;
+/// Maximum compressed/stored input reserved across attempted entry decodes.
+pub const CONTAINER_MAX_DECODE_INPUT_TOTAL: usize = 16 * 1024 * 1024;
+/// Maximum attempted entry decodes, including failures and repeated ranges.
+pub const CONTAINER_MAX_DECODE_ATTEMPTS: usize = 256;
 /// Maximum number of container findings emitted per package.
 pub const CONTAINER_MAX_FINDINGS: usize = 64;
 /// Bound for one finding's `detail` string (bytes).
@@ -152,6 +156,12 @@ pub enum OoxmlError {
         "ZIP analysis would inflate {inflated} bytes in total, exceeding the {limit}-byte budget"
     )]
     InflateTotalBudgetExceeded { inflated: usize, limit: usize },
+    /// Compressed/stored input reservations exceed the package work budget.
+    #[error("ZIP decode input would exceed the {limit}-byte budget")]
+    DecodeInputBudgetExceeded { limit: usize },
+    /// Too many entry decodes have been attempted.
+    #[error("ZIP decode attempts exceed the {limit}-attempt budget")]
+    DecodeAttemptBudgetExceeded { limit: usize },
     /// Actual inflated (or stored) size differs from the claimed size.
     #[error("ZIP entry \"{name}\" yields {actual} bytes, expected {claimed}")]
     InflateSizeMismatch {
@@ -168,6 +178,37 @@ pub enum OoxmlError {
     /// Entry checksum does not match the bytes read.
     #[error("ZIP entry \"{name}\" CRC-32 mismatch")]
     ChecksumMismatch { name: String },
+}
+
+/// Shared admission state for all entry reads in one analysis.
+/// Reservations precede decoding and are never refunded after failures.
+#[derive(Debug, Default)]
+pub struct ZipReadBudget {
+    output: usize,
+    input: usize,
+    attempts: usize,
+}
+
+impl ZipReadBudget {
+    fn reserve(&mut self, entry: &ZipEntry) -> Result<(), OoxmlError> {
+        let output = check_output_budget(&entry.name, entry.uncompressed_size, self.output)?;
+        if self.attempts >= CONTAINER_MAX_DECODE_ATTEMPTS {
+            return Err(OoxmlError::DecodeAttemptBudgetExceeded {
+                limit: CONTAINER_MAX_DECODE_ATTEMPTS,
+            });
+        }
+        let input = self
+            .input
+            .checked_add(entry.compressed_size)
+            .filter(|&n| n <= CONTAINER_MAX_DECODE_INPUT_TOTAL)
+            .ok_or(OoxmlError::DecodeInputBudgetExceeded {
+                limit: CONTAINER_MAX_DECODE_INPUT_TOTAL,
+            })?;
+        self.output = output;
+        self.input = input;
+        self.attempts += 1;
+        Ok(())
+    }
 }
 
 /// One ZIP entry as recorded in the central directory.
@@ -338,25 +379,23 @@ impl<'a> ZipArchive<'a> {
         self.entries.iter().find(|e| e.name == name)
     }
 
-    /// Inflate/extract one entry, enforcing the per-entry and total budgets.
+    /// Extract one entry using shared output, input and attempt reservations.
     ///
-    /// `inflate_total` reserves claimed output across attempted reads, including
-    /// corrupt streams, so failures cannot bypass the package work budget.
-    /// Pass `&mut 0` for one-shot reads.
+    /// Reuse the same budget across every part, including duplicate/aliased
+    /// entries. Use `ZipReadBudget::default()` for a fresh one-shot analysis.
     pub fn read_entry(
         &self,
         entry: &ZipEntry,
-        inflate_total: &mut usize,
+        budget: &mut ZipReadBudget,
     ) -> Result<Vec<u8>, OoxmlError> {
         if entry.flags & 0x1 != 0 {
             return Err(OoxmlError::EncryptedEntry {
                 name: entry.name.clone(),
             });
         }
-        let new_total = check_output_budget(&entry.name, entry.uncompressed_size, *inflate_total)?;
+        budget.reserve(entry)?;
         let range = self.local_data_range(entry)?;
         let raw = &self.data[range];
-        *inflate_total = new_total;
         let out = match entry.method {
             0 => {
                 if entry.compressed_size != entry.uncompressed_size {
@@ -651,7 +690,7 @@ pub fn analyze_package(data: &[u8]) -> ContainerAnalysis {
 
     // DOC-002 WordprocessingML concealment (detections) plus DOC-003
     // extended-part coverage.
-    let mut inflate_total = 0usize;
+    let mut inflate_total = ZipReadBudget::default();
     match office_family {
         "docx" => {
             analyze_document_xml(&archive, &mut inflate_total, &mut findings);
@@ -670,7 +709,7 @@ pub fn analyze_package(data: &[u8]) -> ContainerAnalysis {
 /// whitespace runs inside XML text nodes.
 fn analyze_document_xml(
     archive: &ZipArchive<'_>,
-    inflate_total: &mut usize,
+    inflate_total: &mut ZipReadBudget,
     findings: &mut ContainerAnalysis,
 ) {
     // Scan every interpretation of duplicate main parts, within the same budget.
@@ -713,12 +752,11 @@ pub(crate) fn format_text_finding(finding: &unicode_text::TextFinding) -> String
 /// pptx slides/notes, xlsx sharedStrings/worksheets, docx headers/footers;
 /// presentation.xml header/footer placeholders; and media-entry anomalies.
 ///
-/// `inflate_total` is shared across all parts so the package-wide inflate
-/// budget ([`CONTAINER_MAX_INFLATE_TOTAL`]) holds for extended analysis too.
+/// The read budget is shared across all parts, including failed decodes.
 fn analyze_office_parts(
     archive: &ZipArchive<'_>,
     family_kind: &str,
-    inflate_total: &mut usize,
+    inflate_total: &mut ZipReadBudget,
     findings: &mut ContainerAnalysis,
 ) {
     for entry in archive.entries() {
@@ -755,7 +793,7 @@ fn analyze_office_parts(
 fn analyze_part_text(
     archive: &ZipArchive<'_>,
     entry: &ZipEntry,
-    inflate_total: &mut usize,
+    inflate_total: &mut ZipReadBudget,
     findings: &mut ContainerAnalysis,
     family: &str,
 ) {
@@ -841,61 +879,52 @@ fn analyze_part_text(
 /// low-visibility text channel in presentation packages.
 fn analyze_presentation_placeholders(
     archive: &ZipArchive<'_>,
-    inflate_total: &mut usize,
+    inflate_total: &mut ZipReadBudget,
     findings: &mut ContainerAnalysis,
 ) {
-    let Some(entry) = archive.find(PPT_PRESENTATION) else {
-        return;
-    };
-    if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
-        return;
-    }
-    let bytes = match archive.read_entry(entry, inflate_total) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            incomplete(findings, zip_reason(&error));
-            push_finding(
-                findings,
-                ContainerFinding {
-                    path: PPT_PRESENTATION.to_string(),
-                    family: DOC_001_FAMILY.to_string(),
-                    detail: bound_detail(format!("part rejected: {error}")),
-                },
-            );
-            return;
-        }
-    };
-    let xml = match decode_xml(&bytes) {
-        Ok(xml) => xml,
-        Err(reason) => {
-            incomplete(findings, reason);
-            return;
-        }
-    };
-    const PLACEHOLDERS: &[&str] = &[
-        "<p:ph type=\"ftr\"",
-        "<p:ph type=\"hdr\"",
-        "<p:ph type=\"dt\"",
-        "<p:ph type=\"sldNum\"",
-        "<p:hf ",
-    ];
-    let found: Vec<&str> = PLACEHOLDERS
+    for entry in archive
+        .entries()
         .iter()
-        .copied()
-        .filter(|marker| xml.source.contains(marker))
-        .collect();
-    if !found.is_empty() {
-        push_finding(
+        .filter(|e| e.name() == PPT_PRESENTATION)
+    {
+        if entry.uncompressed_size > CONTAINER_MAX_INFLATE_PER_ENTRY {
+            continue;
+        }
+        let bytes = match archive.read_entry(entry, inflate_total) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                incomplete(findings, zip_reason(&error));
+                push_finding(
+                    findings,
+                    ContainerFinding {
+                        path: PPT_PRESENTATION.to_string(),
+                        family: DOC_001_FAMILY.to_string(),
+                        detail: bound_detail(format!("part rejected: {error}")),
+                    },
+                );
+                continue;
+            }
+        };
+        let xml = match decode_xml(&bytes) {
+            Ok(xml) => xml,
+            Err(reason) => {
+                incomplete(findings, reason);
+                continue;
+            }
+        };
+        if xml.placeholder_namespace_incomplete {
+            incomplete(findings, "xml_namespace_unsupported");
+        }
+        if xml.presentation_placeholder {
+            push_finding(
             findings,
             ContainerFinding {
                 path: PPT_PRESENTATION.to_string(),
                 family: DOC_003_FAMILY.to_string(),
-                detail: bound_detail(format!(
-                    "header/footer placeholder markup present ({}): potential hidden-text channel",
-                    found.join(", ")
-                )),
+                detail: "parsed PresentationML header/footer placeholder markup present: potential hidden-text channel".to_string(),
             },
         );
+        }
     }
 }
 
@@ -956,7 +985,8 @@ fn analyze_media_entries(archive: &ZipArchive<'_>, findings: &mut ContainerAnaly
 }
 
 struct DecodedXml {
-    source: String,
+    presentation_placeholder: bool,
+    placeholder_namespace_incomplete: bool,
     text: String,
     attributes: String,
     truncated: bool,
@@ -1012,6 +1042,11 @@ fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
     let mut attributes = String::new();
     let mut attributes_truncated = false;
     let mut stack: Vec<&str> = Vec::new();
+    // Namespace resolution is limited to the placeholder probe, not general
+    // OOXML schema/relationship validation. Shadowing and default bindings apply.
+    let mut namespaces: Vec<(&str, bool, usize)> = Vec::new();
+    let mut presentation_placeholder = false;
+    let mut placeholder_namespace_incomplete = false;
     let mut root_seen = false;
     let mut pos = 0;
     while pos < source.len() {
@@ -1128,6 +1163,12 @@ fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
             if !xml_name(name) || stack.pop() != Some(name) {
                 return Err("xml_structure_invalid");
             }
+            while namespaces
+                .last()
+                .is_some_and(|(_, _, depth)| *depth > stack.len())
+            {
+                namespaces.pop();
+            }
         } else {
             let empty = body.ends_with('/');
             let body = if empty { &body[..body.len() - 1] } else { body };
@@ -1136,17 +1177,55 @@ fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
             if !xml_name(name) {
                 return Err("xml_structure_invalid");
             }
-            xml_attributes(&body[name_end..], |_, value| {
+            let mut placeholder_type = false;
+            xml_attributes(&body[name_end..], |attribute, value| {
                 if !value.is_empty()
                     && !attributes.is_empty()
                     && attributes.len() < unicode_text::MAX_TEXT_SCAN_BYTES
                 {
                     push_xml_char(&mut attributes, &mut attributes_truncated, '\n');
                 }
+                let namespace = if attribute == "xmlns" {
+                    Some("")
+                } else {
+                    attribute.strip_prefix("xmlns:")
+                };
+                let relevant = namespace.is_some() || attribute == "type";
+                let mut decoded = String::new();
+                let mut capped = false;
                 decode_references(value, |c| {
-                    push_xml_char(&mut attributes, &mut attributes_truncated, c)
-                })
+                    push_xml_char(&mut attributes, &mut attributes_truncated, c);
+                    if relevant && !capped {
+                        if decoded.len() + c.len_utf8() <= 100 {
+                            decoded.push(c);
+                        } else {
+                            capped = true;
+                        }
+                    }
+                })?;
+                if let Some(prefix) = namespace {
+                    let presentation = !capped
+                        && matches!(
+                            decoded.as_str(),
+                            "http://schemas.openxmlformats.org/presentationml/2006/main"
+                                | "http://purl.oclc.org/ooxml/presentationml/main"
+                        );
+                    namespaces.push((prefix, presentation, stack.len() + 1));
+                }
+                if attribute == "type" {
+                    placeholder_type =
+                        !capped && matches!(decoded.as_str(), "ftr" | "hdr" | "dt" | "sldNum");
+                }
+                Ok(())
             })?;
+            let (prefix, local) = name.split_once(':').unwrap_or(("", name));
+            if local == "hf" || (local == "ph" && placeholder_type) {
+                match namespaces.iter().rev().find(|(p, _, _)| *p == prefix) {
+                    Some((_, true, _)) => presentation_placeholder = true,
+                    Some((_, false, _)) => {}
+                    None => placeholder_namespace_incomplete = true,
+                }
+            }
             if stack.is_empty() {
                 if root_seen {
                     return Err("xml_structure_invalid");
@@ -1158,6 +1237,13 @@ fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
                     return Err("xml_depth_budget");
                 }
                 stack.push(name);
+            } else {
+                while namespaces
+                    .last()
+                    .is_some_and(|(_, _, depth)| *depth > stack.len())
+                {
+                    namespaces.pop();
+                }
             }
         }
         // Separate text nodes, never invent a long run across markup.
@@ -1173,7 +1259,8 @@ fn decode_xml(bytes: &[u8]) -> Result<DecodedXml, &'static str> {
         return Err("xml_structure_invalid");
     }
     Ok(DecodedXml {
-        source,
+        presentation_placeholder,
+        placeholder_namespace_incomplete,
         text,
         attributes,
         truncated: truncated || attributes_truncated,
@@ -1402,6 +1489,8 @@ fn zip_reason(error: &OoxmlError) -> &'static str {
         OoxmlError::EntryNameTooLong { .. } => "zip_name_budget",
         OoxmlError::InflateBudgetExceeded { .. } => "zip_entry_budget",
         OoxmlError::InflateTotalBudgetExceeded { .. } => "zip_total_budget",
+        OoxmlError::DecodeInputBudgetExceeded { .. } => "zip_decode_input_budget",
+        OoxmlError::DecodeAttemptBudgetExceeded { .. } => "zip_decode_attempt_budget",
         OoxmlError::EncryptedEntry { .. } => "zip_encrypted_entry",
         OoxmlError::UnsupportedCompressionMethod { .. } => "zip_compression_unsupported",
         OoxmlError::UnsupportedFeature {
@@ -1643,7 +1732,7 @@ mod tests {
         assert_eq!(archive.entries().len(), 2);
         assert_eq!(archive.find("a.txt").expect("stored").method(), 0);
         assert_eq!(archive.find("b.txt").expect("deflated").method(), 8);
-        let mut total = 0;
+        let mut total = ZipReadBudget::default();
         let stored = archive.read_entry(archive.find("a.txt").expect("a"), &mut total);
         assert_eq!(stored.expect("stored"), b"hello");
         let deflated = archive.read_entry(archive.find("b.txt").expect("b"), &mut total);
@@ -1651,7 +1740,6 @@ mod tests {
             deflated.expect("deflated"),
             b"deflate me deflate me deflate me"
         );
-        assert_eq!(total, 5 + 32);
     }
 
     #[test]
@@ -1689,7 +1777,7 @@ mod tests {
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("secret.txt").expect("entry");
         assert_eq!(
-            archive.read_entry(entry, &mut 0),
+            archive.read_entry(entry, &mut ZipReadBudget::default()),
             Err(OoxmlError::EncryptedEntry {
                 name: "secret.txt".to_string()
             })
@@ -1709,7 +1797,7 @@ mod tests {
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("weird.bin").expect("entry");
         assert!(matches!(
-            archive.read_entry(entry, &mut 0),
+            archive.read_entry(entry, &mut ZipReadBudget::default()),
             Err(OoxmlError::UnsupportedCompressionMethod { method: 12, .. })
         ));
     }
@@ -1723,7 +1811,7 @@ mod tests {
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("bomb.bin").expect("entry");
         assert!(matches!(
-            archive.read_entry(entry, &mut 0),
+            archive.read_entry(entry, &mut ZipReadBudget::default()),
             Err(OoxmlError::InflateBudgetExceeded {
                 claimed: 0x7FFF_FFFF,
                 ..
@@ -1751,7 +1839,7 @@ mod tests {
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("bomb.bin").expect("entry");
         assert!(matches!(
-            archive.read_entry(entry, &mut 0),
+            archive.read_entry(entry, &mut ZipReadBudget::default()),
             Err(OoxmlError::LocalHeaderMismatch { .. })
         ));
     }
@@ -1859,7 +1947,7 @@ mod tests {
 
     #[test]
     fn presentation_placeholder_markup_is_reported() {
-        let presentation = "<p:presentation><p:hf ftr=\"1\" sldNum=\"1\"/></p:presentation>";
+        let presentation = "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:hf ftr=\"1\" sldNum=\"1\"/></p:presentation>";
         let findings = analyze_package(&pptx("Clean", None, Some(presentation))).findings;
         let doc003 = findings_with_family(&findings, DOC_003_FAMILY);
         assert_eq!(doc003.len(), 1);
@@ -2013,7 +2101,7 @@ mod tests {
         let archive = ZipArchive::parse(&bytes).expect("parse");
         let entry = archive.find("b.txt").expect("entry");
         assert!(matches!(
-            archive.read_entry(entry, &mut 0),
+            archive.read_entry(entry, &mut ZipReadBudget::default()),
             Err(OoxmlError::LocalHeaderMismatch { .. })
         ));
     }
@@ -2084,7 +2172,7 @@ mod tests {
         huge[cd + 42..cd + 46].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
         let archive = ZipArchive::parse(&huge).unwrap();
         assert!(matches!(
-            archive.read_entry(&archive.entries()[0], &mut 0),
+            archive.read_entry(&archive.entries()[0], &mut ZipReadBudget::default()),
             Err(OoxmlError::LocalHeaderCorrupt { .. })
         ));
         for field in [6, 8, 14, 18, 22, 30] {
@@ -2092,7 +2180,7 @@ mod tests {
             bytes[field] ^= 1;
             let archive = ZipArchive::parse(&bytes).unwrap();
             assert!(matches!(
-                archive.read_entry(&archive.entries()[0], &mut 0),
+                archive.read_entry(&archive.entries()[0], &mut ZipReadBudget::default()),
                 Err(OoxmlError::LocalHeaderMismatch { .. })
             ));
         }
@@ -2100,7 +2188,7 @@ mod tests {
         bytes[31] ^= 1; // content corruption, not header corruption
         let archive = ZipArchive::parse(&bytes).unwrap();
         assert!(matches!(
-            archive.read_entry(&archive.entries()[0], &mut 0),
+            archive.read_entry(&archive.entries()[0], &mut ZipReadBudget::default()),
             Err(OoxmlError::ChecksumMismatch { .. })
         ));
     }
@@ -2116,7 +2204,7 @@ mod tests {
             bytes[22..26].copy_from_slice(&claimed.to_le_bytes());
             let archive = ZipArchive::parse(&bytes).unwrap();
             assert!(matches!(
-                archive.read_entry(&archive.entries()[0], &mut 0),
+                archive.read_entry(&archive.entries()[0], &mut ZipReadBudget::default()),
                 Err(OoxmlError::InflateSizeMismatch { .. })
             ));
         }
@@ -2147,7 +2235,7 @@ mod tests {
             .build();
             let archive = ZipArchive::parse(&bytes).unwrap();
             assert!(matches!(
-                archive.read_entry(&archive.entries()[0], &mut 0),
+                archive.read_entry(&archive.entries()[0], &mut ZipReadBudget::default()),
                 Err(OoxmlError::InflateBudgetExceeded { .. })
             ));
             let data = &data[..CONTAINER_MAX_INFLATE_PER_ENTRY];
@@ -2161,7 +2249,7 @@ mod tests {
             }
             let bytes = builder.build();
             let archive = ZipArchive::parse(&bytes).unwrap();
-            let mut total = 0;
+            let mut total = ZipReadBudget::default();
             for entry in &archive.entries()[..2] {
                 archive.read_entry(entry, &mut total).unwrap();
             }
@@ -2169,8 +2257,11 @@ mod tests {
                 archive.read_entry(&archive.entries()[2], &mut total),
                 Err(OoxmlError::InflateTotalBudgetExceeded { .. })
             ));
-            assert_eq!(total, CONTAINER_MAX_INFLATE_TOTAL);
-            let mut overflowing_total = usize::MAX;
+            assert_eq!(total.output, CONTAINER_MAX_INFLATE_TOTAL);
+            let mut overflowing_total = ZipReadBudget {
+                output: usize::MAX,
+                ..Default::default()
+            };
             assert!(matches!(
                 archive.read_entry(&archive.entries()[0], &mut overflowing_total),
                 Err(OoxmlError::InflateTotalBudgetExceeded { .. })
@@ -2335,7 +2426,7 @@ mod tests {
         let mut bytes = ZipBuilder::new().add_stored("x", &data).build();
         bytes[31] ^= 1;
         let archive = ZipArchive::parse(&bytes).unwrap();
-        let mut total = 0;
+        let mut total = ZipReadBudget::default();
         for _ in 0..2 {
             assert!(matches!(
                 archive.read_entry(&archive.entries()[0], &mut total),
@@ -2373,5 +2464,213 @@ mod tests {
                 extra != 0
             );
         }
+    }
+
+    fn aliased_empty_document(raw: &[u8], copies: usize) -> Vec<u8> {
+        let mut builder = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_deflated(WORD_DOCUMENT, b"");
+        builder.entries[1].compressed = raw.to_vec();
+        let mut bytes = builder.build();
+        let eocd = bytes.len() - 22;
+        let central = read_u32(&bytes, eocd + 16) as usize;
+        let record_start = central + 46 + CONTENT_TYPES.len();
+        let record = bytes[record_start..eocd].to_vec();
+        let extra = record.repeat(copies - 1);
+        let size = read_u32(&bytes, eocd + 12) + extra.len() as u32;
+        bytes.splice(eocd..eocd, extra);
+        let eocd = bytes.len() - 22;
+        bytes[eocd + 8..eocd + 10].copy_from_slice(&((copies + 1) as u16).to_le_bytes());
+        bytes[eocd + 10..eocd + 12].copy_from_slice(&((copies + 1) as u16).to_le_bytes());
+        bytes[eocd + 12..eocd + 16].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn aliased_zero_output_streams_reserve_compressed_input_before_each_decode() {
+        // Byte-aligned empty stored DEFLATE blocks: valid, nontrivial input,
+        // exactly zero output. All central records reference one local range.
+        let mut raw = [0, 0, 0, 255, 255].repeat(209_715);
+        let last = raw.len() - 5;
+        raw[last] = 1;
+        let copies = CONTAINER_MAX_DECODE_INPUT_TOTAL / raw.len();
+        let bytes = aliased_empty_document(&raw, copies + 1);
+        let archive = ZipArchive::parse(&bytes).unwrap();
+        let mut budget = ZipReadBudget::default();
+        for entry in &archive.entries()[1..=copies] {
+            assert_eq!(archive.read_entry(entry, &mut budget).unwrap(), b"");
+        }
+        assert_eq!(budget.output, 0);
+        assert_eq!(budget.input, copies * raw.len());
+        assert_eq!(budget.attempts, copies);
+        assert!(matches!(
+            archive.read_entry(&archive.entries()[copies + 1], &mut budget),
+            Err(OoxmlError::DecodeInputBudgetExceeded { .. })
+        ));
+        assert_eq!(budget.attempts, copies);
+        let result = analyze_package(&bytes);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|r| r == "zip_decode_input_budget"));
+        assert!(!result.detected);
+        assert!(crate::forensics::scan_bytes(&bytes).incomplete);
+    }
+
+    #[test]
+    fn decode_attempt_budget_includes_zero_output_and_corrupt_aliases() {
+        for raw in [&[3, 0][..], &[255][..]] {
+            let bytes = aliased_empty_document(raw, CONTAINER_MAX_DECODE_ATTEMPTS + 1);
+            let archive = ZipArchive::parse(&bytes).unwrap();
+            let mut budget = ZipReadBudget::default();
+            for entry in &archive.entries()[1..=CONTAINER_MAX_DECODE_ATTEMPTS] {
+                let decoded = archive.read_entry(entry, &mut budget);
+                if raw == b"\x03\x00" {
+                    assert!(decoded.unwrap().is_empty());
+                } else {
+                    assert!(matches!(decoded, Err(OoxmlError::InflateFailed { .. })));
+                }
+            }
+            assert_eq!(budget.output, 0);
+            assert_eq!(budget.input, raw.len() * CONTAINER_MAX_DECODE_ATTEMPTS);
+            assert_eq!(budget.attempts, CONTAINER_MAX_DECODE_ATTEMPTS);
+            assert!(matches!(
+                archive.read_entry(archive.entries().last().unwrap(), &mut budget),
+                Err(OoxmlError::DecodeAttemptBudgetExceeded { .. })
+            ));
+            let result = analyze_package(&bytes);
+            assert!(result
+                .incomplete_reasons
+                .iter()
+                .any(|r| r == "zip_decode_attempt_budget"));
+        }
+    }
+
+    #[test]
+    fn input_reservation_exact_boundary_and_oversized_first_attempt() {
+        let bytes = aliased_empty_document(&[255], 1);
+        let archive = ZipArchive::parse(&bytes).unwrap();
+        let entry = &archive.entries()[1];
+        let mut budget = ZipReadBudget {
+            input: CONTAINER_MAX_DECODE_INPUT_TOTAL - 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            archive.read_entry(entry, &mut budget),
+            Err(OoxmlError::InflateFailed { .. })
+        ));
+        assert_eq!(budget.input, CONTAINER_MAX_DECODE_INPUT_TOTAL);
+        assert!(matches!(
+            archive.read_entry(entry, &mut budget),
+            Err(OoxmlError::DecodeInputBudgetExceeded { .. })
+        ));
+        let mut oversized = entry.clone();
+        oversized.compressed_size = CONTAINER_MAX_DECODE_INPUT_TOTAL + 1;
+        let mut budget = ZipReadBudget::default();
+        assert!(matches!(
+            archive.read_entry(&oversized, &mut budget),
+            Err(OoxmlError::DecodeInputBudgetExceeded { .. })
+        ));
+        assert_eq!(budget.attempts, 0);
+    }
+
+    #[test]
+    fn presentation_placeholders_follow_elements_attributes_and_namespace_scope() {
+        const NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        for marker in [
+            "<q:ph type='ftr'/>",
+            "<q:ph other='x' type = 'h&#100;r'/>",
+            "<q:ph type=\"dt\"/>",
+            "<q:ph type='sldNum'/>",
+            "<q:hf/>",
+            "<hf xmlns='http://schemas.openxmlformats.org/presentationml/2006/main'/>",
+            "<s:hf xmlns:s='http://purl.oclc.org/ooxml/presentationml/main'/>",
+            "<q:ph type='ftr' xmlns:q='http://schemas.openxmlformats.org/presentationml/2006/main'/>",
+        ] {
+            let xml = format!("<q:presentation xmlns:q='{NS}'>{marker}</q:presentation>");
+            let result = analyze_package(&pptx("Clean", None, Some(&xml)));
+            assert!(result.findings.iter().any(|f| f.path == PPT_PRESENTATION && f.family == DOC_003_FAMILY), "{marker}: {:?}", result);
+            assert!(result.incomplete_reasons.is_empty(), "{marker}: {:?}", result);
+        }
+        for marker in [
+            "<!-- <q:hf ftr='1'/> -->",
+            "<![CDATA[<q:ph type='ftr'/>]]>",
+            "<q:ph type='body'/>",
+            "<q:ph q:type='ftr'/>",
+            "<q:hf xmlns:q='urn:not-presentation'/>",
+            "<other xmlns:q='urn:not-presentation'><q:hf/></other>",
+            "<q:ph type='ftr extra'/>",
+            "<x:hf xmlns:x='urn:foreign'/>",
+        ] {
+            let xml = format!("<q:presentation xmlns:q='{NS}'>{marker}</q:presentation>");
+            let result = analyze_package(&pptx("Clean", None, Some(&xml)));
+            assert!(!result.detected, "{marker}: {:?}", result);
+            assert!(
+                result.incomplete_reasons.is_empty(),
+                "{marker}: {:?}",
+                result
+            );
+        }
+        let xml = format!(
+            "<q:presentation xmlns:q='{NS}'><x xmlns:q='urn:foreign'/><q:hf/></q:presentation>"
+        );
+        assert!(analyze_package(&pptx("Clean", None, Some(&xml))).detected);
+        let xml = format!("<q:presentation xmlns:q='{NS}'><q:hf></q:presentation>");
+        let result = analyze_package(&pptx("Clean", None, Some(&xml)));
+        assert!(!result.detected);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|r| r == "xml_structure_invalid"));
+        let result = analyze_package(&pptx(
+            "Clean",
+            None,
+            Some("<p:presentation><p:hf/></p:presentation>"),
+        ));
+        assert!(!result.detected);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|r| r == "xml_namespace_unsupported"));
+    }
+
+    #[test]
+    fn duplicate_presentations_and_utf16_placeholders_are_examined() {
+        let xml = "<p:presentation xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'><p:ph type='ftr'/></p:presentation>";
+        let mut utf16 = vec![255, 254];
+        for unit in xml.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let bytes = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_stored(PPT_PRESENTATION, b"<presentation/>")
+            .add_deflated(PPT_PRESENTATION, &utf16)
+            .build();
+        let result = analyze_package(&bytes);
+        assert!(result.detected);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|reason| reason == "zip_duplicate_name"));
+        assert!(result
+            .findings
+            .iter()
+            .any(|f| f.path == PPT_PRESENTATION && f.family == DOC_003_FAMILY));
+    }
+
+    #[test]
+    fn decode_attempt_exhaustion_preserves_earlier_positive_and_shared_coverage() {
+        let mut builder = ZipBuilder::new()
+            .add_stored(CONTENT_TYPES, CONTENT_TYPES_XML.as_bytes())
+            .add_deflated(WORD_DOCUMENT, document_xml("A\u{200b}B").as_bytes());
+        for _ in 0..CONTAINER_MAX_DECODE_ATTEMPTS {
+            builder = builder.add_deflated("word/header1.xml", b"<r/>");
+        }
+        let result = analyze_package(&builder.build());
+        assert!(result.detected);
+        assert!(result
+            .incomplete_reasons
+            .iter()
+            .any(|r| r == "zip_decode_attempt_budget"));
     }
 }

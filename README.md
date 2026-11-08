@@ -1,8 +1,10 @@
-# Steganographer 0.8.2
+# Steganographer
 
 Cryptographic media watermarking, bounded packet transport and forensic inspection in a five-crate Rust workspace.
 
-**Revoked historical identity:** [Git history retains an exposed signing key](docs/security.md#historical-signing-key-exposure). Managed 0.8 signing and verification deny that identity; external applications must also retire its trust.
+**v0.9.0**. Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
+
+**Revoked historical identity:** [Git history retains an exposed signing key](docs/security.md#historical-signing-key-exposure). Managed signing and verification deny that identity; external applications must also retire its trust.
 
 ![Signed-media dashboard](docs/images/dashboard-video-tab.png)
 
@@ -33,7 +35,7 @@ cargo run -p steganographer-cli --no-default-features -- dashboard --transport w
 | Surface | Contract |
 | --- | --- |
 | Offline CLI | Encode, decode, extract and verify signatures or generic packets; explicit keys/password files, atomic outputs, semantic exit codes and JSON envelopes |
-| Dashboard | Ed25519 + BLAKE3 + LSB; signed PNG frames and exact PCM WAV chunks over WebSocket, optional WebRTC data-channel video |
+| Dashboard | Ed25519 + BLAKE3 + LSB; delivered signed PNG/raw PCM over WebSocket, optional RTC JSON/base64 data-channel video; WAV wrappers for archive export |
 | Native pipelines | Single-kernel LSB/DCT signed video, LSB signed audio, literal file/device/network input routing and explicit caller-owned pipelines |
 | Native files | Exact RGB Matroska `.mkv`; whole-selection PCM `.wav` signed once at index 0, bounded to 64 MiB; atomic no-clobber publication after EOS |
 | Forensics | Bounded byte, Unicode, ZIP/OOXML, PDF and statistical analysis, with explicit incomplete/budget results |
@@ -48,6 +50,9 @@ Dashboard **Record** downloads a ZIP containing the actual signed PNG/WAV artifa
 - Encryption/ECC, Ethereum wallet signing and cryptographic QR overlays are not live dashboard capabilities; unavailable controls do not pretend otherwise.
 - Preview opacity is display-only. Lossy codecs, resizing, resampling, OBS and conferencing clients can invalidate invisible marks.
 - Native explicit sinks are caller-owned. A successful pre-sink signature check does not authenticate arbitrary downstream conversions.
+- Browser verdicts are server-reported, not independent archive verification.
+  Encode request/epoch ownership rejects stale current verdicts; archives own
+  requests at submission, not reply arrival. Independently verify exports.
 
 ## Cryptographic binding
 
@@ -75,6 +80,10 @@ See [Cryptography](docs/cryptography.md), [Algorithms](docs/algorithms.md), [Sec
 # Generate a signing-key pair; paths/public key are printed, not private key bytes.
 steganographer keygen --output mykey
 
+# Exact sequential generic payload bound; match metadata/signing policy at encode.
+steganographer capacity --input cover.png --bits 2 \
+  --filename report.pdf --mime-type application/pdf --format json
+
 # Generic bytes in a lossless image carrier.
 steganographer encode --input cover.png --output packed.png \
   --payload-file report.pdf --mime-type application/pdf --bits 2
@@ -96,6 +105,12 @@ steganographer --config config/example.toml video \
 ```
 
 Use [CLI Reference](docs/cli-reference.md) for trusted-signer verification, raw geometry, encryption key precedence, exit codes and generated completions/manuals. Existing outputs are not silently truncated; JSON never contains generated secrets.
+
+`capacity` accounts for actual locator/envelope/metadata and optional signing
+overhead under effective limits; it is not a bound for encryption/ECC/compression
+or keyed placement. Unavailable analysis is inconclusive (exit 5); detector and
+traversal cutoffs are incomplete even if the CLI read all bytes. Positive scan
+findings retain exit 4 precedence.
 
 ### Native configuration boundaries
 
@@ -135,18 +150,21 @@ Node.js, Python 3.12+, the `wasm32-unknown-unknown` target and a `wasm-bindgen`
 generator matching `Cargo.lock`. Native builds also need GStreamer 1.22+.
 
 ```bash
-bash scripts/release.sh --output dist/release-0.8.2 --variant all
-python3 scripts/check-release.py dist/release-0.8.2
-gzip -t dist/release-0.8.2/*.tar.gz
+bash scripts/release.sh --output dist/reviewed-release --variant all
+python3 scripts/check-release.py dist/reviewed-release
+gzip -t dist/reviewed-release/*.tar.gz
 ```
 
 The output path must not exist. `portable`, `native` and `wasm` select individual
 variants; `all` includes them plus the exact source snapshot, inventory,
-provenance and checksums. `--allow-dirty` explicitly records a development
-snapshot, not a clean committed release. No command publishes or modifies tags.
-Host binaries are not statically bundled or cross-compiled. Compression emits
-one complete gzip member without trailing padding; the checker verifies that
-boundary as well as exact source bytes and actual artifact consumers.
+provenance and checksums. Default source capture reads the committed Git tree's
+regular blobs/modes, not mutable worktree/index bytes. `--allow-dirty` captures
+working-tree bytes explicitly marked dirty and **not commit-bound**, even if
+the worktree was clean; it is not a point-in-time worktree snapshot.
+No command publishes or modifies tags. Host binaries are not statically bundled
+or cross-compiled. Strict single-member gzip rejects trailing padding or extra
+members; the checker also rejects duplicate normalized archive paths before
+inventory/extraction. See [Scripts](scripts/README.md) for the complete contract.
 
 
 ## Migration from 0.7
@@ -157,6 +175,13 @@ boundary as well as exact source bytes and actual artifact consumers.
 - Raw generic STG3 v1 frozen wire vectors remain unchanged; malformed/inconsistent packets now fail closed.
 - WASM report schema: **`steganographer.packet-report.v2`**, exact decimal-string `u64` fields.
 - Use explicit `type = "test"` for synthetic native input. Missing/unknown device backends no longer masquerade as capture.
+- Native convenience file APIs now require trailing `overwrite: bool`; pass
+  false for no-clobber or true for intended replacement, with no old-signature
+  shim. Aliases reject; private output publishes only after EOS. Filesink still
+  requires a trusted output directory.
+- RTC requests are STGO-framed JSON/base64 (`jpeg_b64`), not raw binary JPEG.
+  Whole chunks are ≤16 KiB; complete serialized requests must fit 4 MiB.
+  Oversize errors advise smaller resolution or WebSocket selection.
 
 See [Compatibility](docs/compatibility.md), [CHANGELOG](CHANGELOG.md), [API Reference](docs/api-reference.md), [OTS Integration](docs/ots-integration.md) and the [documentation index](docs/README.md). Planned work is tracked in [TODO.md](TODO.md) and [Roadmap](docs/roadmap.md), not advertised as implemented functionality.
 

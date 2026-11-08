@@ -70,6 +70,147 @@ use std::time::{Duration, Instant};
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(15);
 const PULL_INTERVAL: gstreamer::ClockTime = gstreamer::ClockTime::from_mseconds(100);
 
+/// Check the real map before gstreamer-video's stride * height slice accessor.
+/// This deliberately requires trailing row padding too: the dependency forms
+/// that entire slice even when our carrier only visits logical pixel bytes.
+pub(crate) fn checked_packed_plane(
+    frame: &impl gstreamer_video::VideoFrameExt,
+    expected: &gstreamer_video::VideoInfo,
+    row_bytes: usize,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        frame.n_planes() == 1
+            && frame.format() == expected.format()
+            && frame.width() == expected.width()
+            && frame.height() == expected.height(),
+        "mapped video geometry differs from negotiated packed layout"
+    );
+    let raw = frame.as_raw();
+    checked_plane_span(
+        raw.map[0].data as usize,
+        raw.map[0].size,
+        raw.data[0] as usize,
+        frame.plane_stride()[0],
+        row_bytes,
+        frame.height(),
+    )
+}
+
+fn checked_plane_span(
+    map_start: usize,
+    map_size: usize,
+    plane_start: usize,
+    stride: i32,
+    row_bytes: usize,
+    height: u32,
+) -> anyhow::Result<usize> {
+    let stride = usize::try_from(stride).context("negative video stride is unsupported")?;
+    anyhow::ensure!(
+        row_bytes > 0 && height > 0 && stride >= row_bytes,
+        "invalid packed video geometry"
+    );
+    let extent = stride
+        .checked_mul(height as usize)
+        .filter(|size| *size <= u32::MAX as usize && *size <= isize::MAX as usize)
+        .context("video plane exceeds supported map extent")?;
+    // Compare addresses only; do not derive a pointer or slice from untrusted
+    // metadata. size, not maxsize or the whole GstBuffer size, bounds this map.
+    anyhow::ensure!(
+        map_start != 0 && plane_start != 0 && map_size <= isize::MAX as usize,
+        "invalid video map backing"
+    );
+    map_start
+        .checked_add(map_size)
+        .context("video map address overflow")?;
+    let offset = plane_start
+        .checked_sub(map_start)
+        .context("video plane starts before mapped backing")?;
+    anyhow::ensure!(
+        offset
+            .checked_add(extent)
+            .is_some_and(|end| end <= map_size),
+        "video plane exceeds mapped backing"
+    );
+    Ok(stride)
+}
+
+/// Private sibling staging, matching the CLI's directory-entry publication
+/// policy. Native filesink still requires a trusted output directory: it opens
+/// this owned private pathname rather than an already-open file descriptor.
+pub(crate) struct FileOutput {
+    file: tempfile::NamedTempFile,
+    input: std::path::PathBuf,
+    output: std::path::PathBuf,
+    overwrite: bool,
+}
+
+impl FileOutput {
+    fn preflight(
+        input: &std::path::Path,
+        output: &std::path::Path,
+        overwrite: bool,
+    ) -> anyhow::Result<()> {
+        std::fs::metadata(input).context("reading input file metadata")?;
+        match std::fs::metadata(output) {
+            Ok(_) => anyhow::ensure!(
+                !same_file::is_same_file(input, output).context("checking input/output alias")?,
+                "input and output refer to the same file"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::symlink_metadata(output) {
+            Ok(metadata) => {
+                anyhow::ensure!(overwrite, "output already exists; refusing to overwrite");
+                anyhow::ensure!(!metadata.is_dir(), "output is a directory");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn new(input: &str, output: &str, overwrite: bool) -> anyhow::Result<Self> {
+        let input = std::path::PathBuf::from(input);
+        let output = std::path::PathBuf::from(output);
+        Self::preflight(&input, &output, overwrite)?;
+        let parent = output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let file = tempfile::NamedTempFile::new_in(parent)?;
+        Ok(Self {
+            file,
+            input,
+            output,
+            overwrite,
+        })
+    }
+
+    pub(crate) fn location(&self) -> anyhow::Result<&str> {
+        self.file
+            .path()
+            .to_str()
+            .context("output temporary path is not UTF-8")
+    }
+
+    /// Called only after downstream EOS and the guards' shutdown requests.
+    pub(crate) fn publish(self) -> anyhow::Result<()> {
+        self.file.as_file().sync_all()?;
+        Self::preflight(&self.input, &self.output, self.overwrite)?;
+        if self.overwrite {
+            self.file
+                .persist(&self.output)
+                .map_err(|error| error.error)?;
+        } else {
+            self.file
+                .persist_noclobber(&self.output)
+                .map_err(|error| error.error)?;
+        }
+        Ok(())
+    }
+}
+
 /// Owns shutdown even if parsing, startup, processing, or draining fails.
 pub(crate) struct BridgeSource {
     pub(crate) bin: gstreamer::Bin,
@@ -328,6 +469,38 @@ pub fn launch(pipeline_str: &str) -> anyhow::Result<gstreamer::Element> {
 }
 
 #[cfg(test)]
+mod plane_span_tests {
+    use super::checked_plane_span;
+
+    #[test]
+    fn actual_map_span_includes_offset_and_dependency_trailing_padding() {
+        let backing = [0u8; 113];
+        let base = backing.as_ptr() as usize;
+        assert_eq!(
+            checked_plane_span(base, 113, base + 13, 20, 18, 5).unwrap(),
+            20
+        );
+        // All logical pixels fit in 111 bytes, but plane_data forms a 100-byte
+        // slice after the offset, including the last row's two padding bytes.
+        assert!(checked_plane_span(base, 112, base + 13, 20, 18, 5).is_err());
+        assert!(checked_plane_span(base, 64, base + 32, 20, 18, 2).is_err());
+        assert!(checked_plane_span(base, 113, base - 1, 20, 18, 5).is_err());
+        assert!(checked_plane_span(base, 113, base + 113, 20, 18, 5).is_err());
+    }
+
+    #[test]
+    fn invalid_geometry_and_address_arithmetic_refuse_without_forming_slices() {
+        for (stride, row, height) in [(-1, 18, 5), (17, 18, 5), (20, 0, 5), (20, 18, 0)] {
+            assert!(checked_plane_span(1024, 1024, 1024, stride, row, height).is_err());
+        }
+        assert!(checked_plane_span(1024, 1024, 1024, i32::MAX, 1, u32::MAX).is_err());
+        assert!(checked_plane_span(0, 1024, 1024, 20, 18, 5).is_err());
+        assert!(checked_plane_span(1024, 1024, 0, 20, 18, 5).is_err());
+        assert!(checked_plane_span(usize::MAX - 50, 100, usize::MAX - 50, 20, 18, 5).is_err());
+    }
+}
+
+#[cfg(test)]
 mod bridge_tests {
     use super::*;
 
@@ -499,5 +672,60 @@ mod bridge_tests {
         let error = source.pull(None).unwrap_err();
         assert!(error.to_string().contains("timed out"));
         assert!(start.elapsed() < BRIDGE_TIMEOUT + Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod file_output_tests {
+    use super::FileOutput;
+    use std::io::Write;
+
+    #[test]
+    fn late_output_cannot_be_clobbered_and_failed_stage_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        std::fs::write(&input, b"source").unwrap();
+        let mut staged =
+            FileOutput::new(input.to_str().unwrap(), output.to_str().unwrap(), false).unwrap();
+        let temporary = staged.file.path().to_owned();
+        staged.file.write_all(b"complete staged bytes").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                staged
+                    .file
+                    .as_file()
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::write(&output, b"concurrent destination").unwrap();
+        assert!(staged.publish().is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"concurrent destination");
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(&input).unwrap(), b"source");
+    }
+
+    #[test]
+    fn destination_changed_to_input_alias_refuses_at_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let output = dir.path().join("output");
+        std::fs::write(&input, b"source").unwrap();
+        let mut staged =
+            FileOutput::new(input.to_str().unwrap(), output.to_str().unwrap(), true).unwrap();
+        let temporary = staged.file.path().to_owned();
+        staged.file.write_all(b"complete staged bytes").unwrap();
+        std::fs::hard_link(&input, &output).unwrap();
+        assert!(staged.publish().is_err());
+        assert_eq!(std::fs::read(&input).unwrap(), b"source");
+        assert_eq!(std::fs::read(&output).unwrap(), b"source");
+        assert!(!temporary.exists());
     }
 }

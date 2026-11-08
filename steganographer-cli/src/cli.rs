@@ -91,6 +91,9 @@ pub(crate) enum Commands {
         format: String,
     },
 
+    /// Exact logical payload capacity for a sequential generic RGB/PCM packet
+    Capacity(Box<CapacityArgs>),
+
     /// Report steganographic capacity of a media file
     Info {
         #[arg(long, short)]
@@ -213,6 +216,34 @@ pub(crate) enum Commands {
         action: OtsAction,
     },
 }
+#[derive(Args)]
+pub(crate) struct CapacityArgs {
+    /// Decoded RGB bytes or S16 samples; no carrier file is read
+    #[arg(long, required_unless_present = "input", conflicts_with = "input")]
+    pub(crate) carrier_units: Option<usize>,
+    #[arg(long, short, required_unless_present = "carrier_units")]
+    pub(crate) input: Option<String>,
+    #[arg(long, default_value = "lsb_video")]
+    pub(crate) stego_type: String,
+    #[arg(long, default_value = "1")]
+    pub(crate) bits: u8,
+    #[arg(long)]
+    pub(crate) input_format: Option<String>,
+    #[arg(long)]
+    pub(crate) width: Option<u32>,
+    #[arg(long)]
+    pub(crate) height: Option<u32>,
+    /// Exact public metadata, matching encode --filename/--mime-type
+    #[arg(long)]
+    pub(crate) filename: Option<String>,
+    #[arg(long)]
+    pub(crate) mime_type: Option<String>,
+    /// Account for a real signature using this signing key
+    #[arg(long)]
+    pub(crate) signing_key: Option<String>,
+    #[arg(long, default_value = "plain")]
+    pub(crate) format: String,
+}
 
 // Separate argument builders keep clap's debug temporaries out of one large
 // Subcommand::augment_subcommands frame, including Windows' 1 MiB main stack.
@@ -273,8 +304,8 @@ pub(crate) struct EncodeArgs {
     #[arg(long)]
     pub(crate) compress: bool,
     /// Multi-frame spreading: spread one signature across N frames (1 = no spreading)
-    #[arg(long, default_value = "1")]
-    pub(crate) spread: u32,
+    #[arg(long)]
+    pub(crate) spread: Option<u32>,
     /// Hash algorithm: "blake3" (default), "sha256", "sha3-256"
     #[arg(long)]
     pub(crate) hash_algorithm: Option<String>,
@@ -400,8 +431,8 @@ pub(crate) struct VerifyArgs {
     #[arg(long, default_value = "4")]
     pub(crate) ecc_parity: usize,
     /// Multi-frame spreading: signature was spread across N frames
-    #[arg(long, default_value = "1")]
-    pub(crate) spread: u32,
+    #[arg(long)]
+    pub(crate) spread: Option<u32>,
     /// Hash algorithm: "blake3" (default), "sha256", "sha3-256"
     #[arg(long)]
     pub(crate) hash_algorithm: Option<String>,
@@ -539,6 +570,37 @@ pub(crate) enum OtsAction {
 mod tests {
     use super::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn cli_parses_capacity_with_one_mib_stack() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let parsed = Cli::try_parse_from([
+                    "steganographer",
+                    "capacity",
+                    "--carrier-units",
+                    "12288",
+                    "--filename",
+                    "payload.bin",
+                    "--mime-type",
+                    "application/octet-stream",
+                    "--format",
+                    "json",
+                ])
+                .unwrap();
+                match parsed.command {
+                    Commands::Capacity(args) => {
+                        assert_eq!(args.carrier_units, Some(12288));
+                        assert_eq!(args.filename.as_deref(), Some("payload.bin"));
+                    }
+                    _ => panic!("capacity command expected"),
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn cli_parses_generic_encode_with_one_mib_stack() {

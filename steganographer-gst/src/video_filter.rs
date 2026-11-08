@@ -5,7 +5,6 @@
 
 use crate::{BridgeOutput, BridgeSource, SigningKernel};
 use anyhow::Context;
-use gstreamer_video::VideoFrameExt;
 use steganographer_core::crypto::{SignaturePayload, Signer};
 use steganographer_core::video::{VideoFormat, VideoFrame, VideoStegoModule};
 
@@ -108,7 +107,7 @@ pub fn run_video_filter(
             let mut mapped =
                 gstreamer_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &info)
                     .context("mapping video frame")?;
-            let stride = checked_stride(mapped.plane_stride()[0], row_bytes, info.height())?;
+            let stride = crate::checked_packed_plane(&mapped, &info, row_bytes)?;
             let plane = mapped
                 .plane_data_mut(0)
                 .context("mapping video pixel plane")?;
@@ -200,20 +199,6 @@ fn packed_format(info: &gstreamer_video::VideoInfo) -> anyhow::Result<(VideoForm
     Ok((format, row))
 }
 
-fn checked_stride(stride: i32, row: usize, height: u32) -> anyhow::Result<usize> {
-    let stride = usize::try_from(stride).context("negative video stride is unsupported")?;
-    anyhow::ensure!(stride >= row, "video stride is smaller than packed row");
-    let size = stride
-        .checked_mul(height as usize)
-        .context("video plane size overflow")?;
-    // gstreamer-video's plane_data accessor computes this extent as u32.
-    anyhow::ensure!(
-        size <= u32::MAX as usize,
-        "video plane exceeds supported map extent"
-    );
-    Ok(stride)
-}
-
 fn gather_pixels(plane: &[u8], stride: usize, row: usize, height: u32) -> anyhow::Result<Vec<u8>> {
     let required = (height as usize - 1)
         .checked_mul(stride)
@@ -262,7 +247,7 @@ pub fn extract_from_source(
             &info,
         )
         .context("mapping video frame")?;
-        let stride = checked_stride(mapped.plane_stride()[0], row_bytes, info.height())?;
+        let stride = crate::checked_packed_plane(&mapped, &info, row_bytes)?;
         let mut pixels = gather_pixels(mapped.plane_data(0)?, stride, row_bytes, info.height())?;
         let frame = VideoFrame {
             width: info.width(),
@@ -281,6 +266,10 @@ pub fn extract_from_source(
 /// Decode input to RGB and write exact processed pixels as raw-RGB Matroska.
 /// Only `.mkv` output is supported: lossy/color-converted output destroys LSBs.
 /// `signing_kernel` must describe `stego` when a signer is supplied.
+/// Existing destinations require `overwrite`; failures leave them unchanged.
+/// Input/output aliases (including hard links and symlinks) always refuse.
+/// The output directory must be trusted: filesink reopens the private sibling
+/// temporary by pathname. Publication follows successful downstream EOS.
 pub fn process_video_file(
     input_path: &str,
     output_path: &str,
@@ -288,12 +277,14 @@ pub fn process_video_file(
     signer: Option<&Signer>,
     signing_kernel: Option<SigningKernel>,
     max_frames: Option<u64>,
+    overwrite: bool,
 ) -> anyhow::Result<()> {
     require_extension(
         output_path,
         "mkv",
         "video file output requires .mkv (exact raw RGB Matroska)",
     )?;
+    let output = crate::FileOutput::new(input_path, output_path, overwrite)?;
     let config = VideoFilterConfig {
         source_pipeline: format!(
             "filesrc location={} ! decodebin ! videoconvert ! video/x-raw,format=RGB",
@@ -301,11 +292,12 @@ pub fn process_video_file(
         ),
         sink_pipeline: format!(
             "matroskamux ! filesink location={}",
-            crate::quote_location(output_path)?,
+            crate::quote_location(output.location()?)?,
         ),
         signing_kernel,
     };
-    run_video_filter(&config, stego, signer, max_frames)
+    run_video_filter(&config, stego, signer, max_frames)?;
+    output.publish()
 }
 
 /// Decode to interleaved S16LE and write exact processed PCM to `.wav`.
@@ -313,6 +305,7 @@ pub fn process_video_file(
 /// Selected decoded PCM is one logical frame at index zero, bounded to 64 MiB.
 /// `max_buffers` explicitly limits input collection; absent means the complete
 /// file. Extract the signature from the whole delivered PCM, not decoder chunks.
+/// Publication and alias/overwrite policy match `process_video_file`.
 pub fn process_audio_file(
     input_path: &str,
     output_path: &str,
@@ -320,21 +313,24 @@ pub fn process_audio_file(
     signer: Option<&Signer>,
     signing_kernel: Option<SigningKernel>,
     max_buffers: Option<u64>,
+    overwrite: bool,
 ) -> anyhow::Result<()> {
     require_extension(
         output_path,
         "wav",
         "audio file output requires .wav (exact S16LE PCM)",
     )?;
+    let output = crate::FileOutput::new(input_path, output_path, overwrite)?;
     let config = crate::audio_filter::AudioFilterConfig {
         source_pipeline: format!(
             "filesrc location={} ! decodebin ! audioconvert ! audio/x-raw,format=S16LE,layout=interleaved",
             crate::quote_location(input_path)?,
         ),
-        sink_pipeline: format!("wavenc ! filesink location={}", crate::quote_location(output_path)?),
+        sink_pipeline: format!("wavenc ! filesink location={}", crate::quote_location(output.location()?)?),
         signing_kernel,
     };
-    crate::audio_filter::run_audio_file(&config, stego, signer, max_buffers)
+    crate::audio_filter::run_audio_file(&config, stego, signer, max_buffers)?;
+    output.publish()
 }
 
 fn require_extension(path: &str, extension: &str, message: &str) -> anyhow::Result<()> {
@@ -351,6 +347,7 @@ fn require_extension(path: &str, extension: &str, message: &str) -> anyhow::Resu
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    use gstreamer_video::VideoFrameExt;
     use steganographer_core::lsb_video::LsbVideo;
 
     #[test]
@@ -384,6 +381,7 @@ mod layout_tests {
                 gstreamer_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &info)
                     .unwrap();
             assert_eq!(mapped.plane_stride()[0] as usize, stride);
+            crate::checked_packed_plane(&mapped, &info, row).unwrap();
             let plane = mapped.plane_data_mut(0).unwrap();
             let mut pixels = gather_pixels(plane, stride, row, height).unwrap();
             let binding = SigningKernel::Lsb { bits: 1 }

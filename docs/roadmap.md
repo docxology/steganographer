@@ -1,13 +1,13 @@
 # Roadmap
 
-Steganographer is currently on the v0.6 line. Historical release contents are
-recorded in [`CHANGELOG.md`](../CHANGELOG.md); active maintenance items remain in
-[`TODO.md`](../TODO.md).
+This is a historical planning sequence, not a current release or qualification
+schedule. Proposed 0.9.0 delivered behavior is documented in the user/API guides;
+version selection and publication remain separate release-owner steps.
+Historical release contents live in [`CHANGELOG.md`](../CHANGELOG.md).
 
-The detailed implementation source of truth is the
-[Steganography Platform Expansion Plan](plans/steganography-platform/README.md).
-Its specifications define contracts, dependencies, work-package IDs, security
-limits, fixtures, and acceptance criteria.
+The [Steganography Platform Expansion Plan](plans/steganography-platform/README.md)
+retains design contracts and work-package IDs; planned acceptance criteria
+must not be cited as observed implementation, CI or platform results.
 
 ## Release sequence
 
@@ -76,7 +76,7 @@ key hierarchy, and the nesting scaffold are implemented.
   (nonce derived from `packet_id`, not the locator nonce), chunked
   Reed-Solomon ECC, DEFLATE compression, the Ed25519 payload-signature
   transform, `FLAG_KEYED_LOCATOR`/`FLAG_PAYLOAD_SIGNED` with enforced
-  flags⇔transform consistency, the `FIELD_PARENT_ID` nesting scaffold, and
+  flags⇔transform consistency, bounded explicit parent-linked nesting, and
   derivation of locator/placement keys from a single embedding key.
 
 Exit gate: generic payload support is opt-in, legacy remains the default, and

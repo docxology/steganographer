@@ -1,9 +1,10 @@
 # TODO
 
-Scoped improvements and future plans.
-See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
-
-> **Status (2026-08-19, v0.7.0):** Correctness baseline, OpenTimestamps attestation integration, exact info capacity, bounded scan command, post-write verification, and generic packet slices for RGB/WAV carriers are completed. All legacy audit findings are resolved.
+Historical task notes and future plans. Dated entries below are not current
+release qualification or API documentation; later correctness cutovers supersede
+their measurements and conclusions. Current behavior lives in the user/API guides,
+observed test totals in root `AGENTS.md`, and release history in `CHANGELOG.md`.
+The proposed 0.9.0 work does not imply publication or Linux/Windows/CI qualification.
 
 ---
 
@@ -61,43 +62,18 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
   and `gst-inspect-1.0 stegoaudio` both list properties from the built dylib.
   Elements carry metadata + any-caps pad templates (missing templates made
   the registry refuse the factories). Also fixed in the same pass:
-  `clear-payload` was a no-op (empty-packet embed writes zero bits); gst
-  suite 7 → 15, workspace 472 → 480.
-- [x] **WebRTC streaming (DataChannel + H.264 media track)** — replace WebSocket frame-by-frame with WebRTC.
-  Status: **core slice complete (2026-09-07)**. WHEP-shaped HTTP SDP
-  signaling (`POST /api/webrtc/offer`), ordered+reliable `frames`
-  DataChannel carrying the SAME per-frame pipeline as WebSocket (shared
-  `process_encode_frame`/`process_decode_poll`), 16 KiB chunk framing with
-  reassembly + backpressure, 60 s idle sweep, `--transport
-  {auto,websocket,webrtc}` (default auto) with browser-side fallback
-  (501/timeout/error → WebSocket, persisted). Measured: 18.1 fps at true
-  720p (175 KB JPEG, release profile), p95 one-way 54 ms; verified from a
-  real headless Chrome (signaling, DataChannel open, app-path encode
-  round-trip, 501→WS fallback). Interpretation notes: (1) media rides the
-  DataChannel (SCTP/DTLS), not RTP media streams — avoids a mandatory
-  media-encoder dependency; (2) the ≥15 fps@720p figure is a
-  release-profile measurement — the debug test profile sustains ~14.3 fps
-  at 150 KB, so the interop test pins the acceptance at dashboard-default
-  payload sizes in debug. **Media track (2026-09-07, same day)**: real
-  H.264 MediaStreamTrack now completes the feature — stego'd pixels
-  (pre-JPEG buffer, zero extra decode) → RGB→I420 → openh264 (2.5 Mbps,
-  30-frame IDR; transparent encoder recreation on resolution change) →
-  Annex-B → `TrackLocalStaticSample` over a Sendonly transceiver matched
-  to the browser's recvonly video m-line; `--ice-server` (repeatable,
-  stun/turn forms) + `GET /api/webrtc/config` share one ICE list between
-  browser and server; `ontrack` renders a media-preview `<video>` with a
-  Media-fps stat while the DataChannel canvas path stays the default
-  verification view. Measured (release): DataChannel loop 18.1 fps / p95
-  22 ms; media loopback 272 RTP packets, PT 125, 13.6 fps (release floors
-  ≥15 DC / ≥12 media enforced; debug builds assert stall guards only —
-  both fps floors profile-gated after the debug throughput assertion
-  flaked twice under load). Real-browser verified: Connected (WebRTC) +
-  media preview rendering the stego'd frames (640×480) while the same
-  frames pass signature verification. Remaining (owner-gated): real-camera
-  soak and NAT deployments (STUN/TURN plumbing shipped; needs live
-  network validation). Known limit: PLI→keyframe unreachable through the
-  event-handler API — keyframe recovery rides the IDR interval
-  (documented in docs/api-reference.md).
+  `clear-payload` was a no-op and gained real clearing behavior.
+- [x] **WebRTC transport and optional H.264 preview** — historical implementation
+  work introduced real peer signaling and a shared sign/embed/verify pipeline.
+  Current artifact traffic is JSON/base64, not binary JPEG: `jpeg_b64` is the
+  historical image field name; the browser sends PNG. Binary data-channel chunks
+  have a 20-byte big-endian STGO/id/index/count header and total size ≤16 KiB.
+  Serialized UTF-8 JSON/base64 must fit 4 MiB; the client checks before sending
+  any chunks and reports actual/maximum bytes with smaller-resolution/WebSocket
+  guidance. WebSocket accepts raw binary images and has separate limits.
+  Only auto mode falls back without persisting the fallback as user preference;
+  pinned WebRTC fails visibly. H.264 RTP is preview, not signed evidence.
+  Physical-camera soak and NAT deployment remain separate qualification.
 - [ ] **Learned watermarking encoder (framework landed; CRF-28 gate open)** — neural network-based watermarking resistant to re-encoding/cropping.
   Status: **framework complete (2026-09-07)**: opt-in `learned` cargo
   feature (ndarray only, no new mandatory deps), 64-bit payload, trained
@@ -122,17 +98,17 @@ See [docs/roadmap.md](docs/roadmap.md) for the full release timeline.
 Findings from the 2026-08-31 cold-start documentation audit (agent-erg fleet). All Minor and Medium items were fixed in the same pass; Majors are deferred with reasons.
 
 ### 🟢 Minor
-- [x] **"All 13 commands" stale count** — actual subcommand count is 14. Fixed in `README.md`, `docs/AGENTS.md`; `docs/cli-reference.md` gained `revoke` + `ots` sections.
+- [x] **Stale command inventories** — removed duplicated pins; shared `src/cli.rs` is authoritative.
 - [x] **docs/AGENTS.md contents table stale** — omitted `ots-integration.md`, miscounted files. Refreshed with as-of date + verification command.
-- [x] **docs/README.md test count stale (457)** — now points to the canonical Tests line in root `AGENTS.md`.
+- [x] **Stale documentation test totals** — defer to root `AGENTS.md`.
 - [x] **TODO.md completed section framed as active** — superseded-marked (this edit).
 
 ### 🟡 Medium
 - [x] **Test-count fact-class had no canonical home** — duplicated (and disagreeing) across README, AGENTS.md, docs/README.md, docs/contributing.md, docs/getting-started.md. Root `AGENTS.md` Tests line declared canonical; README/docs now link or defer to it.
-- [x] **cli-reference.md missing 2 of 14 subcommands** — `revoke` and `ots` sections added from `steganographer-cli/src/main.rs` (source of truth: `enum Commands`).
+- [x] **Missing command reference sections** — `revoke` and `ots` documented; shared `src/cli.rs` is the schema.
 
 ### 🔴 Major (deferred → completed in Round 2, 2026-08-31)
-- [x] **Automate test-count provenance** — `scripts/status.sh --check` compares `cargo test --workspace -- --list` against the canonical Tests line in AGENTS.md; exit 1 on drift. Run before any docs change that touches counts.
+- [x] **Automate test-count provenance** — `scripts/status.sh --check` compares summed successful Cargo results with root `AGENTS.md`; integration owns execution.
 - [x] **README has no status surface beyond a badge** — `./scripts/status.sh` prints version, subcommand count, docs counts, git state, and test count, each with its source named. Linked from README "Project Status" and AGENTS.md.
 
 ---
@@ -151,9 +127,8 @@ Executed the only owner-independent Long-Term Backlog item (Native GStreamer
 plugin). Toolchain check: `gst-launch-1.0`, `gst-inspect-1.0`, and
 `pkg-config gstreamer-1.0` (= 1.28.6) all present, so the item was
 executable. All changes uncommitted, left in the working tree for owner
-review. Docs-count changes were gated by `./scripts/status.sh --check`
-(ran first at canonical 472 → confirmed MISMATCH exit 1 → counts updated →
-re-run clean).
+review. Historical count-drift gating was recorded here; current observed totals
+are maintained only in root `AGENTS.md`.
 
 ### Landed
 
@@ -206,7 +181,7 @@ re-run clean).
       `keyed_frames_diverge_by_frame_index` (video),
       `keyed_buffers_diverge_by_frame_index` (audio); every frame decodes
       through the same derivation with its index, frame 0 stays
-      CLI-decodable with the raw key. Workspace 480 → 484 tests; `./scripts/status.sh --check` verified clean at 484 == 484.
+      CLI-decodable with the raw key. Workspace counts now defer to root `AGENTS.md`.
 Still open at the end of this pass: WebRTC streaming and the learned
 watermarking encoder (owner intent required per the Long-Term Backlog;
 unchanged). Tracked there — intentionally not duplicated as a checkbox
@@ -227,22 +202,15 @@ verified against the tree (`cargo test --workspace` 484/0 failures,
       module in the workspace, and the sole warning on a plain
       `cargo build -p steganographer-core` (unused import of `super::*`
       because all its users were dead code in the non-test build). The
-      9 kdf unit tests still run under `cargo test`; release libs no
+      KDF unit tests still run under `cargo test`; release libs no
       longer carry them; clippy is warning-free.
 - [x] `cargo fmt` drift in `steganographer-core/src/kdf.rs`,
       `steganographer-gst/src/audio_element.rs`, and
       `steganographer-gst/src/lib.rs` (landed unformatted in
       the 2026-09-06 commit). `cargo fmt --check` exits 0 again.
-- [x] Test-count drift corrected from cargo-verified counts
-      (484 total = 290 core unit + 117 core integration (80 + 37) +
-      37 CLI (6 + 31) + 23 dashboard + 17 gst (14 + 2 + 1 doctest)):
-      `README.md` (288→290, 405→407), `docs/README.md` (288→290,
-      gst 2→17, total 467→484), `docs/contributing.md` (457→484 twice,
-      395/282+113→407/290+117), `docs/getting-started.md` (457→484,
-      395→407), `steganographer-core/AGENTS.md` (288→290, 405→407), and
-      `steganographer-core/README.md` (405→407 badge and totals). The
-      earlier "counts refreshed everywhere" claims had not
-      reached these files — the numbers predated the gst element work.
+- [x] Test-count documentation drift corrected. Current observed workspace
+      totals have one home in root `AGENTS.md`, rather than duplicated historical
+      per-crate/per-file pins or badges.
 
 ### Added
 
@@ -269,8 +237,8 @@ verified against the tree (`cargo test --workspace` 484/0 failures,
 
 Six parallel review agents audited core/CLI/dashboard/GST/docs/security; the
 findings were then implemented by eight parallel task agents plus fix-ups.
-Workspace 484 → 602 tests (`./scripts/status.sh --check` clean at 602 == 602);
-clippy `-D warnings` clean across the workspace.
+Historical workspace/static-check observations were recorded for that pass,
+not current release qualification; root `AGENTS.md` owns current test totals.
 
 - [x] **Real ML-DSA** — `MlDsaBackend` was a keyed BLAKE3-XOF MAC masquerading
       as FIPS 204 (verify required the private seed; the "public key" could
@@ -313,9 +281,7 @@ clippy `-D warnings` clean across the workspace.
 
 ## 🔁 2026-09-21 Continuation Round — forensics registry, OOXML, WASM, WebRTC, password path
 
-Workspace **602 → 665 tests** (`./scripts/status.sh --check` canonical line in
-root `AGENTS.md`; core 506 = 381 unit + 125 integration, CLI 68, dashboard 58,
-GST 24, WASM 9).
+Current observed workspace totals are maintained only in root `AGENTS.md`.
 
 ### Landed
 
@@ -342,7 +308,7 @@ GST 24, WASM 9).
 - [x] **steganographer-wasm crate (WASM-001)** — browser-local facade
       (packet encode/decode, RGB + PCM S16LE carriers, forensic scan,
       decode-limits JSON), cfg-gated to `wasm32`; core `ots`/`reqwest` and
-      `ethereum` features off. 9 native integration tests.
+      `ethereum` features off. Native integration scenarios accompany the facade.
 - [x] **WebRTC dashboard transport** — WHIP-style `POST /api/webrtc/offer`
       (auth-gated, non-trickle ICE) + `LiveConfig.transport`
       (`websocket` default | `webrtc`); data-channel media reuses the shared
@@ -371,9 +337,8 @@ GST 24, WASM 9).
 
 ## ✅ 2026-09-22 Final Round — v0.8 contract closure + acceptance measurements
 
-All items owner-approved ("proceed with all"). Workspace 664 → **705 tests**
-(`./scripts/status.sh --check` clean); clippy `-D warnings` clean; wasm32
-target check clean.
+Owner-approved historical round; its test/static-check observations do not
+establish current release qualification. Current test totals live in root `AGENTS.md`.
 
 - [x] **SUR-003 JSON v1 envelope** — `steganographer.cli/v1` envelope on all
       json/jsonl outputs; `--schema-version`; finalized exit codes 0–6
@@ -392,14 +357,9 @@ target check clean.
 - [x] **Golden vectors stable + CI immutability gate** — vector/corpus drift
       fails CI (`immutability` job); `test-windows` + `packaging-metadata`
       jobs added.
-- [x] **WebRTC measured live** (headless Chromium + fake camera, 720p,
-      60 ms sign interval): 8.3 fps, 84/84 verifications passing, sign
-      11.5 ms / verify 42.7 ms — verification ✓, latency ✓ (≪ 500 ms).
-      **Honest shortfall:** the 15 fps target is not met at 720p — the
-      encode pipeline (JPEG decode + sign + embed + re-encode ≈ 120 ms)
-      caps intake at ~8 fps; fixing it means optimizing the encode path
-      (e.g. zero-copy embed or encoder-side JPEG reuse), recorded here for
-      a future round.
+- [x] **Historical WebRTC synthetic-media measurements** — superseded as current
+      performance/verification evidence. Genuine peer traffic is retained in the
+      implementation; no universal throughput or physical-camera claim follows.
 - [x] **WebRTC verify fix** — data-channel frames were signed with
       per-session throwaway keys and verified against the session signer
       (100% verify failure); the pump now shares one EncodeSession and
@@ -408,6 +368,7 @@ target check clean.
 
 ### Remaining (owner-gated)
 
-- [ ] 15 fps 720p encode-pipeline optimization (measured 8.3 fps; see above).
-- [ ] Learned-watermarking CRF-28 window: retrain against real-codec
-      quantization (current: 0.00% BER at QP 24–28, 6.45% at QP 26–30).
+- [ ] Further encode-pipeline performance and real-device qualification require
+      fresh measurements on the delivered lossless-artifact path.
+- [ ] Learned-model real-codec robustness remains unqualified; see the current
+      evaluation limits in `docs/algorithms.md`, not old synthetic score claims.

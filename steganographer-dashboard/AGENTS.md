@@ -38,6 +38,8 @@ Axum dashboard with Video, Audio and Documentation tabs plus an OpenTimestamps p
 - Audio responses contain the actual signed `pcm_s16le`, sample rate/channels, frame index, LSB bit depth, public key and public `embedding_key` extraction metadata. Never verify or export unsigned microphone originals instead.
 - Canonical media excludes kernel-owned low-bit regions. Neither this signature nor generic payload signatures authenticate every file/container byte or arbitrary metadata field. Exact-artifact OTS commitments are a distinct scope.
 - Cache revisions are server-wide monotonic values, separate from connection-local sequence/frame indices. Results must match both artifact index and revision; a reconnect/config change cannot relabel stale verification as current. Use the artifact's bit depth, not latest config.
+- Encode reconnect increments target ownership: even a genuine verified global
+  cached reply is History until a new artifact in the current encode epoch.
 
 ## UI and Archive Contract
 
@@ -46,6 +48,11 @@ Axum dashboard with Video, Audio and Documentation tabs plus an OpenTimestamps p
 - Record stores exact returned PNG snapshots or signed PCM wrapped in WAV chunks in a bounded stored-ZIP with `manifest.json`. Include per-artifact public key, index, revision, bit depth and audio extraction metadata. No VP9/WebM re-encoding or original-microphone export as signed evidence.
 - Manifest metadata and session/metric exports are not independent trust evidence. The browser does not independently verify archives. Downloaded PNG/WAV entries require separate extraction/signature verification with an independently trusted public key; gaps and sampling remain relevant.
 - Entry/byte caps stop recording visibly before the next artifact, not silently drop it. Do not hardcode release validation counters in UI/docs.
+- Pending encode belongs to its submission, independently of decode-channel
+  reconnect. Decode disconnect clears its verdict, never frees encode ownership.
+- Archive identity/generation is captured at submission; later recording start
+  cannot adopt the earlier reply. Audio aggregates count each artifact once,
+  with repeated cached verification replies idempotent.
 - Markdown HTML enters the DOM only after sanitization. Missing/failed renderer or sanitizer falls back to text, including offline use. Never insert raw `marked` output.
 
 ## Configuration, Authentication and Transport
@@ -56,10 +63,21 @@ Axum dashboard with Video, Audio and Documentation tabs plus an OpenTimestamps p
 - Video preference precedence: URL query > saved choice > server default. Only `auto` falls back from WebRTC to WebSocket. Pinned WebRTC fails visibly, and fallback must not overwrite the saved choice. Audio remains WebSocket.
 - WebSocket message/image/audio bounds, encoder admission, bounded verification queues and WebRTC chunk/reply/admission limits are required. Overload reports failure instead of unbounded queueing. Verification waits use async notification/deadlines, not reactor-blocking sleeps.
 - Stop/failure/reconnect must clear signing state, timers, sockets, peers, chunk assemblies, tracks and publishers. Server peers close on failure/disconnect/idle or never-connected timeout, including failed signaling paths.
+- RTC encode requests are UTF-8 JSON (`kind`, `msg_id`, `sent_unix_ms`,
+  `jpeg_b64`); the historical field contains PNG bytes from the browser.
+  Binary framing is `STGO[4] | u64 id | u32 index | u32 count`, big-endian,
+  20-byte header, ≤16 KiB total/chunk. Reassembled JSON/base64 is ≤4 MiB.
+  Measure actual serialized bytes before any chunks; oversize error reports
+  actual/maximum and recommends smaller resolution or WebSocket selection.
+  WS accepts raw binary images; it has its own limits. Signed replies are PNG.
 
 ## OTS Boundary
 
-Stamp the latest actual signed-media digest or reject when none exists. Pending calendar proof is not verified/Bitcoin-confirmed. Verification requires proof plus expected digest and trusts the configured Esplora provider; do not claim independent full-node validation. Dedicated OTS docs own the full protocol and storage contract.
+Stamp latest delivered signed PNG bytes for video or raw signed PCM for audio,
+not the WAV export wrapper; reject absent media. Pending is not Bitcoin-confirmed.
+Verification trusts configured Esplora, not independent full-node validation.
+Shared `verify_with_upgrade` skips calendars for Bitcoin-attested proofs but
+still verifies headers, returning optional changed bytes for append-only storage.
 
 ## Validation
 

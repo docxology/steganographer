@@ -8,7 +8,7 @@ Uses the AppSink/AppSrc pattern to intercept media buffers, apply steganography,
 
 | Module | File | Description |
 | -------- | ------ | ------------- |
-| `lib` | `src/lib.rs` | GStreamer init (with macOS NSApplication setup), `launch()` pipeline helper |
+| `lib` | `src/lib.rs` | GStreamer-only init; actual-map plane guard and private file publication helpers; application owns Cocoa |
 | `video_filter` | `src/video_filter.rs` | Video AppSink→process→AppSrc pipeline with format negotiation |
 | `audio_filter` | `src/audio_filter.rs` | Audio AppSink→process→AppSrc pipeline with S16LE conversion |
 | `elements` | `src/elements.rs` | Native `stegovideo` in-place `BaseTransform` element (sequential + keyed LSB, stride-safe pixel-only placement, restricted pad templates, `StreamState` snapshot) with `register()` |
@@ -24,6 +24,23 @@ layout=interleaved`, so caps negotiation fails loudly for anything else.
 Embedding is stride-safe (packet bits land only in pixel/sample bytes, never
 in row-padding bytes), and property changes apply at frame/buffer granularity
 (`key-hex`/`bits-per-unit` changes reset the frame counter).
+
+## Convenience API migration
+
+File helpers live in `video_filter` and require
+`(input, output, stego, signer, signing_kernel, max_frames_or_buffers, overwrite)`.
+There are no old-signature shims. `overwrite: false` refuses existing output;
+true permits intended directory-entry replacement. Aliases always reject.
+Private sibling output publishes only after successful EOS; failures preserve
+the original destination. CLI true is limited to its own outer staging file.
+**The output directory must be trusted:** native filesink reopens the temporary
+pathname, not an already-open descriptor.
+
+Video writes exact RGB Matroska `.mkv`; audio gathers selected PCM within 64 MiB
+and writes `.wav`, signing once at index 0. Arbitrary lossy sinks are not exact
+evidence. Packed video validates offset and full stride × height against actual
+mapped backing before dependency plane access, including trailing padding.
+See [GStreamer Integration](../docs/gstreamer.md) for complete signatures.
 
 ## Dependencies
 

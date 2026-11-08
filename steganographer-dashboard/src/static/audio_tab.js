@@ -15,6 +15,7 @@ let audioSession = null;
 let audioContextClosing = Promise.resolve();
 let audioRecording = false;
 let audioArchive = null;
+let audioArchiveGeneration = 0;
 let audioRecordingFormat = null;
 let audioArchiveLastCaptureEnd = null;
 let signedAudioUrl = null;
@@ -199,7 +200,7 @@ function isCurrentAudioSession(session) {
 }
 
 function createAudioChannel() {
-    return { socket: null, reconnectTimer: null, openTimer: null, pollTimer: null, pendingPoll: null };
+    return { socket: null, generation: 0, reconnectTimer: null, openTimer: null, pollTimer: null, pendingPoll: null };
 }
 
 function setAudioOverlay(title, detail) {
@@ -273,6 +274,7 @@ function clearAudioSigning(session) {
 
 function closeAudioChannel(session, name) {
     const channel = session[name];
+    ++channel.generation;
     clearTimeout(channel.reconnectTimer);
     clearTimeout(channel.openTimer);
     clearInterval(channel.pollTimer);
@@ -421,7 +423,8 @@ function sendAudioChunkForSigning(session) {
     const pending = {
         ...capture, byteLength: pcm.byteLength, sampleRate: session.context.sampleRate,
         channels: 1, lsbBits: audioConfig.lsbBits, requestedAt: new Date().toISOString(),
-        archive: audioRecording ? audioArchive : null, timeout: null,
+        session, encodeGeneration: session.encode.generation,
+        archive: audioRecording ? audioArchive : null, archiveGeneration: audioArchiveGeneration, timeout: null,
     };
     session.pendingSign = pending;
     session.latestSigned = null;
@@ -537,12 +540,18 @@ function signedAudioMetadata(session, msg, pending, pcm) {
     };
 }
 
-function rejectSignedAudio(session, message) {
+function ownsAudioArchive(pending) {
+    return audioRecording && audioArchive && pending?.archive === audioArchive &&
+        pending.archiveGeneration === audioArchiveGeneration && isCurrentAudioSession(pending.session) &&
+        pending.encodeGeneration === pending.session.encode.generation;
+}
+
+function rejectSignedAudio(session, message, pending = session.pendingSign) {
     clearAudioSigning(session);
     session.latestSigned = null;
     clearSignedAudioPlayer();
     resetAudioVerification('Signed audio unavailable — no current verdict');
-    if (audioRecording) finishAudioRecording('Invalid signed reply; recording stopped and previous valid chunks exported.');
+    if (ownsAudioArchive(pending)) finishAudioRecording('Invalid signed reply; recording stopped and previous valid chunks exported.');
     showToast(message, 'error');
 }
 
@@ -552,7 +561,7 @@ function handleAudioEncodeMessage(session, socket, event) {
         msg = JSON.parse(event.data);
         if (!msg || typeof msg !== 'object' || Array.isArray(msg)) throw new Error('Invalid audio reply object');
     } catch (error) {
-        rejectSignedAudio(session, 'Invalid audio encode reply; recording stopped.');
+        rejectSignedAudio(session, 'Invalid audio encode reply; no artifact was recorded.');
         failAudioChannel(session, 'encode', socket);
         return;
     }
@@ -565,6 +574,7 @@ function handleAudioEncodeMessage(session, socket, event) {
     }
     if (msg.type !== 'audio_signed' || !session.pendingSign) return;
     const pending = session.pendingSign;
+    if (pending.session !== session || pending.encodeGeneration !== session.encode.generation) return;
     clearAudioSigning(session);
     try {
         if (!window.SignedArchive || typeof msg.pcm_s16le !== 'string' ||
@@ -590,13 +600,13 @@ function handleAudioEncodeMessage(session, socket, event) {
         const elapsed = (Date.now() - session.startedWallMs) / 1000;
         audioEl.valRate.textContent = Math.floor(audioStats.sampleFrames / Math.max(elapsed, 0.001)).toLocaleString();
         audioEl.valRate.title = 'Returned signed sample frames per second; not continuous microphone capture';
-        recordSignedAudioChunk(wav, metadata, pending.archive);
+        recordSignedAudioChunk(wav, metadata, pending);
         resetAudioVerification('Returned signed PCM received — awaiting server verification');
         pollAudioDecode(session);
         if (msg.ots) window.OtsPanel?.applyMetrics(msg.ots);
         window.OtsPanel?.refreshStatus();
     } catch (error) {
-        rejectSignedAudio(session, error.message || 'Signed audio reply could not be used; recording stopped.');
+        rejectSignedAudio(session, error.message || 'Signed audio reply could not be used; no artifact was recorded.', pending);
     }
 }
 
@@ -780,6 +790,7 @@ function toggleAudioRecording() {
     }
     try {
         audioArchive = window.SignedArchive.create('audio');
+        ++audioArchiveGeneration;
         audioRecordingFormat = { sampleRate: audioSession.context.sampleRate, channels: 1 };
         audioArchiveLastCaptureEnd = null;
         audioRecording = true;
@@ -792,8 +803,8 @@ function toggleAudioRecording() {
     }
 }
 
-function recordSignedAudioChunk(wav, metadata, requestedArchive) {
-    if (!audioRecording || !audioArchive || requestedArchive !== audioArchive) return;
+function recordSignedAudioChunk(wav, metadata, pending) {
+    if (!ownsAudioArchive(pending)) return;
     if (metadata.sample_rate !== audioRecordingFormat.sampleRate || metadata.channels !== audioRecordingFormat.channels) {
         finishAudioRecording('Audio format changed; recording stopped before any mixed-rate chunk.');
         showToast('Signed chunk format differs from the archive format; chunk not recorded.', 'error');

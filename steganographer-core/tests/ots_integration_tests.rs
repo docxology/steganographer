@@ -254,7 +254,22 @@ async fn real_genesis_fixture_upgrades_and_verifies_only_its_file() {
     let client = server.client();
     // Historical receipt rooted directly at SHA256(transaction), before blinding.
     let proof = detached(&digest, &pending(&server.url));
-    let result = client.verify(&proof, &digest).await.unwrap();
+    let (result, upgraded) = client.verify_with_upgrade(&proof, &digest).await.unwrap();
+    let upgraded = upgraded.expect("completed upgrade bytes must be available for publication");
+    assert!(upgraded
+        .windows(pending(&server.url).len())
+        .any(|branch| branch == pending(&server.url)));
+    assert!(!OTSClient::validate_proof(&upgraded, &digest).unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipt.ots");
+    client.save_proof_to(&proof, &path).await.unwrap();
+    let upgraded_path = client.save_proof_to(&upgraded, &path).await.unwrap();
+    assert_ne!(upgraded_path, path);
+    assert_eq!(OTSClient::load_proof(&path).await.unwrap(), proof);
+    assert_eq!(
+        OTSClient::load_proof(&upgraded_path).await.unwrap(),
+        upgraded
+    );
     assert!(result.verified);
     assert!(!result.pending);
     assert_eq!(result.timestamp, Some(1231006505));
@@ -284,6 +299,49 @@ async fn real_genesis_fixture_upgrades_and_verifies_only_its_file() {
         Err(OTSError::VerificationFailed(_))
     ));
     assert_eq!(server.requests.lock().unwrap().len(), requests);
+}
+#[tokio::test]
+async fn completed_proof_with_stale_pending_skips_calendar_but_rejects_invalid_commitment() {
+    let server = Server::new(|request, _| match request.path.as_str() {
+        "/block-height/0" => Reply::ok(GENESIS_HASH.as_bytes().to_vec()),
+        p if p == format!("/block/{GENESIS_HASH}/header") => {
+            Reply::ok(GENESIS_HEADER.as_bytes().to_vec())
+        }
+        _ => {
+            let mut reply = Reply::ok(b"calendar offline".to_vec());
+            reply.status = 503;
+            reply
+        }
+    });
+    let client = server.client();
+    // This is the append-only shape produced by upgrading a historical receipt.
+    let mut tree = vec![0xff];
+    tree.extend(pending(&server.url));
+    tree.extend(confirmed_tree());
+    let digest = OTSClient::compute_sha256_digest(&decode_hex(GENESIS_TRANSACTION).unwrap());
+    let proof = detached(&digest, &tree);
+    let (result, upgraded) = client.verify_with_upgrade(&proof, &digest).await.unwrap();
+    assert!(result.verified);
+    assert!(!result.pending);
+    assert_eq!(result.timestamp, Some(1231006505));
+    assert!(upgraded.is_none());
+    assert!(client.verify(&proof, &digest).await.unwrap().verified);
+    // A Bitcoin tag alone is not sufficient: the evaluated commitment must match.
+    let invalid_digest = [42; 32];
+    let invalid = detached(&invalid_digest, &tree);
+    assert!(matches!(
+        client.verify_with_upgrade(&invalid, &invalid_digest).await,
+        Err(OTSError::VerificationFailed(_))
+    ));
+    assert!(matches!(
+        client.verify(&invalid, &invalid_digest).await,
+        Err(OTSError::VerificationFailed(_))
+    ));
+    let paths = server.requests.lock().unwrap();
+    assert_eq!(paths.len(), 8);
+    assert!(paths.iter().all(|request| {
+        request.path == "/block-height/0" || request.path == format!("/block/{GENESIS_HASH}/header")
+    }));
 }
 #[tokio::test]
 async fn fresh_blinded_genesis_file_is_pending_not_a_historical_confirmation() {

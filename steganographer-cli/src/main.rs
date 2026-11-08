@@ -61,6 +61,12 @@ fn main() {
         .as_ref()
         .map(steganographer_core::config::LimitsConfig::to_decode_limits)
         .unwrap_or_default();
+    let configured_spread = effective_config
+        .video
+        .as_ref()
+        .and_then(|video| video.pipeline.as_ref())
+        .and_then(|pipeline| pipeline.payload.as_ref())
+        .map_or(1, |payload| payload.spread_count());
 
     let log_level = if cli.quiet {
         log::LevelFilter::Off
@@ -141,6 +147,7 @@ fn main() {
                 password_file,
             }) => {
                 let generic = payload_file.is_some() || payload_text.is_some();
+                let spread = spread.unwrap_or(if generic { 1 } else { configured_spread });
                 if !(1..=8).contains(&spread) {
                     usage_error("--spread must be 1 (disabled) or 2 through 8".to_string());
                 }
@@ -234,6 +241,7 @@ fn main() {
                     )
                 }
             }
+            Commands::Capacity(args) => cmd_packet::capacity(&args, &decode_limits),
 
             Commands::Decode(cli::DecodeArgs {
                 input,
@@ -307,7 +315,7 @@ fn main() {
                 };
                 // Same packet-not-found contract as decode, classified centrally.
                 let stego_type = stego_type.unwrap_or_else(|| {
-                    if input.to_ascii_lowercase().ends_with(".wav")
+                    if media_io::detect_format(&input, "lsb_video") == "wav"
                         || input_format.as_deref() == Some("wav")
                     {
                         "lsb_audio".to_string()
@@ -358,6 +366,7 @@ fn main() {
                 revoked_list,
                 frame_index,
             }) => {
+                let spread = spread.unwrap_or(configured_spread);
                 // Usage validation first: unknown values are a usage error
                 // (exit 1), not a silent no_signature / BLAKE3 fallback.
                 if let Err(e) = cmd_verify::validate_stego_type(&stego_type) {
@@ -915,6 +924,7 @@ fn activate_requested_machine_mode(arguments: &[std::ffi::OsString]) {
                         | "scan"
                         | "keygen"
                         | "info"
+                        | "capacity"
                         | "analyze"
                         | "derive"
                         | "revoke"
@@ -937,6 +947,7 @@ fn activate_output_mode(command: &Commands) {
         Commands::Scan { format, .. } => ("scan", format, true),
         Commands::Keygen { format, .. } => ("keygen", format, false),
         Commands::Info { format, .. } => ("info", format, false),
+        Commands::Capacity(args) => ("capacity", &args.format, false),
         Commands::Analyze { format, .. } => ("analyze", format, false),
         Commands::Derive(cli::DeriveArgs { format, .. }) => ("derive", format, false),
         Commands::Revoke { format, .. } => ("revoke", format, false),

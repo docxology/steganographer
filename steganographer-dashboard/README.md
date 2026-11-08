@@ -1,77 +1,74 @@
 # steganographer-dashboard
 
-![CI](https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-60-brightgreen)
-Web-based live dashboard for real-time round-trip steganography verification with three tabs: **Video**, **Audio**, and **Documentation**.
+Video, Audio and Documentation tabs with a separate OpenTimestamps panel.
+The live signing contract is **Ed25519 + BLAKE3 + LSB**, not Ethereum/MetaMask,
+visual signed overlays, live encryption or ECC. Opacity affects preview only.
 
-## Features
-
-- **Three-tab interface**: Video | Audio | Documentation (plus an OpenTimestamps panel served from `/ots.js`) — switch between media and docs
-- **Real signature verification**: decode handlers verify the extracted signature against the pre-embed bytes using the session-wide keypair's public half (`DashboardState.signer`), so a frame signed by the encode side verifies on the decode side
-- **WebSocket security gates**: cross-origin upgrades are rejected with 403 (loopback/same-host origins only); when `--auth-token` is set, upgrades require `?token=<token>` or a `Sec-WebSocket-Protocol: bearer-<token>` subprotocol (401 otherwise); decoded messages capped at 4 MiB, WS frames at 1 MiB
-- **Dual-panel encode/decode**: Left panel shows raw feed, right panel shows decoded payload + verification
-- **Dynamic LSB configuration**: Change LSB bits (1–4) live via slider — encode and decode stay in sync
-- **Signature preview**: First 16 bytes of the Ed25519/secp256k1 signature displayed in decoded payload
-- **Audio steganography**: Microphone capture → LSB embed/extract → real-time waveform + spectrum visualization
-- **Audio recording**: Record and export WAV files from microphone capture
-- **Documentation viewer**: Browse and read all 19 embedded project markdown docs, rendered client-side with marked.js
-- **Live configuration**: Opacity, LSB bits, overlay text, sign rate, QR scale, resolution — all hot-configurable
-- **Signing backend selector**: Ed25519 or Ethereum (secp256k1) with MetaMask integration
-- **Premium dark theme**: Gray/black/red glassmorphism, smooth animations, responsive layout
-- **Metrics display**: FPS, signing latency, verification success/fail rates, capacity utilization
-
-## Usage
+## Run
 
 ```bash
-# Via CLI
 cargo run -p steganographer-cli -- dashboard --port 8080 --backend ed25519
-
-# Via run.sh (menu option 1)
-./run.sh
 ```
 
-Then open `http://localhost:8080` in your browser.
+Open `http://localhost:8080`. Camera/microphone permissions and secure browser
+context still apply. Default binding is loopback. Deliberate network exposure
+needs token/TLS/origin policy; CORS is not authentication. Configured bearer
+auth protects mutations and `/api/webrtc/config`; public GET routes are not
+blanket-protected. WebSocket upgrades enforce Origin and configured tokens.
 
-## Architecture
+## Delivered artifacts and ownership
 
-```text
-Browser (Webcam + Microphone via Web APIs)
-    ↕ WebSocket (video: JPEG frames / audio: PCM chunks)
-Axum Server (lib.rs → ws_handler.rs)
-    ↕ Shared State (DashboardState, LiveConfig)
-steganographer-core (LsbVideo, LsbAudio, Signer, StegoMetrics)
-```
+The server signs kernel-canonical media and verifies extraction from the actual
+delivered lossless PNG or signed S16LE PCM, not pre-embed originals. Its advertised
+public key is that same runtime signer, not an independently established identity.
+Per-artifact LSB bits, index and global cache revision drive verification.
+The latest-completed server cache is global, not browser-private.
 
-## API
+The browser owns one outstanding encode request across capture/encode/transport
+generations. A decode disconnect clears its verdict, not encode request ownership;
+encode reconnect invalidates the current target. Old cached replies remain History
+until an artifact from the current encode epoch is accepted. Audio aggregates
+count each accepted artifact/verdict once, not once per repeated cache reply.
 
-| Endpoint | Description |
-| ---------- | ------------- |
-| `GET /` | Dashboard HTML page (Video + Audio + Docs tabs) |
-| `WS /ws/encode` | Video encode stream (JPEG → LSB embed + sign) |
-| `WS /ws/decode` | Video decode stream (extract → verify → signature preview) |
-| `WS /ws/audio/encode` | Audio encode stream (PCM → LSB embed + sign) |
-| `WS /ws/audio/decode` | Audio decode stream (extract → verify → signature preview) |
-| `GET /api/metrics` | JSON metrics snapshot |
-| `GET/POST /api/config` | Get/update live config |
-| `GET /api/docs` | List available documentation files |
-| `GET /api/docs/{name}` | Return markdown content of a doc file |
-| `GET /api/session` | Session stats (uptime, config, backend, identity) |
-| `GET /api/version` | Version info |
-| `POST /api/metrics/reset` | Reset metrics counters |
-| `GET /ots/status` | OpenTimestamps configuration status |
-| `POST /ots/stamp` | Stamp a payload's Merkle root |
-| `POST /ots/verify` | Verify an OTS proof |
+Record exports a bounded stored-ZIP of sampled signed PNGs or returned signed PCM
+wrapped in WAV chunks, with extraction metadata in `manifest.json`. Archive
+ownership is captured at submission: starting/stopping a recording cannot adopt
+an earlier request's reply. These are not continuous media recordings. Original
+microphone input and lossy H.264 preview are not signed evidence. UI labels,
+metrics and manifests are server-reported, not browser cryptographic verification.
+Verify exported entries independently using a separately trusted public key.
 
-## Tests
+## Transport
 
-52 tests in `tests/dashboard_tests.rs` (plus 8 doc-tests, 60 total) covering LiveConfig serialization, DashboardState construction, router creation, HTTP API endpoints (session, config GET/POST, docs, metrics), and static asset serving.
+WebSocket video accepts raw binary encoded images (the browser sends PNG), and
+returns JSON containing base64 signed PNG. Audio uses WebSocket PCM requests.
+Optional WebRTC negotiates through `/api/webrtc/offer`; exact artifacts travel
+on its data channel as UTF-8 JSON, with `kind: "encode"`, `msg_id`,
+`sent_unix_ms` and `jpeg_b64` (historical name; browser bytes are PNG), or
+`kind: "decode_poll"`. It is not a raw binary JPEG protocol.
 
-## Dependencies
+Binary RTC chunks use a 20-byte big-endian header:
+`STGO[4] | msg_id:u64 | chunk_index:u32 | chunk_count:u32 | payload`.
+Whole chunks are at most 16 KiB; the **entire serialized JSON/base64** request
+must fit 4,194,304 bytes. The browser checks before any chunk is sent, reports
+actual/maximum bytes and advises smaller resolution or WebSocket selection.
+WebSocket has separate raw-image/message/frame limits, not unlimited capacity.
+Small server replies may be text JSON; large replies use STGO chunks. Assembly,
+work queues, replies and peer lifetimes are bounded. Optional RTP H.264 is preview.
+Only auto transport falls back; pinned WebRTC fails visibly. Fallback does not
+replace the saved preference. Audio remains WebSocket.
 
-- `steganographer-core` — metrics, signing backends, LSB modules
-- `axum` 0.8 (with `ws` feature) — HTTP/WebSocket server
-- `tokio` — async runtime
-- `tower-http` — CORS layer
-- `serde_json` — JSON serialization
-- `image` — JPEG ↔ RGB frame conversion
-- `base64` — binary frame encoding
+## HTTP and OTS
+
+- `/api/config`: validated snake_case full-object GET/POST; hydrate before updates.
+- `/api/session`, `/api/version`, `/api/metrics`, `/api/metrics/reset`: runtime information.
+- `/api/docs`, `/api/docs/{name}`: Markdown, rendered only after sanitization;
+  missing/failed renderer or sanitizer falls back to text.
+- `/ots/status`, `/ots/stamp`, `/ots/verify`: real detached-proof operations.
+  Video commits delivered PNG bytes; audio commits raw signed PCM, **not** the
+  WAV export wrapper. Pending is not Bitcoin-confirmed; verification trusts the
+  configured Esplora provider, not independent full-node validation.
+
+See [API Reference](../docs/api-reference.md), [Architecture](../docs/architecture.md)
+and [OTS Integration](../docs/ots-integration.md). Test totals and observed host
+scope live in root [AGENTS.md](../AGENTS.md), not static badges here.

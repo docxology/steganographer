@@ -237,6 +237,12 @@ Supported controls change LSB bit depth, capture resolution and sampling cadence
 
 Video uses URL `transport` query, then saved preference, then server default. `auto` can fall back from WebRTC to WebSocket without saving the fallback as your preference. Pinned WebRTC fails visibly when unavailable. Audio uses WebSocket. `/api/webrtc/config` requires bearer auth when configured, as do guarded mutation routes; public read routes are not blanket-authenticated.
 
+RTC sends JSON/base64 (`jpeg_b64`, a historical name; browser content is PNG)
+inside STGO 20-byte binary chunk headers, not raw binary JPEG images.
+Chunks are ≤16 KiB; full serialized JSON/base64 must fit 4 MiB. Oversize
+errors report actual/maximum bytes and suggest smaller resolution or WebSocket;
+that transport has its own limits. Signed replies contain lossless PNG.
+
 Default bind is loopback. Tokenless browser mutations reject foreign Origin, and WebSocket upgrades enforce Origin/token gates. Origin/CORS are not a replacement for authentication or TLS on an exposed deployment.
 
 ### Are there keyboard shortcuts?
@@ -266,6 +272,12 @@ The browser attempts camera startup; permissions, secure-context rules and devic
 ### Can I export session data?
 
 The footer Export action (or `E`) downloads session/config/metric information. Metrics and verification labels are server-reported. This report is not independent verification of downloaded signed artifacts.
+
+Decode disconnect clears the verdict without releasing an outstanding encode.
+After encode reconnect, previous global cached results stay historical until
+the new epoch has a target. Archive ownership is bound at submission, not reply
+arrival; a recording started later cannot adopt the earlier request. Repeated
+cached audio verification replies do not inflate processed/verified counters.
 
 ### Does the dashboard support audio steganography?
 

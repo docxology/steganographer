@@ -21,10 +21,11 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
   (including PKT-009 `max_nesting_depth` = 3 and `max_aggregate_nested_bytes`
   = 64 MiB; unknown non-critical fields are preserved, unknown critical
   fields reject)
-- `GenericPacket::decode_nested` — bounded parent-id chain decoder
-  (PKT-009): expands nested packets up to the depth/aggregate limits with
-  cycle detection, returning a `NestedLevel` chain (outermost first) and the
-  innermost logical payload
+- `GenericPacket::decode_nested` — opt-in bounded parent-id chain decoder.
+  Merely STG3-prefixed payloads are opaque until an identifiable parent field
+  opts in. Then child framing/version/CRC, matching parent, complete payload
+  span, depth/aggregate encoded bytes (root included) and cycles are strict.
+  Returns outermost-first `NestedLevel` chain and terminal logical payload.
 - `PacketCodec` — byte codec contract implemented by `GenericPacketCodec` and
   legacy `SignaturePayloadCodec`
 
@@ -73,6 +74,9 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
   `[salt 16B][memory u32][iterations u32][lanes u8][output u16]` layout)
   ahead of the AEAD descriptor it feeds; a KDF descriptor without the
   password fails closed
+- Compression admits at most 64 MiB logical input and is recorded only on
+  shrinkage. Preflight stage ordering/versions/flags before credentials, KDF or
+  body allocation; reversal enforces declared logical length and output limits.
 - `is_encrypted`, `TransformError`, `DEFAULT_ECC_CHUNK_LEN`, `MAX_ECC_PARITY`
 
 ### audio.rs
@@ -106,6 +110,8 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
 
 - `is_known_compromised_key`, `check_known_revocations`, `RevokedKey` — immutable documented-compromise policy for managed entry points
 - `RevocationList` — normalized, sorted/deduplicated JSON public-key registry; allocation-free lookup includes immutable policy even when explicit entries are empty
+- CLI registry mutation uses a stable companion lock inode; it is orchestration,
+  not a core crypto authorization guarantee.
 
 ### signer_backend.rs
 
@@ -185,6 +191,23 @@ container submodule), `mdct_audio`, `ots_client`, `ots_config`, `ots_handler`,
 - `detect_text_stego(data)` — decode text and collect Unicode steganography findings
 - `scan_bytes(data)` — bounded byte-level forensic scan (inline magic → text
   → ZIP/OOXML container analysis)
+- `incomplete_reasons` includes detector byte/finding/decode-attempt cutoffs,
+  independent of supplied input completeness; detection stays latched at caps.
+- Statistics expose per-method availability, not clean negatives on degeneracy.
+
+### adaptive.rs
+
+- Recompute masked variance without alpha/padding, retaining only the framing-sized
+  best prefix in a heap. Preserve descending variance and original-order ties.
+  O(k) retained candidates, not a frame-sized sort or a throughput guarantee.
+
+### OpenTimestamps verification lifecycle
+
+- `verify_with_upgrade(proof, expected_digest)` returns verdict and optional
+  changed bytes; completed Bitcoin proofs skip calendars but still verify through
+  the configured trusted explorer. `verify` returns only the verdict.
+- Upgrades preserve branches; consumers publish append-only, never replace
+  original receipts. Exact-file and canonical-media commitments differ.
 
 ### forensics/ooxml.rs
 
