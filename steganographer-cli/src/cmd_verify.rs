@@ -251,41 +251,6 @@ pub(crate) fn authenticate_written_output(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn run(
-    config_path: &str,
-    input: &str,
-    public_key_hex: Option<&str>,
-    stego_type: &str,
-    format: &str,
-) -> anyhow::Result<String> {
-    let opts = VerifyOptions {
-        bits: VerifyBits::Auto,
-        frame_index: 0,
-        decrypt: false,
-        decryption_key: None,
-        decryption_key_file: None,
-        embedding_key_file: None,
-        ecc: false,
-        ecc_parity: 4,
-        spread: 1,
-        hash_algorithm: None,
-        input_format: None,
-        raw_width: None,
-        raw_height: None,
-        revoked_list: None,
-    };
-    run_with_key(
-        config_path,
-        input,
-        public_key_hex,
-        stego_type,
-        format,
-        None,
-        &opts,
-    )
-}
-
 /// Run verification with full options.
 pub fn run_with_key(
     config_path: &str,

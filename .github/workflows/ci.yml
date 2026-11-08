@@ -11,12 +11,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   msrv:
     name: Minimum supported Rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust 1.91
         uses: dtolnay/rust-toolchain@1.91.0  # held: explicit workspace MSRV; advance only with the documented compiler policy
@@ -43,6 +48,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
@@ -114,6 +121,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
@@ -131,6 +140,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install cargo-deny
         run: cargo install cargo-deny
@@ -141,9 +152,13 @@ jobs:
   secret-scan:
     name: Secret Scanning (gitleaks)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0  # Full history for scan
 
       - name: Run gitleaks
@@ -160,6 +175,8 @@ jobs:
     if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly  # held: the ref carries the toolchain, so nightly is tracked deliberately; the pin form is @v1 with `with: toolchain: nightly`; revisit 2027-02-01
@@ -223,6 +240,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
@@ -250,6 +269,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
@@ -282,6 +303,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
@@ -328,6 +351,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

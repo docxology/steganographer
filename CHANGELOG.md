@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- XOR shard reconstruction validates every index and then XORs directly; the
+  redundant canonical sort added an allocation and ordering work without
+  affecting the result (XOR is commutative).
+- CI runs with top-level `contents: read`, `persist-credentials: false` on every
+  checkout, and `pull-requests: write` only on the gitleaks job.
+
+### Removed
+
+- Unused private CLI wrappers `encode_multi_frame_file` and `cmd_verify::run`,
+  which duplicated signing/orchestration logic and emitted an older unwrapped
+  result shape.
+
+### Documentation
+
+- Closed superseded roadmap entries for SUR-003, DOC-003/DOC-004 and the
+  golden-vector freeze; the later completion notes are the current record.
+
 ## 0.9.0 — 2026-11-08
 
 ### Added

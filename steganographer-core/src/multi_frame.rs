@@ -149,11 +149,11 @@ pub fn reconstruct_payload_bytes(shards: &[GenericPayloadShard]) -> anyhow::Resu
         seen[idx] = true;
     }
 
-    let mut sorted: Vec<&GenericPayloadShard> = shards.iter().collect();
-    sorted.sort_by_key(|shard| shard.shard_index);
-
+    // Every index is validated unique and in range above, and XOR is
+    // commutative, so the caller's order cannot change the result. Sorting
+    // would only add an allocation and O(n log n) work to a group of ≤ 8.
     let mut result = vec![0u8; expected_len];
-    for shard in sorted {
+    for shard in shards {
         for (r, s) in result.iter_mut().zip(shard.data.iter()) {
             *r ^= s;
         }
@@ -288,13 +288,10 @@ pub fn reconstruct(shards: &[SignatureShard]) -> anyhow::Result<SignaturePayload
         seen[idx] = true;
     }
 
-    // XOR is commutative, but XOR in canonical shard order so the result is
-    // deterministic regardless of the caller's ordering.
-    let mut sorted: Vec<&SignatureShard> = shards.iter().collect();
-    sorted.sort_by_key(|shard| shard.shard_index);
-
+    // Indices are validated unique and in range above, so the set is a complete
+    // cover; XOR is commutative and the caller's order cannot change the result.
     let mut result = [0u8; SignaturePayload::SERIALIZED_SIZE];
-    for shard in sorted {
+    for shard in shards {
         for (acc, &byte) in result.iter_mut().zip(shard.data.iter()) {
             *acc ^= byte;
         }
