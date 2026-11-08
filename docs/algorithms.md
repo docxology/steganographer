@@ -340,6 +340,18 @@ Timing, distortion and BER depend on carrier dimensions, configuration and envir
 
 ---
 
+## Bounded Adaptive LSB
+
+`AdaptiveLsbVideo` recomputes local variance with embedding-owned low bits
+masked, excluding alpha and padding. It scans all eligible candidates but keeps
+only the framing-sized best prefix in a bounded heap: highest variance first,
+ties in original row/pixel/channel order. Embedding/extraction preserve the
+previous stable-sort placement without a frame-sized candidate vector.
+For `k = ceil(TOTAL_BITS / bits)` retained slots, selection is O(n log k)
+time and O(k) auxiliary memory, not constant time or a universal throughput gain.
+Threshold/capacity failure remains explicit; adaptivity does not prove stealth.
+
+
 ## Future Algorithms
 
 ### Video Seal Integration (Planned)
@@ -359,6 +371,16 @@ Sequential LSB replacement is susceptible to chi-squared, RS and other steganaly
 The RS estimator has synthetic replacement controls; chi-squared and related outputs depend on sufficient usable input and model assumptions. Neither these controls nor the detector corpus establishes accuracy or probabilities on natural images. Unavailable/degenerate statistical results are **not clean results**.
 
 Structural forensics is separate: bounded ZIP/OOXML analysis checks local/central structure, CRC/deflate and XML-related evidence; PDF analysis is bounded lexical inspection, not a full PDF interpreter; Unicode detection is heuristic and encoding-sensitive. Reports distinguish evidence, `detected`, completeness and resource/parse limitations. A latched positive remains positive when evidence is capped; an incomplete negative leaves uncertainty.
+
+Budgets are detector-specific: top-level statistics/entropy examine at most
+64 MiB, inline magic 16 MiB with 256 retained locations, and text 1 MiB.
+ZIP inflation/decode attempts/input and PDF objects/strings/streams also have
+independent ceilings. Crossing a byte, parse, attempt or finding cap is reported
+in `incomplete_reasons`, even if the CLI read the whole file. Raising CLI
+`--max-bytes` does not remove those detector ceilings. `analyze` exposes
+per-method `available`; if no method is usable it emits partial JSON and exits
+5. A positive structural finding remains positive with capped coverage; scan
+exit 4 takes precedence over an incomplete negative's exit 5.
 
 ### Overlay Modules
 

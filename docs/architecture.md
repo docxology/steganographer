@@ -59,6 +59,12 @@ flowchart LR
 
 Rows are packed for signing: row padding is not image content. Native exact file outputs are RGB Matroska (`.mkv`) and PCM WAV (`.wav`). File audio is gathered within its bounded whole-file budget and signed at index 0; explicit `max_buffers` limits the selection. Downstream errors and EOS drain/finalization are part of delivery, not just a successful appsrc push. Arbitrary downstream lossy codecs or screen capture may destroy embedded data.
 
+Convenience file APIs require explicit trailing `overwrite: bool` with no old
+overload. They reject aliases and publish a private sibling after EOS. Filesink
+reopens that pathname, requiring a trusted output directory. Video plane
+access checks actual mapped memory, offset and full stride extent before
+dependency slicing, not just metadata geometry.
+
 ### Dashboard signed-media pipeline
 
 1. Accept bounded image/PCM input and snapshot the validated configuration for that operation.
@@ -74,6 +80,12 @@ The public identity returned by the API is the public key of this same signer, s
 The browser displays **server-reported** verification and matches it to the current artifact's index/revision. It does not independently verify the exported archive. Camera/request and transport generations discard stale asynchronous work; the client allows one outstanding signing request. Server admission, verification queues, image/audio limits and WebRTC chunk/reply budgets bound work. Overload fails visibly rather than creating an unbounded queue.
 
 Recordings are bounded stored-ZIP archives of sampled signed PNG snapshots or returned PCM WAV chunks plus an extraction manifest. The manifest records public key, indices, bit depth and, for audio, the public extraction key. These are not continuous VP9/WebM recordings or uninterrupted microphone capture; sampling, backpressure and capture gaps remain relevant. Reaching an archive cap stops recording visibly. Verify the downloaded PNG/WAV entries separately with a trusted public key and their manifest parameters; successful browser counters alone do not prove their contents.
+
+Decode disconnect cannot release ownership of a pending encode. Encode reconnect
+invalidates the current target; genuine global cached results from prior encode
+epochs remain History. Archives capture request ownership at submission, so a
+recording started later cannot adopt that reply. Audio metrics count an artifact
+once despite repeated verification cache replies.
 
 Preview opacity affects display only, not the signed media. Signed visual overlays, QR provenance, MetaMask and Ethereum dashboard signing are unavailable, not alternate working modes. Core/library Ethereum, ML-DSA and hybrid signing support does not imply those backends work in the dashboard or fixed Ed25519 legacy media format.
 
@@ -96,13 +108,21 @@ Dashboard shutdown/reconnect clears pending requests, timers, sockets, RTC peers
 - Tokenless browser mutations reject a foreign Origin. WebSocket upgrades enforce their Origin gate and, when configured, a token via the supported query/subprotocol mechanism. CORS is not an authentication boundary; absent-Origin nonbrowser requests are not proof of local identity.
 - HTTP config uses the existing **snake_case** schema. UI hydration precedes serialized full-object updates. Unsupported signer/hash/kernel/encryption/ECC settings reject.
 - Video transport preference is URL query, then saved choice, then server default. Only `auto` may fall back from WebRTC to WebSocket; pinned WebRTC fails visibly. A transient fallback is not saved as the user's preference. Audio uses WebSocket.
+- WS accepts raw binary images. RTC encodes JSON/base64 (`jpeg_b64`, historical
+  name; browser sends PNG) with a big-endian STGO 20-byte chunk header.
+  Whole chunks are ≤16 KiB; complete serialized JSON is ≤4 MiB. Pre-send
+  measurement gives an actionable smaller-resolution/WebSocket error.
 - The Docs tab inserts rendered Markdown only after sanitization; absent/failed renderer or sanitizer falls back to text. Documentation content is not trusted executable HTML.
 
 ## Analysis and Trust Boundaries
 
 RS/chi-squared outputs are statistical diagnostics, not calibrated natural-image probabilities. Unavailable statistics must remain unavailable rather than look like a clean result. ZIP/OOXML, PDF and Unicode analysis report findings, `detected`, completeness and bounded-resource reasons separately. A positive finding remains positive if display evidence is capped; an incomplete negative is not a clean bill of health.
 
-OpenTimestamps commits the exact file SHA-256, unlike kernel-canonical media signatures. Pending calendar proofs are not Bitcoin-confirmed. Verification relies on an explicitly trusted Esplora provider, not independent full-node validation; see the dedicated integration guide.
+Dedicated OTS commands commit exact-file SHA-256; legacy optional hooks hash
+kernel-canonical media. Dashboard commits delivered PNG bytes or raw signed PCM,
+not the WAV wrapper. Pending proofs are not confirmed. Shared verify/upgrade
+skips calendars for Bitcoin-attested proofs but still trusts configured Esplora
+for canonical-chain verification, not independent full-node validation.
 
 ## Error Handling
 

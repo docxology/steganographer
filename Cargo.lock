@@ -4251,10 +4251,12 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "steganographer-cli"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "cap-fs-ext",
+ "cap-std",
  "clap",
  "clap_complete",
  "clap_mangen",
@@ -4264,6 +4266,7 @@ dependencies = [
  "gstreamer",
  "hound",
  "image",
+ "libc",
  "log",
  "rand 0.8.6",
  "serde",
@@ -4279,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "steganographer-core"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4316,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "steganographer-dashboard"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4343,7 +4346,7 @@ dependencies = [
 
 [[package]]
 name = "steganographer-gst"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "gstreamer",
@@ -4353,13 +4356,14 @@ dependencies = [
  "gstreamer-video",
  "log",
  "parking_lot",
+ "same-file",
  "steganographer-core",
  "tempfile",
 ]
 
 [[package]]
 name = "steganographer-wasm"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",

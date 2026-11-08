@@ -3,8 +3,11 @@
 The optional `ots` feature implements standard OpenTimestamps v1 detached binary
 `.ots` proofs and Bitcoin calendar submission/upgrade. It does not implement
 Ethereum attestations, a custom JSON timestamp protocol, or automatic anchoring
-of every signed segment. The CLI commits to **SHA256 of the exact input file**,
-not a BLAKE3 Merkle root. A proof is stored separately from the carrier media.
+of every signed segment. Dedicated CLI `ots stamp`/`ots verify` commit to
+**SHA256 of the exact input file** (`digest_scheme: "sha256-file"`), not a
+BLAKE3 Merkle root. The optional legacy encode/verify hook instead hashes
+kernel-canonical media with SHA-256; it is not an exact-file commitment.
+A proof is stored separately from the carrier media.
 
 A Bitcoin timestamp establishes that the committed bytes existed **no later
 than the attesting block's timestamp** under the verification trust model below.
@@ -76,9 +79,11 @@ steganographer ots verify --input signed.png --format json
 
 `stamp` streams SHA256 over the input file and saves the receipt under
 `proof_dir/<SHA256(file)-hex>.ots`. `verify` recomputes the same digest, defaults
-to that same digest-based path, upgrades the proof, and verifies its attestations.
+to that same digest-based path and runs the shared verify/upgrade lifecycle.
 Use `--proof path/to/receipt.ots` to select a different proof explicitly. It is
-not necessary for the input filename to match the proof filename.
+not necessary for the input filename to match the proof filename. Verify's
+`proof_file` field identifies that selected input receipt, not a newly saved
+upgrade; changed upgrade bytes are published append-only alongside it.
 
 | Stamp option | Behavior |
 | --- | --- |
@@ -96,7 +101,7 @@ not necessary for the input filename to match the proof filename.
 
 Without `--force`, a cached digest-path proof is parsed and checked for digest
 binding, then reused without submission. Cache reuse is not Bitcoin verification.
-Fresh stamp output has `verified: false`; the JSON success envelope's `data`
+Fresh stamp output has `verified: false`; the JSON success envelope's `result`
 contains `digest_scheme: "sha256-file"`, `digest_hex`, `proof_path`, `pending`,
 and `status`. Verify output includes `verified`, `pending`, `timestamp` (null
 while pending), and trust-boundary details. A successful command can report
@@ -140,11 +145,16 @@ an attempt atomically before I/O: concurrent normal submissions cannot both
 pass admission, and failed attempts consume the interval. Force also records an
 attempt. This limit is per client instance, not a persistent cross-process quota.
 
-`upgrade` returns detached proof bytes bound to the supplied expected digest.
-`verify` can upgrade pending proofs and verify headers; `verify_attestations`
-checks an already upgraded proof without another calendar request.
-`validate_proof` checks local format/digest binding only, not Bitcoin confirmation.
-Callers choose when to save returned bytes through `save_proof` or `save_proof_to`.
+`verify_with_upgrade(proof, expected_digest)` returns
+`(OTSVResult, Option<Vec<u8>>)`: `None` means unchanged proof bytes. Proofs with
+Bitcoin attestations skip calendar upgrades even if old pending branches remain,
+but still require explorer/header verification. Pending-only proofs may upgrade
+through the configured calendar. Merging preserves original branches.
+`verify` delegates to that lifecycle and returns only its verdict;
+`verify_attestations` checks without calendar contact. `upgrade` is the explicit
+upgrade-only API. `validate_proof` checks local format/digest binding only.
+Callers may save changed bytes through `save_proof` / `save_proof_to`, preserving
+earlier receipts instead of replacing them.
 
 ## Dashboard
 
@@ -154,7 +164,7 @@ protocol:
 | Route | Behavior |
 | --- | --- |
 | `GET /ots/status` | Configuration/readiness, current delivered-media digest, and matching operation outcome |
-| `POST /ots/stamp` | Empty body selects SHA256 of the latest delivered signed artifact; no media is a conflict |
+| `POST /ots/stamp` | Empty body selects SHA256 of latest delivered signed PNG bytes (video) or raw signed S16LE PCM bytes (audio); no media is a conflict |
 | `POST /ots/verify` | Raw binary proof body, at most 64 KiB; requires `X-Expected-Digest` with the expected 64-character SHA256 hex digest |
 
 Both POST routes honor the dashboard's configured mutation authentication.
@@ -163,6 +173,11 @@ errors, not manufactured timestamps. The OTS panel distinguishes pending,
 verified, and operational failures. Signing/rendering is separate from these
 explicit timestamp actions; no claim of automatic per-segment confirmation is
 made.
+
+The audio commitment excludes the WAV header added for archive export. To
+independently match it, hash the exact returned signed PCM, not the WAV file;
+dedicated CLI `ots stamp exported.wav` instead commits that entire WAV file.
+Video commits delivered PNG bytes, not decoded RGB or an H.264 preview.
 
 ## Proof persistence and resource limits
 

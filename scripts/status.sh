@@ -69,8 +69,8 @@ if [ "$CHECK" = "1" ] && [ "$tcount" != "$canon" ]; then
     fail=1
 fi
 
-if [ "$CHECK" = "1" ] && [ "$subs" != "15" ]; then
-    printf 'NOTE: subcommand count is %s — docs that say "All 15 commands" may be stale.\n' "$subs"
+if [ "$CHECK" = "1" ] && [ "$subs" != "16" ]; then
+    printf 'NOTE: subcommand count is %s — docs that say "All 16 commands" may be stale.\n' "$subs"
 fi
 
 exit $fail

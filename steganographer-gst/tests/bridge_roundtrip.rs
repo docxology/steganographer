@@ -112,6 +112,7 @@ fn video_file_is_literal_lossless_finalized_and_output_verifiable() {
         Some(&signer),
         Some(SigningKernel::Lsb { bits: 1 }),
         None,
+        false,
     )
     .unwrap();
     let original = read_file(&input, "matroskademux");
@@ -180,6 +181,7 @@ fn audio_file_is_literal_exact_pcm_and_signature_survives_wav_finalization() {
         Some(&signer),
         Some(SigningKernel::Lsb { bits: 1 }),
         None,
+        false,
     )
     .unwrap();
     let flatten = |path: &Path| -> Vec<u8> {
@@ -340,7 +342,8 @@ fn missing_binding_invalid_source_and_incompatible_file_formats_are_errors() {
         Box::new(LsbVideo::new(1)),
         None,
         None,
-        None
+        None,
+        false
     )
     .unwrap_err()
     .to_string()
@@ -351,7 +354,8 @@ fn missing_binding_invalid_source_and_incompatible_file_formats_are_errors() {
         &mut LsbAudio::new(1, [1; 32]),
         None,
         None,
-        None
+        None,
+        false
     )
     .unwrap_err()
     .to_string()
@@ -386,6 +390,7 @@ fn max_frame_limit_still_drains_and_finalizes_muxed_output() {
         None,
         None,
         Some(3),
+        false,
     )
     .unwrap();
     assert_eq!(read_file(&output, "matroskademux").len(), 3);
@@ -438,6 +443,7 @@ fn audio_file_explicit_buffer_limit_bounds_selection_not_logical_signature_chunk
         Some(&signer),
         Some(SigningKernel::Lsb { bits: 1 }),
         Some(1),
+        false,
     )
     .unwrap();
     let samples = read_file(&output, "wavparse");
@@ -522,4 +528,158 @@ fn headless_worker_can_initialize_repeat_and_recover_after_pipeline_errors() {
             }
         }
     }).join().unwrap();
+}
+
+fn process_fixture(
+    audio: bool,
+    input: &Path,
+    output: &Path,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    let signer = Signer::from_bytes(&[0x59; 32]);
+    if audio {
+        video_filter::process_audio_file(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &mut LsbAudio::new(1, [0x32; 32]),
+            Some(&signer),
+            Some(SigningKernel::Lsb { bits: 1 }),
+            None,
+            overwrite,
+        )
+    } else {
+        video_filter::process_video_file(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            Box::new(LsbVideo::new(1)),
+            Some(&signer),
+            Some(SigningKernel::Lsb { bits: 1 }),
+            None,
+            overwrite,
+        )
+    }
+}
+
+fn fixture_media(audio: bool, input: &Path, tiny: bool) {
+    let fragment = match (audio, tiny) {
+        (true, false) => "audiotestsrc num-buffers=2 samplesperbuffer=2048 ! audio/x-raw,format=S16LE,layout=interleaved,channels=1,rate=44100 ! wavenc",
+        (true, true) => "audiotestsrc num-buffers=1 samplesperbuffer=8 ! audio/x-raw,format=S16LE,layout=interleaved,channels=1,rate=44100 ! wavenc",
+        (false, false) => "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=64,height=16,framerate=30/1 ! matroskamux",
+        (false, true) => "videotestsrc num-buffers=1 ! video/x-raw,format=RGB,width=2,height=2,framerate=30/1 ! matroskamux",
+    };
+    finite_file(fragment, input);
+}
+
+#[test]
+fn file_helpers_preserve_sentinels_on_source_and_embedding_failure() {
+    init();
+    for audio in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let extension = if audio { "wav" } else { "mkv" };
+        let input = dir.path().join(format!("input.{extension}"));
+        let output = dir.path().join(format!("output.{extension}"));
+        let sentinel = b"existing output must survive";
+        std::fs::write(&output, sentinel).unwrap();
+        // Missing input fails before staging; invalid media fails after native
+        // startup; a real too-small carrier fails in the embedding module.
+        assert!(process_fixture(audio, &input, &output, true).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), sentinel);
+        std::fs::write(&input, b"not a media container").unwrap();
+        assert!(process_fixture(audio, &input, &output, true).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), sentinel);
+        fixture_media(audio, &input, true);
+        assert!(process_fixture(audio, &input, &output, true).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), sentinel);
+        // Neither failed processing nor its private temporary is published.
+        std::fs::remove_file(&output).unwrap();
+        assert!(process_fixture(audio, &input, &output, false).is_err());
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn file_helpers_require_explicit_replacement_and_publish_finalized_success() {
+    init();
+    for audio in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let extension = if audio { "wav" } else { "mkv" };
+        let input = dir.path().join(format!("input.{extension}"));
+        let output = dir.path().join(format!("output.{extension}"));
+        fixture_media(audio, &input, false);
+        let original = std::fs::read(&input).unwrap();
+        std::fs::write(&output, b"existing output").unwrap();
+        assert!(process_fixture(audio, &input, &output, false).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing output");
+        process_fixture(audio, &input, &output, true).unwrap();
+        let samples = read_file(&output, if audio { "wavparse" } else { "matroskademux" });
+        assert!(!samples.is_empty());
+        if !audio {
+            assert_eq!(samples.len(), 2);
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn file_helpers_refuse_identical_and_hardlinked_input_output() {
+    init();
+    for audio in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let extension = if audio { "wav" } else { "mkv" };
+        let input = dir.path().join(format!("input.{extension}"));
+        let alias = dir.path().join(format!("alias.{extension}"));
+        fixture_media(audio, &input, false);
+        std::fs::hard_link(&input, &alias).unwrap();
+        let original = std::fs::read(&input).unwrap();
+        for overwrite in [false, true] {
+            for output in [&input, &alias] {
+                assert!(process_fixture(audio, &input, output, overwrite)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("same file"));
+                assert_eq!(std::fs::read(&input).unwrap(), original);
+                assert_eq!(std::fs::read(&alias).unwrap(), original);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_helpers_refuse_symlink_aliases_and_replace_unrelated_symlink_entries() {
+    init();
+    for audio in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let extension = if audio { "wav" } else { "mkv" };
+        let input = dir.path().join(format!("input.{extension}"));
+        let output = dir.path().join(format!("output.{extension}"));
+        fixture_media(audio, &input, false);
+        std::os::unix::fs::symlink(&input, &output).unwrap();
+        let original = std::fs::read(&input).unwrap();
+        for overwrite in [false, true] {
+            assert!(process_fixture(audio, &input, &output, overwrite)
+                .unwrap_err()
+                .to_string()
+                .contains("same file"));
+            assert_eq!(std::fs::read(&input).unwrap(), original);
+            assert!(std::fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+        std::fs::remove_file(&output).unwrap();
+        let target = dir.path().join("unrelated");
+        std::fs::write(&target, b"unrelated inode").unwrap();
+        std::os::unix::fs::symlink(&target, &output).unwrap();
+        assert!(process_fixture(audio, &input, &output, false).is_err());
+        process_fixture(audio, &input, &output, true).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"unrelated inode");
+        assert!(!std::fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!read_file(&output, if audio { "wavparse" } else { "matroskademux" }).is_empty());
+    }
 }

@@ -10,11 +10,11 @@ Comprehensive documentation suite for the steganographer project, covering stega
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `README.md`               | Documentation index with dashboard preview, features table, test summary                             |
 | `steganography-theory.md` | Deep steganography theory: history, information-theoretic security, spatial/frequency domain          |
-| `architecture.md`         | Four-crate layered design with dashboard, dependency graph, module map, data flow                    |
+| `architecture.md`         | Five-crate layered design with dashboard, dependency graph, module map, data flow                    |
 | `cryptography.md`         | BLAKE3 + Ed25519/Ethereum signing, SignerBackend trait, EIP-191, provable security, post-quantum     |
 | `algorithms.md`           | LSB video/audio protocols, QR data matrix overlay, template placeholders, capacity math              |
 | `getting-started.md`      | Prerequisites, build, test, dashboard quickstart, pipeline customization                             |
-| `cli-reference.md`        | Command reference (all 15 commands detailed), generic encode/decode alpha, JSON output         |
+| `cli-reference.md`        | Shared-schema command reference, exact generic capacity, encode/decode and JSON output         |
 | `configuration.md`        | Full TOML schema, dashboard live config, template placeholders (`{timestamp}`, `{frame_index}`)      |
 | `gstreamer.md`            | AppSink/AppSrc architecture, pipeline elements, config-driven construction                           |
 | `platforms.md`            | macOS, Linux, Windows, Docker setup guides with config recommendations                               |

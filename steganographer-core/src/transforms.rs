@@ -11,8 +11,8 @@
 //!
 //! 1. **Signing** — Ed25519 over the logical payload, recording the public
 //!    key and signature so a decoder can attribute the payload to an identity.
-//! 2. **Compression** — DEFLATE via `flate2`, recorded only when it actually
-//!    shrinks the payload.
+//! 2. **Compression** — DEFLATE via `flate2`, admitted only up to the shared
+//!    64 MiB logical ceiling and recorded only when it shrinks the payload.
 //! 3. **Password KDF** — optional Argon2id key derivation, admitted under the
 //!    same bounded cost policy on writing and reading; it must feed AEAD.
 //! 4. **AEAD encryption** — ChaCha20-Poly1305 (RFC 8439) via
@@ -236,6 +236,9 @@ pub fn parse_kdf_argon2id_params(params: &[u8]) -> Result<Argon2idKdfParams, Tra
 /// Apply signing (optional), compression (optional), encryption (optional),
 /// and error correction (optional) to a logical payload, returning the encoded
 /// body, the transform descriptors, and the locator flag bits to set.
+/// Compression requests above [`MAX_DECOMPRESS_OUTPUT`] reject before work,
+/// even when a caller raises its packet limits. Disable compression to carry
+/// larger logical payloads under an explicitly raised packet policy.
 pub fn apply(
     payload: &[u8],
     context: &TransformContext<'_>,
@@ -275,8 +278,20 @@ pub fn apply_with_password(
     if password.is_some() && encrypt_key.is_some() {
         return Err(TransformError::AmbiguousKeySource);
     }
+    if compress && payload.len() > MAX_DECOMPRESS_OUTPUT {
+        return Err(TransformError::InvalidDescriptor(
+            "DEFLATE original length exceeds the decompression ceiling",
+        ));
+    }
     if ecc_parity > 0 {
         validate_ecc_params(ecc_parity, ecc_chunk_len)?;
+        // Compression is bounded above, so only the uncompressed path can
+        // exceed the descriptor's u32 length. Admit it before copying,
+        // signing, deriving a key, encrypting or encoding any ECC chunks.
+        if !compress {
+            let encrypted = password.is_some() || encrypt_key.is_some();
+            writer_ecc_data_len(payload.len(), encrypted)?;
+        }
     }
     if let Some(credentials) = password {
         let params = credentials.params;
@@ -364,13 +379,13 @@ pub fn apply_with_password(
     if ecc_parity > 0 {
         // Record the pre-ECC length: it is the byte count the decoder must
         // recover, and differs from the post-ECC codeword length.
-        let input_len = body.len();
+        let parameters = ecc_params(ecc_parity, body.len(), ecc_chunk_len)?;
         body = ecc_encode(&body, ecc_parity, ecc_chunk_len)?;
         transforms.push(TransformDescriptor {
             algorithm: TRANSFORM_ECC_REED_SOLOMON,
             version: 1,
             critical: true,
-            parameters: ecc_params(ecc_parity, input_len, ecc_chunk_len),
+            parameters,
         });
         flags |= FLAG_ERROR_CORRECTED;
     }
@@ -379,8 +394,8 @@ pub fn apply_with_password(
 }
 
 /// Reverse the transforms recorded in an envelope, recovering the logical
-/// payload and re-verifying it against the envelope's `original_len` and
-/// `content_digest`.
+/// payload and checking its `original_len` and any payload signature.
+/// The caller must separately verify the envelope's `content_digest`.
 pub fn reverse(
     encoded_body: &[u8],
     context: &TransformContext<'_>,
@@ -555,6 +570,20 @@ pub fn reverse_with_password(
     Ok(body)
 }
 
+/// Admit the serialized pre-ECC byte count before any payload/KDF work.
+/// AEAD prepends its salt and appends its tag; signing adds metadata only.
+fn writer_ecc_data_len(payload_len: usize, encrypted: bool) -> Result<u32, TransformError> {
+    let overhead = if encrypted {
+        encryption::SALT_SIZE + encryption::TAG_SIZE
+    } else {
+        0
+    };
+    let data_len = payload_len
+        .checked_add(overhead)
+        .ok_or(TransformError::LengthOverflow)?;
+    u32::try_from(data_len).map_err(|_| TransformError::LengthOverflow)
+}
+
 /// Chunked Reed-Solomon encode: each chunk is an independent codeword, so
 /// payloads larger than the 255-symbol ceiling remain covered. The writer
 /// validates parity and chunk bounds before entering the pipeline.
@@ -562,7 +591,16 @@ fn ecc_encode(body: &[u8], parity: usize, chunk_len: usize) -> Result<Vec<u8>, T
     if body.is_empty() {
         return Ok(Vec::new());
     }
-    let mut output = Vec::with_capacity(body.len() + body.len().div_ceil(chunk_len) * parity);
+    let parity_len = body
+        .len()
+        .div_ceil(chunk_len)
+        .checked_mul(parity)
+        .ok_or(TransformError::LengthOverflow)?;
+    let output_len = body
+        .len()
+        .checked_add(parity_len)
+        .ok_or(TransformError::LengthOverflow)?;
+    let mut output = Vec::with_capacity(output_len);
     for chunk in body.chunks(chunk_len) {
         output.extend(
             error_correction::encode(chunk, parity)
@@ -718,12 +756,16 @@ fn validate_ecc_params(parity: usize, chunk_len: usize) -> Result<(), TransformE
 
 /// Serialize the ECC descriptor parameters:
 /// `parity (u8) || data_len (u32 BE) || chunk_len (u16 BE)`.
-fn ecc_params(parity: usize, data_len: usize, chunk_len: usize) -> Vec<u8> {
+fn ecc_params(parity: usize, data_len: usize, chunk_len: usize) -> Result<Vec<u8>, TransformError> {
+    validate_ecc_params(parity, chunk_len)?;
+    let parity = u8::try_from(parity).map_err(|_| TransformError::LengthOverflow)?;
+    let data_len = u32::try_from(data_len).map_err(|_| TransformError::LengthOverflow)?;
+    let chunk_len = u16::try_from(chunk_len).map_err(|_| TransformError::LengthOverflow)?;
     let mut params = Vec::with_capacity(7);
-    params.push(parity as u8);
-    params.extend_from_slice(&(data_len as u32).to_be_bytes());
-    params.extend_from_slice(&(chunk_len as u16).to_be_bytes());
-    params
+    params.push(parity);
+    params.extend_from_slice(&data_len.to_be_bytes());
+    params.extend_from_slice(&chunk_len.to_be_bytes());
+    Ok(params)
 }
 
 fn parse_ecc_params(params: &[u8]) -> Result<(usize, usize, usize), TransformError> {
@@ -1156,7 +1198,7 @@ mod tests {
 
     #[test]
     fn ecc_params_roundtrip() {
-        let params = ecc_params(8, 12345, DEFAULT_ECC_CHUNK_LEN);
+        let params = ecc_params(8, 12345, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert_eq!(params.len(), 7);
         assert_eq!(
             parse_ecc_params(&params).unwrap(),
@@ -1165,12 +1207,117 @@ mod tests {
         assert!(parse_ecc_params(&[0u8; 6]).is_err());
     }
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn ecc_descriptor_data_length_is_exact_at_u32_boundary() {
+        let maximum = u32::MAX as usize;
+        let params = ecc_params(16, maximum, DEFAULT_ECC_CHUNK_LEN).unwrap();
+        assert_eq!(&params[1..5], &u32::MAX.to_be_bytes());
+        assert_eq!(parse_ecc_params(&params).unwrap().1, maximum);
+        assert_eq!(
+            ecc_params(16, maximum + 1, DEFAULT_ECC_CHUNK_LEN).unwrap_err(),
+            TransformError::LengthOverflow
+        );
+        assert_eq!(writer_ecc_data_len(maximum, false).unwrap(), u32::MAX);
+        assert_eq!(
+            writer_ecc_data_len(maximum + 1, false).unwrap_err(),
+            TransformError::LengthOverflow
+        );
+        let overhead = encryption::SALT_SIZE + encryption::TAG_SIZE;
+        assert_eq!(
+            writer_ecc_data_len(maximum - overhead, true).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            writer_ecc_data_len(maximum - overhead + 1, true).unwrap_err(),
+            TransformError::LengthOverflow
+        );
+    }
+
+    #[test]
+    fn compression_writer_and_nested_reader_share_the_exact_hard_ceiling() {
+        use crate::packet::{AlgorithmDescriptor, DecodeLimits, PayloadKind};
+
+        let mut payload = vec![b'A'; MAX_DECOMPRESS_OUTPUT + 1];
+        let ctx = TransformContext {
+            packet_id: &[1; 16],
+            payload_kind: PayloadKind::Bytes as u16,
+            original_len: payload.len() as u64,
+        };
+        let expected = TransformError::InvalidDescriptor(
+            "DEFLATE original length exceeds the decompression ceiling",
+        );
+        assert_eq!(
+            apply(&payload, &ctx, None, true, None, 0, DEFAULT_ECC_CHUNK_LEN).unwrap_err(),
+            expected
+        );
+        let credentials = PasswordKdfCredentials {
+            password: b"",
+            params: Argon2Params::fast(),
+        };
+        assert_eq!(
+            apply_with_password(
+                &payload,
+                &ctx,
+                None,
+                true,
+                Some(&credentials),
+                None,
+                0,
+                DEFAULT_ECC_CHUNK_LEN
+            )
+            .unwrap_err(),
+            expected
+        );
+
+        payload.truncate(MAX_DECOMPRESS_OUTPUT);
+        let limits = DecodeLimits {
+            max_body_len: MAX_DECOMPRESS_OUTPUT + 1,
+            max_packet_len: MAX_DECOMPRESS_OUTPUT + 1 + 16 * 1024 + crate::packet::LOCATOR_SIZE,
+            max_original_len: MAX_DECOMPRESS_OUTPUT + 1,
+            ..DecodeLimits::default()
+        };
+        let mut packet = GenericPacket::new_untransformed(
+            payload,
+            [1; 16],
+            [2; 8],
+            PayloadKind::Bytes,
+            AlgorithmDescriptor::new(1, 1, Vec::new()),
+            AlgorithmDescriptor::new(1, 1, vec![1]),
+            &limits,
+        )
+        .unwrap();
+        let (body, transforms, flags) = apply(
+            &packet.body,
+            &context(&packet),
+            None,
+            true,
+            None,
+            0,
+            DEFAULT_ECC_CHUNK_LEN,
+        )
+        .unwrap();
+        assert_eq!(flags, FLAG_COMPRESSED);
+        packet.body = body;
+        packet.envelope.transforms = transforms;
+        packet.locator.flags = flags;
+        packet.locator.encoded_body_len = packet.body.len() as u64;
+        let envelope = packet.envelope.encode(&limits).unwrap();
+        packet.locator.envelope_len = envelope.len() as u32;
+        packet.locator.envelope_crc32c = crate::packet::crc32c(&envelope);
+        let encoded = packet.encode(&limits).unwrap();
+        let recovered = GenericPacket::decode_nested(&encoded, &limits, None, None).unwrap();
+        assert_eq!(recovered.chain.len(), 1);
+        assert_eq!(recovered.payload.len(), MAX_DECOMPRESS_OUTPUT);
+        assert!(recovered.payload.iter().all(|&byte| byte == b'A'));
+    }
+
     #[test]
     fn hostile_ecc_data_len_is_rejected_before_allocation() {
         // The descriptor is unauthenticated: a 4 GiB `data_len` claim against
         // a tiny codeword stream must fail the geometry precheck (typed
         // error) instead of attempting `Vec::with_capacity(0xFFFF_FFFF)`.
-        let params = ecc_params(1, 0xFFFF_FFFF, DEFAULT_ECC_CHUNK_LEN);
+        let params = ecc_params(1, 0xFFFF_FFFF, DEFAULT_ECC_CHUNK_LEN).unwrap();
         let transforms = vec![TransformDescriptor {
             algorithm: TRANSFORM_ECC_REED_SOLOMON,
             version: 1,
@@ -1210,7 +1357,7 @@ mod tests {
             algorithm: TRANSFORM_ECC_REED_SOLOMON,
             version: 1,
             critical: true,
-            parameters: ecc_params(1, 8, DEFAULT_ECC_CHUNK_LEN),
+            parameters: ecc_params(1, 8, DEFAULT_ECC_CHUNK_LEN).unwrap(),
         }];
         // data_len + parity overhead must equal the stream length exactly.
         // 8 data bytes + 1 parity = 9 expected, but 10 provided.
@@ -1613,7 +1760,8 @@ mod tests {
         }
         // ECC's complete geometry must also pass before password validation.
         let mut bad_geometry = transforms.clone();
-        bad_geometry.last_mut().unwrap().parameters = ecc_params(8, 0, DEFAULT_ECC_CHUNK_LEN);
+        bad_geometry.last_mut().unwrap().parameters =
+            ecc_params(8, 0, DEFAULT_ECC_CHUNK_LEN).unwrap();
         assert!(matches!(
             reverse_with_password(&body, &ctx, None, Some(b""), &bad_geometry, 1024),
             Err(TransformError::InvalidDescriptor(_))

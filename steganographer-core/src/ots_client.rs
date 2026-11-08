@@ -632,21 +632,37 @@ impl OTSClient {
         proof: &[u8],
         expected_digest: &[u8; 32],
     ) -> Result<OTSVResult, OTSError> {
+        self.verify_with_upgrade(proof, expected_digest)
+            .await
+            .map(|(result, _)| result)
+    }
+    /// Verify through the shared lifecycle, returning changed proof bytes for optional publication.
+    ///
+    /// Proofs carrying Bitcoin attestations skip calendar upgrades, including when historical
+    /// pending branches remain. Every Bitcoin attestation still requires trusted explorer
+    /// header verification. Pending-only proofs may upgrade through the configured calendar.
+    /// Returned bytes preserve the original branches; callers publish them without replacing
+    /// earlier receipts. `None` means the supplied proof was unchanged.
+    pub async fn verify_with_upgrade(
+        &self,
+        proof: &[u8],
+        expected_digest: &[u8; 32],
+    ) -> Result<(OTSVResult, Option<Vec<u8>>), OTSError> {
         tokio::time::timeout(self.timeout, async {
             let original = parse_proof(proof, Some(expected_digest))?;
             let mut original_att = Vec::new();
             attestations(&original, &mut original_att);
-            // Completed proofs need no calendar contact.
-            let node = if original_att
+            // Completed proofs need no calendar contact, but are not trusted until verified.
+            if original_att
                 .iter()
                 .any(|(_, a)| matches!(a, Attestation::Bitcoin(_)))
             {
-                original
-            } else {
-                let upgraded = self.upgrade_inner(proof, expected_digest).await?;
-                parse_proof(&upgraded, Some(expected_digest))?
-            };
-            self.verify_node(&node).await
+                return Ok((self.verify_node(&original).await?, None));
+            }
+            let upgraded = self.upgrade_inner(proof, expected_digest).await?;
+            let node = parse_proof(&upgraded, Some(expected_digest))?;
+            let result = self.verify_node(&node).await?;
+            Ok((result, (upgraded != proof).then_some(upgraded)))
         })
         .await
         .map_err(|_| OTSError::Timeout)?

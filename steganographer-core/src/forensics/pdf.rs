@@ -20,6 +20,7 @@ pub const PDF_MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 pub const PDF_MAX_STREAM_INFLATE_BYTES: usize = 256 * 1024;
 pub const PDF_MAX_STREAM_INFLATE_TOTAL: usize = 1024 * 1024;
 pub const PDF_MAX_STREAMS_INFLATED: usize = 16;
+pub const PDF_MAX_DECODE_INPUT_TOTAL: usize = 16 * 1024 * 1024;
 pub const PDF_MAX_FINDINGS: usize = 64;
 const HEADER_WINDOW_BYTES: usize = 1024;
 const DETAIL_MAX_BYTES: usize = 256;
@@ -298,6 +299,7 @@ struct ScanState {
     text: Vec<u8>,
     inflate_total: usize,
     streams_inflated: usize,
+    decode_input: usize,
     xref_stream: bool,
 }
 
@@ -337,6 +339,7 @@ pub fn analyze_pdf(input: &[u8]) -> ContainerAnalysis {
         text: Vec::new(),
         inflate_total: 0,
         streams_inflated: 0,
+        decode_input: 0,
         xref_stream: false,
     };
     let mut lexer = Lexer::new(data);
@@ -458,6 +461,12 @@ pub fn analyze_pdf(input: &[u8]) -> ContainerAnalysis {
     result
 }
 
+enum ObjectContext<'a> {
+    Dictionary(Option<Cow<'a, [u8]>>),
+    FilterArray,
+    Array,
+}
+
 /// Consume one object window once. Stream bytes are skipped atomically and can
 /// never manufacture `obj`, `endobj`, action names or EOF markers.
 fn scan_object(
@@ -471,9 +480,7 @@ fn scan_object(
         .saturating_add(PDF_MAX_OBJECT_WINDOW_BYTES)
         .min(data.len());
     let mut lexer = Lexer::new(&data[start..end]);
-    let mut previous_name: Option<Cow<'_, [u8]>> = None;
-    let mut filter_array = false;
-    let mut dictionary_depth = 0usize;
+    let mut contexts: Vec<ObjectContext<'_>> = Vec::new();
     let mut stream_decode_unsupported = false;
     let mut filters: Vec<Cow<'_, [u8]>> = Vec::new();
     let mut image = false;
@@ -484,9 +491,27 @@ fn scan_object(
     let mut closed = false;
     let mut next = data.len();
     while let Some(token) = lexer.next() {
-        let filter_value = dictionary_depth == 1 && previous_name.as_deref() == Some(b"Filter");
-        let decode_parameters_value =
-            dictionary_depth == 1 && previous_name.as_deref() == Some(b"DecodeParms");
+        // A dictionary name is either a key or its value, never both.
+        // Composite values consume their parent's key at the opening token.
+        let outer = contexts.len() == 1;
+        let closing = matches!(&token, Token::Delimiter(b'>' | b']'));
+        let value_key = if closing {
+            None
+        } else if let Some(ObjectContext::Dictionary(key)) = contexts.last_mut() {
+            if key.is_some() {
+                key.take()
+            } else {
+                if let Token::Name(name) = &token {
+                    *key = Some(name.clone());
+                }
+                None
+            }
+        } else {
+            None
+        };
+        let filter_value = outer && value_key.as_deref() == Some(b"Filter");
+        let decode_parameters_value = outer && value_key.as_deref() == Some(b"DecodeParms");
+        let filter_array = matches!(contexts.last(), Some(ObjectContext::FilterArray));
         match &token {
             Token::Name(name) => {
                 for (index, (keyword, _)) in SUSPICIOUS_KEYWORDS.iter().enumerate() {
@@ -506,17 +531,11 @@ fn scan_object(
                 if name.as_ref() == b"Encrypt" {
                     reason(result, "pdf_encryption_unsupported");
                 }
-                if dictionary_depth == 1
-                    && previous_name.as_deref() == Some(b"Type")
-                    && name.as_ref() == b"XRef"
-                {
+                if outer && value_key.as_deref() == Some(b"Type") && name.as_ref() == b"XRef" {
                     state.xref_stream = true;
                 }
-                if dictionary_depth == 1
-                    && previous_name.as_deref() == Some(b"Subtype")
-                    && name.as_ref() == b"Image"
-                {
-                    image = true;
+                if outer && value_key.as_deref() == Some(b"Subtype") {
+                    image = name.as_ref() == b"Image";
                 }
                 if filter_value || filter_array {
                     if filters.len() < 64 {
@@ -530,7 +549,7 @@ fn scan_object(
                 if *capped {
                     reason(result, "pdf_string_limit");
                 }
-                if previous_name.as_deref() == Some(b"URI") {
+                if value_key.as_deref() == Some(b"URI") {
                     if let Some((dangerous, scheme)) = classify_uri(bytes) {
                         finding(
                             result,
@@ -545,17 +564,30 @@ fn scan_object(
                 }
                 push_text(&mut state.text, bytes, *capped, result);
             }
-            Token::Delimiter(b'[') if filter_value => filter_array = true,
-            Token::Delimiter(b']') => filter_array = false,
-            Token::Delimiter(b'<') => dictionary_depth += 1,
-            Token::Delimiter(b'>') => {
-                if dictionary_depth == 0 {
+            Token::Delimiter(b'[') => contexts.push(if filter_value {
+                ObjectContext::FilterArray
+            } else {
+                ObjectContext::Array
+            }),
+            Token::Delimiter(b'<') => contexts.push(ObjectContext::Dictionary(None)),
+            Token::Delimiter(b']' | b'>') => {
+                let valid = matches!(
+                    (&token, contexts.pop()),
+                    (
+                        Token::Delimiter(b']'),
+                        Some(ObjectContext::Array | ObjectContext::FilterArray)
+                    ) | (
+                        Token::Delimiter(b'>'),
+                        Some(ObjectContext::Dictionary(None))
+                    )
+                );
+                if !valid {
                     reason(result, "pdf_lexical_error");
+                    stream_decode_unsupported = true;
                 }
-                dictionary_depth = dictionary_depth.saturating_sub(1);
             }
             Token::Word(b"endobj") => {
-                if dictionary_depth != 0 || filter_array {
+                if !contexts.is_empty() {
                     reason(result, "pdf_lexical_error");
                 }
                 closed = true;
@@ -564,7 +596,7 @@ fn scan_object(
             }
             Token::Word(b"stream") => {
                 saw_stream = true;
-                if dictionary_depth != 0 || filter_array {
+                if !contexts.is_empty() {
                     reason(result, "pdf_lexical_error");
                     stream_decode_unsupported = true;
                 }
@@ -593,7 +625,7 @@ fn scan_object(
                 break;
             }
             Token::Word(word) => {
-                if dictionary_depth == 1 && previous_name.as_deref() == Some(b"Length") {
+                if outer && value_key.as_deref() == Some(b"Length") {
                     claimed_length = unsigned(word);
                     length_numbers = usize::from(claimed_length.is_some());
                 } else if length_numbers == 1 && unsigned(word).is_some() {
@@ -612,17 +644,17 @@ fn scan_object(
             reason(result, "pdf_filter_unsupported");
             stream_decode_unsupported = true;
         }
-        if previous_name.as_deref() == Some(b"URI") && matches!(&token, Token::Word(_)) {
+        if filter_array && !matches!(&token, Token::Name(_) | Token::Delimiter(b']')) {
+            reason(result, "pdf_filter_unsupported");
+            stream_decode_unsupported = true;
+        }
+        if value_key.as_deref() == Some(b"URI") && matches!(&token, Token::Word(_)) {
             reason(result, "pdf_uri_indirect_unsupported");
         }
         if decode_parameters_value && !matches!(&token, Token::Word(b"null")) {
             reason(result, "pdf_decode_parameters_unsupported");
             stream_decode_unsupported = true;
         }
-        previous_name = match token {
-            Token::Name(name) => Some(name),
-            _ => None,
-        };
     }
     if lexer.malformed {
         reason(result, "pdf_lexical_error");
@@ -766,6 +798,11 @@ fn inspect_stream(
         reason(result, "pdf_inflate_limit");
         return;
     }
+    if bytes.len() > PDF_MAX_DECODE_INPUT_TOTAL - state.decode_input {
+        reason(result, "pdf_decode_input_budget");
+        return;
+    }
+    state.decode_input += bytes.len();
     let cap = PDF_MAX_STREAM_INFLATE_BYTES.min(PDF_MAX_STREAM_INFLATE_TOTAL - state.inflate_total);
     state.streams_inflated += 1;
     let mut decoder = ZlibDecoder::new(bytes).take((cap + 1) as u64);

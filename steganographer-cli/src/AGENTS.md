@@ -6,15 +6,16 @@
 
 - `cli.rs` defines `Cli`, `Commands` and `OtsAction`; the binary and `build.rs`
   share this schema for parsing, five shell completions and all manual pages.
-- The native schema has 15 top-level commands, including generic `Decode` and
-  `Extract`; GStreamer-free builds omit live `Video` and `Audio`.
+- The shared schema includes exact `Capacity` plus generic `Decode`/`Extract`;
+  GStreamer-free builds omit live `Video` and `Audio`.
 - `main.rs` initializes logging/envelope context and dispatches commands.
 
 ### envelope.rs
 
 - `steganographer.cli/v1` JSON envelope (`schema`, `command`, `status`,
   `result`, `warnings`, `errors`, `timing`, `tool`) wrapping every
-  `--format json` output; `partial` = a resource-limit-truncated scan
+  `--format json` output; `partial` means incomplete analysis, including scans
+  and statistical analysis with no available method
 - Stable error codes (`usage_error`, `packet_not_found`,
   `verification_failed`, `scan_error`, `internal_error`) and the finalized
   exit-code table (0/1/2/3/4/5/6) via `classify_exit`
@@ -43,15 +44,18 @@
 - `run(...)` — descriptor-preserving legacy offline signing and embedding
 - `keygen(output, format)`, `info`, `analyze`, `revoke_key`, `derive_keys`,
   `derive_keys_from_password` — all emit the envelope in `--format json`
+- `capacity` lives in `cmd_packet.rs`: core-encoded sequential file-packet sizing
+  with exact filename/MIME/signature overhead and effective limits, no synthetic
+  payload allocation. Match metadata and signing policy at encode.
 - Exit-code mapping: usage → 1, packet-not-found → 2, verify invalid → 3,
-  scan findings → 4, truncated scan → 5, internal/I-O → 6
+  scan findings → 4, incomplete scan/no usable analysis → 5, internal/I-O → 6
 - Supports spatial LSB, keyed audio LSB, spread-spectrum, and DCT paths with
   symmetric config, key, encryption, ECC, capacity, and format validation
 
 ### cmd_packet.rs
 
 - Opt-in generic text/file payload encoding and payload decoding
-- Current alpha carrier slice: PNG or raw RGB, sequential spatial LSB, 1–4 bits
+- Generic carrier slice: PNG/raw RGB or WAV/raw S16LE, sequential/keyed LSB, 1–4 bits
 - Validates packet digest, capacity, output aliasing, and overwrite policy
 
 ### cmd_scan.rs
@@ -62,8 +66,11 @@
 - Delegates to `steganographer_core::forensics::scan_bytes()`, which pairs
   structural probes (Shannon entropy, file family, embedded magic bytes) with
   `steganalysis::analyze_combined()`
-- Bounded by `--max-depth`, `--max-files`, and `--max-bytes`; emits
-  deterministic plain/JSON/JSONL findings
+- Bounded by traversal/file/read and detector budgets. Descriptor-relative
+  regular-file/no-follow opens prevent recursive link traversal; skipped
+  max-depth directories mark incompleteness. Positive findings precede exit 5.
+- Revocation updates lock a persistent `<registry>.lock` companion over
+  read/merge/atomic-publication; do not remove or replace its inode.
 
 ### cmd_verify.rs
 

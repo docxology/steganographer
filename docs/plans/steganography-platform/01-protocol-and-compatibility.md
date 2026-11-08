@@ -198,9 +198,10 @@ Initial identifiers:
 - digest: BLAKE3, SHA-256, SHA3-256;
 - signature: none, Ed25519, secp256k1/EIP-191 where applicable.
 
-Only sequential placement (`1`) and spatial LSB (`1`) are active in the current
-generic-packet carrier path. Transform registry entries remain reserved until
-their full encode/decode pipelines and failure semantics are implemented.
+The original sequential-only baseline is superseded: current generic carriers
+include sequential/keyed RGB and PCM LSB, with implemented bounded transform
+pipelines. Consult `packet.rs`, `carrier.rs`, `transforms.rs` and the current API
+guide for admitted descriptors; this design list does not activate reserved IDs.
 
 Algorithm names used by CLI/config map to numeric IDs; names never appear as
 wire-critical free-form strings.

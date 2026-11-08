@@ -20,9 +20,9 @@ Technical specification for this directory. Read together with `scripts/README.m
 
 | Script | Delegates to | Notes |
 |--------|--------------|-------|
-| `status.sh` | `cargo test --workspace --locked`; `Cargo.toml`; `steganographer-cli/src/cli.rs` (`enum Commands`); `docs/` listing; `git status -sb`; root `AGENTS.md` Tests line | Default mode prints status. `--check` exits 1 on test-count drift; CLI count drift from 15 is a nonfatal note. Failed test output is preserved. |
-| `release.sh` | Rust/Clap `steganographer-cli/examples/release.rs` via Cargo with `--no-default-features` | Fresh snapshot builds; supported-host variants only; no publication/version mutation/overwrite. |
-| `check-release.py` | Python 3.12+ stdlib, packaged CLI/plugin, Node.js and existing WASM binding consumer scenarios | Verifies real archives/source inventory/checksums and exercises packaged consumers; no source-text assertions. |
+| `status.sh` | `cargo test --workspace --locked`; `Cargo.toml`; shared `enum Commands`; docs inventory; git state; root Tests line | Default prints status; `--check` fails on test-count drift. Source script owns command-count diagnostics; do not copy volatile pins. |
+| `release.sh` | Rust/Clap `steganographer-cli/examples/release.rs` via Cargo with `--no-default-features` | Default committed-tree blob/mode capture; explicit dirty working-tree capture is not commit-bound; fresh targets, no publication/version mutation/overwrite. |
+| `check-release.py` | Python 3.12+ stdlib, packaged CLI/plugin, Node.js and existing WASM scenarios | Strict single-member gzip, duplicate normalized path/collision checks, source inventory/checksums and actual consumers. |
 
 ## Gotchas
 
@@ -32,8 +32,8 @@ Technical specification for this directory. Read together with `scripts/README.m
   canonical Tests line in the root `AGENTS.md`. When adding or removing tests,
   update that AGENTS.md line FIRST, then other docs; otherwise `--check` exits 1.
 - The subcommand probe reads the shared `steganographer-cli/src/cli.rs`
-  `enum Commands` (15 top-level commands with GStreamer enabled). Restructuring
-  variant opener lines requires updating that probe.
+  `enum Commands` (including capacity, with live commands gated on GStreamer).
+  Restructuring variant opener lines requires updating that probe.
 - Count the fourth field of every successful `test result:` line across test
   binaries and doc-test targets; preserve failures instead of swallowing stdout.
 

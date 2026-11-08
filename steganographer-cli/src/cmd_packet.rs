@@ -144,6 +144,141 @@ pub(crate) struct KdfInfo {
     lanes: u8,
 }
 
+/// Size the same uncompressed, sequential packet that encode publishes, without
+/// allocating the advertised payload. Core envelope/locator encoding handles
+/// the variable-width original length, metadata and real signature descriptor.
+pub fn capacity(args: &crate::cli::CapacityArgs, limits: &DecodeLimits) -> anyhow::Result<()> {
+    validate_format(&args.format)?;
+    validate_kernel(&args.stego_type)?;
+    let config = EmbeddingConfig::new(args.bits)?;
+    let descriptor = if let Some(units) = args.carrier_units {
+        if is_audio_kernel(&args.stego_type) {
+            steganographer_core::CarrierDescriptor::pcm_s16le(units)
+        } else {
+            steganographer_core::CarrierDescriptor::rgb8(units)
+        }
+    } else {
+        let input = args
+            .input
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("capacity requires --input or --carrier-units"))?;
+        let format = args
+            .input_format
+            .clone()
+            .unwrap_or_else(|| media_io::detect_format(input, &args.stego_type));
+        let media = media_io::read_input_with_dimensions(
+            input,
+            &format,
+            &args.stego_type,
+            args.width,
+            args.height,
+        )?;
+        validate_media_kernel(&media, &args.stego_type)?;
+        media.carrier_descriptor()
+    };
+    let carrier_capacity = if is_audio_kernel(&args.stego_type) {
+        AudioSpatialLsb.capacity(&descriptor, &config)?
+    } else {
+        SpatialLsb.capacity(&descriptor, &config)?
+    };
+    let filename = args
+        .filename
+        .clone()
+        .map(validate_display_filename)
+        .transpose()?;
+    let signer = args
+        .signing_key
+        .as_deref()
+        .map(|path| crate::key_policy::load_signing_key(Path::new(path)))
+        .transpose()?;
+    let mut packet = GenericPacket::new_untransformed(
+        Vec::new(),
+        [0; 16],
+        [0; 8],
+        PayloadKind::File,
+        AlgorithmDescriptor::new(PLACEMENT_SEQUENTIAL, 1, Vec::new()),
+        AlgorithmDescriptor::new(KERNEL_SPATIAL_LSB, 1, vec![args.bits]),
+        limits,
+    )?;
+    let context = TransformContext {
+        packet_id: &packet.envelope.packet_id,
+        payload_kind: packet.envelope.payload_kind as u16,
+        original_len: 0,
+    };
+    let (body, transforms, flags) = transforms::apply_with_password(
+        &packet.body,
+        &context,
+        signer.as_ref(),
+        false,
+        None,
+        None,
+        0,
+        DEFAULT_ECC_CHUNK_LEN,
+    )?;
+    packet.body = body;
+    packet.envelope.transforms = transforms;
+    packet.locator.flags = flags;
+    packet.envelope.filename = filename.clone();
+    packet.envelope.mime_type = args.mime_type.clone();
+    synchronize_locator(&mut packet, limits)
+        .context("configured limits cannot fit generic packet framing")?;
+    let empty_packet_bytes = packet
+        .encode(limits)
+        .context("configured limits cannot fit generic packet framing")?
+        .len();
+    let available = carrier_capacity.max_packet_bytes.min(limits.max_packet_len);
+    anyhow::ensure!(available >= empty_packet_bytes,
+        "carrier/configured limits cannot fit generic packet framing: requires {empty_packet_bytes} bytes, available {available}");
+    // A larger logical length can widen the encoded envelope integer. Ask the
+    // core to size every candidate, including its field/envelope/body ceilings.
+    let mut size_at = |payload_len: usize| -> Result<usize, PacketError> {
+        packet.envelope.original_len = payload_len as u64;
+        let envelope = packet.envelope.encode(limits)?;
+        Locator::new(
+            flags,
+            envelope.len(),
+            payload_len,
+            steganographer_core::packet::crc32c(&envelope),
+            [0; 8],
+            limits,
+        )?
+        .packet_len()
+    };
+    let mut low = 0usize;
+    let mut high = (available - empty_packet_bytes)
+        .min(limits.max_body_len)
+        .min(limits.max_original_len);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if size_at(middle).is_ok_and(|size| size <= available) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let max_payload_bytes = low;
+    let max_packet_bytes = size_at(max_payload_bytes)?;
+    let overhead = max_packet_bytes - max_payload_bytes;
+    let result = serde_json::json!({
+        "max_payload_bytes": max_payload_bytes,
+        "max_packet_bytes": max_packet_bytes,
+        "packet_overhead_bytes": overhead,
+        "carrier_units": descriptor.unit_count,
+        "bits": args.bits,
+        "signed": signer.is_some(),
+        "filename": filename,
+        "mime_type": args.mime_type,
+    });
+    if args.format == "json" {
+        crate::envelope::print(&crate::envelope::success("capacity", result));
+    } else {
+        println!("Maximum payload: {max_payload_bytes} bytes");
+        println!("Packet overhead: {overhead} bytes");
+        println!("Maximum packet: {max_packet_bytes} bytes");
+    }
+    Ok(())
+}
+
 pub fn encode(
     input: &str,
     output: &str,

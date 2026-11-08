@@ -338,6 +338,16 @@ current 109-byte legacy representation; it does not revive rejected formats.
 and body. `decode()` checks limits before allocation, CRC32C, TLV canonicality,
 untransformed length, and content digest.
 
+Locator keyed flags and placement descriptors must agree on encode/decode;
+sequential packets cannot claim keyed recognition. Compression is admitted
+under the shared 64 MiB logical ceiling (CLI limits may be lower), recorded
+only when smaller, and reversed with bounded output after structural preflight.
+`GenericPacket::decode_nested(input, limits, decrypt_key, password)` expands
+only identifiable parent-id-linked children. A bare `STG3` prefix, even malformed
+or another major version, remains opaque without that marker. Once identified,
+child CRC/version/limits, exact full-payload span, parent ID and cycle checks
+are strict. Depth and aggregate encoded bytes (root included) are bounded.
+
 ### Module: `carrier` (alpha)
 
 | Type or trait | Purpose |
@@ -740,6 +750,7 @@ or an identity/math test is not evidence of real-media robustness or accuracy.
 | `stamp_data` | `async fn stamp_data(&self, data: &[u8]) -> Result<Vec<u8>, OTSError>` |
 | `upgrade` | `async fn upgrade(&self, proof: &[u8], expected: &[u8; 32]) -> Result<Vec<u8>, OTSError>` |
 | `verify` | `async fn verify(&self, proof: &[u8], expected_digest: &[u8; 32]) -> Result<OTSVResult, OTSError>` |
+| `verify_with_upgrade` | `async fn verify_with_upgrade(&self, proof: &[u8], expected_digest: &[u8; 32]) -> Result<(OTSVResult, Option<Vec<u8>>), OTSError>` |
 | `verify_attestations` | `async fn verify_attestations(&self, proof: &[u8], expected_digest: &[u8; 32]) -> Result<OTSVResult, OTSError>` |
 | `validate_proof` | `fn validate_proof(proof: &[u8], expected: &[u8; 32]) -> Result<bool, OTSError>` |
 | `proof_path_for` | `fn proof_path_for(&self, digest_hex: &str) -> Result<PathBuf, OTSError>` |
@@ -750,8 +761,11 @@ or an identity/math test is not evidence of real-media robustness or accuracy.
 Proofs are bounded standard detached `.ots`, submitted via the calendar protocol,
 not bespoke JSON success responses. Compute the expected SHA-256 locally from
 the intended artifact; never trust a digest merely because it is inside a proof.
-`verify` upgrades pending proofs through the configured calendar when needed;
-`verify_attestations` skips calendar upgrade but still contacts the explorer.
+`verify_with_upgrade` upgrades pending-only proofs when needed and returns any
+changed bytes for optional append-only publication, preserving original branches.
+Bitcoin-attested proofs skip calendars even with old pending branches, but still
+require explorer/header verification. `verify` delegates and returns only the
+verdict; `verify_attestations` skips calendars entirely.
 `validate_proof` validates format/digest locally and returns whether the proof
 is pending; its boolean is **not** a verified Bitcoin timestamp.
 
@@ -766,6 +780,12 @@ No newly confirmed live Bitcoin attestation is claimed by release validation.
 Proof I/O is capped, uses a pinned directory capability and rejects unsafe
 links/nonregular files; atomic no-clobber publication requires a hard-link-capable
 filesystem. Existing evidence is never silently overwritten.
+
+Dedicated CLI OTS commits exact file bytes (`sha256-file`); optional legacy
+encode/verify OTS hooks hash kernel-canonical media. Dashboard video commits
+delivered PNG bytes and audio raw signed PCM, not its WAV export wrapper.
+CLI verify's `proof_file` identifies the selected original receipt even when
+changed upgrade bytes publish at an alternate append-only path.
 
 ### Module: `hash_chain`
 
@@ -809,6 +829,11 @@ unidentifiable RS models) are not clean negatives. Method scores/RS replacement
 estimates are not calibrated probabilities or natural-image detection accuracy.
 `CombinedResult` keeps each method's availability alongside its aggregate.
 
+Detector byte/finding/attempt limits propagate incompleteness even if a caller
+read the complete input. CLI `analyze` returns partial JSON / exit 5 when no
+selected method is available; combined availability means at least one usable
+method, not all. An incomplete scan with a positive finding still exits 4.
+
 ---
 
 ## Crate: `steganographer-gst`
@@ -841,8 +866,16 @@ Signing requires a matching supported binding; trait SS signing rejects.
 | -------- | ----------- | ------------- |
 | `run_video_filter` | `fn run_video_filter(config: &VideoFilterConfig, stego: Box<dyn VideoStegoModule>, signer: Option<&Signer>, max_frames: Option<u64>) -> Result<()>` | RGB/BGRA processing; LSB/DCT canonical signatures |
 | `extract_from_source` | `fn extract_from_source(source_pipeline_str: &str, stego: &dyn VideoStegoModule, max_frames: Option<u64>) -> Result<Vec<(u64, Option<SignaturePayload>)>>` | Extract selected video frames; source errors propagate |
-| `process_video_file` | `fn process_video_file(input_path: &str, output_path: &str, stego: Box<dyn VideoStegoModule>, signer: Option<&Signer>, signing_kernel: Option<SigningKernel>, max_frames: Option<u64>) -> Result<()>` | Exact RGB Matroska `.mkv` |
-| `process_audio_file` | `fn process_audio_file(input_path: &str, output_path: &str, stego: &mut dyn AudioStegoModule, signer: Option<&Signer>, signing_kernel: Option<SigningKernel>, max_buffers: Option<u64>) -> Result<()>` | Exact PCM `.wav`; one bounded logical file frame at index 0 |
+| `process_video_file` | `fn process_video_file(input_path: &str, output_path: &str, stego: Box<dyn VideoStegoModule>, signer: Option<&Signer>, signing_kernel: Option<SigningKernel>, max_frames: Option<u64>, overwrite: bool) -> Result<()>` | Exact RGB Matroska `.mkv` |
+| `process_audio_file` | `fn process_audio_file(input_path: &str, output_path: &str, stego: &mut dyn AudioStegoModule, signer: Option<&Signer>, signing_kernel: Option<SigningKernel>, max_buffers: Option<u64>, overwrite: bool) -> Result<()>` | Exact PCM `.wav`; one bounded logical file frame at index 0 |
+
+Migration requires the explicit trailing overwrite flag; no old-signature shims.
+Use false for no-clobber, true only for intended replacement. Input/output
+aliases reject. Helpers stage private sibling files and publish after EOS;
+failures preserve prior output. Filesink reopens a pathname: the output directory
+must be trusted. Native packed-video plane access first checks actual mapped
+span, offset and full stride × height (including trailing padding), rather than
+trusting claimed metadata lengths or dependency admission alone.
 
 ### Module: `audio_filter`
 
@@ -931,12 +964,13 @@ pub struct LiveConfig {
 }
 ```
 
-`Transport` is a serde enum: `websocket` sends JPEG input and returns signed PNG over the
-`/ws/encode` WebSocket (default); `webrtc` negotiates a WebRTC data channel
-through `POST /api/webrtc/offer` (WHIP-style) and streams the same
-`encoded_frame`/`decoded_frame` JSON messages over it, so the same UI handlers
-render both transports. Unknown transport values are rejected at parse time.
-The audio feed always uses WebSocket.
+`Transport` is a serde enum: `websocket` accepts raw binary encoded images
+(the browser sends PNG) at `/ws/encode` and returns base64 signed PNG in JSON.
+`webrtc` negotiates through `POST /api/webrtc/offer` and carries JSON requests
+with `kind: "encode"`, `msg_id`, `sent_unix_ms`, `jpeg_b64` (the field name is
+historical; browser content is PNG), or `kind: "decode_poll"`. Both use the
+same delivered-media signer/verifier and reply handlers, not identical input
+framing. Unknown transport values reject; audio remains WebSocket.
 
 | Method | Signature | Description |
 | -------- | ----------- | ------------- |
@@ -986,7 +1020,7 @@ manifest in stored ZIP, not a continuous lossy video recording.
 >   `?token=<token>` in the query string **or** a
 >   `Sec-WebSocket-Protocol: bearer-<token>` subprotocol; otherwise HTTP 401.
 > - **Size caps**: decoded WS messages are capped at 4 MiB and WS frames at
->   1 MiB; JPEG frames are additionally capped at 4096×4096 pixels and audio
+>   1 MiB; images are additionally capped at 4096×4096 pixels and audio
 >   chunks at 10 s duration / 384 kHz sample rate.
 > - The dashboard defaults to binding `127.0.0.1`; use `--host 0.0.0.0` for
 >   network access (requires `--auth-token` for safety).
@@ -999,7 +1033,7 @@ manifest in stored ZIP, not a continuous lossy video recording.
 | GET | `/audio_tab.js` | `serve_audio_js` | Audio tab JavaScript (microphone, waveform, recording) |
 | GET | `/docs_tab.js` | `serve_docs_js` | Documentation tab JavaScript |
 | GET | `/ots.js` | `serve_ots_js` | OpenTimestamps panel JavaScript |
-| GET | `/ws/encode` | `ws_encode_handler` | Video encode WebSocket (binary JPEG → signed frame) |
+| GET | `/ws/encode` | `ws_encode_handler` | Video encode WebSocket (raw binary image → JSON containing signed PNG) |
 | GET | `/ws/decode` | `ws_decode_handler` | Video decode WebSocket (extract + real signature verification) |
 | GET | `/ws/audio/encode` | `ws_audio_encode_handler` | Audio encode WebSocket (PCM → LSB signed chunk) |
 | GET | `/ws/audio/decode` | `ws_audio_decode_handler` | Audio decode WebSocket (extract + real signature verification) |
@@ -1104,18 +1138,39 @@ rule. Pending OTS state is separate from confirmed verification.
 
 #### `POST /api/webrtc/offer` Request/Response
 
-WHIP-style single-request signaling for the WebRTC transport. The body is a
-browser SDP offer; the response is the server SDP answer with **non-trickle
-ICE** — all server candidates are gathered before the answer is returned, so
-no trickle-ICE channel is required. Media flows over the negotiated **data
-channel only** (no RTP audio/video tracks); data-channel messages reuse the
-WebSocket encode/decode shapes (binary JPEG in, `encoded_frame`/`decoded_frame`
-JSON out), and the same session signer, live config, size caps (4 MiB message
-/ 1 MiB frame, 4096×4096 JPEG), and real-verification pipeline apply. Requires
-Bearer auth when an auth token is configured; non-offer SDP types and
-malformed SDP are rejected with HTTP 400. Answer-side peer connections are
-reaped on disconnect, failure, data-channel close, or after a 60 s
-never-connected deadline.
+WHIP-style signaling accepts a browser SDP offer and returns a server answer
+with non-trickle ICE. Exact signed-artifact request/reply traffic uses the data
+channel. An optional H.264 RTP track is a lossy preview, not signature evidence.
+Requires configured bearer authentication; malformed/non-offer SDP rejects.
+Peers are reaped on failure, disconnect, channel close, idle or never-connected
+timeout.
+
+RTC does **not** accept raw binary JPEG images as application messages.
+Serialize UTF-8 JSON with `kind: "encode"`, `msg_id`, optional `sent_unix_ms`
+and `jpeg_b64` (base64 image bytes), or `kind: "decode_poll"`. Binary chunks
+use a 20-byte big-endian header:
+`STGO[4] | msg_id:u64 | chunk_index:u32 | chunk_count:u32 | payload`.
+Index is zero-based; each whole chunk is at most 16 KiB (16,364 payload bytes).
+Reassembled application JSON is limited to **4,194,304 bytes including
+base64 and JSON overhead**, not decoded image size. Small server replies may
+be text JSON; larger replies use the same STGO framing. Signed frames are PNG.
+
+The browser measures the complete serialized request before sending any chunks.
+Oversize errors report actual/maximum bytes and advise smaller resolution or
+WebSocket selection; they do not silently close the peer. Server assembly also
+bounds incomplete messages, aggregate retention and lifetime. WebSocket has its
+own raw-image/message/frame caps; it is not an unlimited alternative.
+
+Clients maintain one outstanding encode request with capture/encode/transport
+generation ownership; decode disconnect cannot release it. Encode reconnect
+invalidates the current artifact target, so old cached verification stays
+historical. Server latest-completed cache is global, not private to the browser.
+Current verdicts must match target index/revision/metadata within the active
+encode epoch. Archives bind ownership at request submission, not reply arrival;
+starting a recording cannot capture an earlier in-flight request. Audio counts
+each accepted artifact once despite repeated verification cache replies.
+All such verdicts are server-reported. Independently verify exported PNG/WAV
+with a separately trusted public key; ZIP manifests and counters are not proofs.
 
 ```json
 // Request

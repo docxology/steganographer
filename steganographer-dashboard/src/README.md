@@ -1,5 +1,6 @@
 # src/
 
-Dashboard crate source: `lib.rs` (Axum app assembly), `ws_handler.rs`
-(WebSocket streaming), and `static/` (six web assets for the 3-tab GUI:
-Video/Audio/Docs). Served by the `dashboard` CLI subcommand.
+Dashboard source: `lib.rs` assembles Axum routes/state, `ws_handler.rs` handles
+bounded signed-artifact WebSockets, optional `webrtc.rs` handles real peers and
+STGO-framed JSON/base64, and `static/` owns browser lifecycle/archive UI.
+Served by the `dashboard` CLI subcommand; see the crate README for trust limits.

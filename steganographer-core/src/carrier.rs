@@ -654,7 +654,8 @@ fn extract_sequential_lsb(
 
     let packet_bytes = extract_bytes(carrier, stride, packet_len, config.bits_per_unit)?;
     let packet = GenericPacket::decode(&packet_bytes, limits)?;
-    if packet.envelope.placement.algorithm != PLACEMENT_SEQUENTIAL
+    if packet.locator.flags & FLAG_KEYED_LOCATOR != 0
+        || packet.envelope.placement.algorithm != PLACEMENT_SEQUENTIAL
         || packet.envelope.placement.version != 1
         || !packet.envelope.placement.parameters.is_empty()
         || packet.envelope.kernel.algorithm != KERNEL_SPATIAL_LSB
@@ -1574,6 +1575,45 @@ mod tests {
                 .unwrap_err(),
             CarrierError::DescriptorMismatch
         );
+    }
+
+    #[test]
+    fn sequential_extract_rejects_keyed_flag_in_byte_and_pcm_carriers() {
+        let limits = DecodeLimits::default();
+        for bits in 1..=4 {
+            let config = EmbeddingConfig::new(bits).unwrap();
+            let valid = packet(bits, b"sequential payload");
+            let mut flagged = valid.clone();
+            let flags = u16::from_be_bytes([flagged[6], flagged[7]]) | FLAG_KEYED_LOCATOR;
+            flagged[6..8].copy_from_slice(&flags.to_be_bytes());
+            // The changed public locator flag does not change the envelope CRC
+            // or logical digest. Framing alone cannot choose a carrier kernel.
+            assert!(GenericPacket::decode(&flagged, &limits).is_ok());
+            for stride in [1, 2] {
+                let units = (valid.len() * 8).div_ceil(bits as usize);
+                let mut carrier = vec![0x5A; units * stride];
+                write_bits_sequential(&mut carrier, stride, &valid, bits);
+                let extract = |carrier: &[u8]| {
+                    if stride == 1 {
+                        SpatialLsb.extract_packet(carrier, &config, &limits)
+                    } else {
+                        AudioSpatialLsb.extract_packet(carrier, &config, &limits)
+                    }
+                };
+                assert_eq!(
+                    extract(&carrier).unwrap().packet.body,
+                    b"sequential payload"
+                );
+                write_bits_sequential(&mut carrier, stride, &flagged, bits);
+                assert_eq!(
+                    extract(&carrier).unwrap_err(),
+                    CarrierError::DescriptorMismatch
+                );
+                if stride == 2 {
+                    assert!(carrier.iter().skip(1).step_by(2).all(|&byte| byte == 0x5A));
+                }
+            }
+        }
     }
 
     #[test]

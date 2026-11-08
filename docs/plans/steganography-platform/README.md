@@ -1,7 +1,7 @@
 # Steganography Platform Expansion Plan
 
-Status: implementation in progress  
-Target line: v0.6.x through v1.0  
+Status: historical design / implementation plan, not release qualification
+Target line: original v0.6.x through v1.0 planning sequence
 Scope owner: repository maintainers  
 Last scoped: 2026-07-28
 
@@ -21,9 +21,9 @@ The reference assessment used ST3GG commit
 That pin records the behavioral input to planning; it is not a source-code
 dependency.
 
-This directory is the implementation planning source of truth. The project
-roadmap remains the release-level summary and `TODO.md` remains the short list
-of active maintenance work.
+This directory retains point-in-time design contracts and work-package IDs,
+not current implementation/qualification evidence. The current user/API guides
+and changelog supersede historical baselines and proposed acceptance criteria.
 
 ## Outcomes
 
@@ -77,11 +77,11 @@ These are release-blocking constraints:
 - New carriers and detectors are independently feature-gated where dependency
   weight or platform availability warrants it.
 
-## Current baseline
+## Historical planning baseline
 
 ### Preserve
 
-- The `SignaturePayload` v2 layout and `STEG` magic.
+- The legacy signature concept and `STEG` magic; current format is v4 and old v2/v3 media must be re-encoded.
 - BLAKE3/SHA-2/SHA-3 hashing and Ed25519/secp256k1 signing.
 - ChaCha20-Poly1305 encryption and domain-separated key derivation.
 - Reed-Solomon, multi-frame spreading, hash chains, metrics, and key lifecycle.

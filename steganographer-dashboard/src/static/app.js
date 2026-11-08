@@ -6,6 +6,8 @@ const TRANSPORT_STORAGE_KEY = 'stego-transport';
 const WEBRTC_CHUNK_MAGIC = 0x5354474f;
 const WEBRTC_CHUNK_HEADER_BYTES = 20;
 const WEBRTC_CHUNK_PAYLOAD_MAX = 16384 - WEBRTC_CHUNK_HEADER_BYTES;
+// The server bounds the complete UTF-8 JSON message, not the decoded PNG.
+const WEBRTC_MESSAGE_MAX_BYTES = 4 * 1024 * 1024;
 const SESSION_START = new Date();
 const $ = id => document.getElementById(id);
 function ingestAuthToken() {
@@ -216,14 +218,13 @@ function setupConfigControls() {
 
 // One camera session owns every track, socket, interval and pending operation.
 let cameraActive = false, webcamStream = null, cameraGeneration = 0, transportGeneration = 0;
-let signInterval = null, signTimeout = null, awaitingSignResponse = false, pendingOriginalFrame = null;
-let signRequestId = 0;
+let signInterval = null, pendingVideoSign = null, videoEncodeGeneration = 0;
 let encodeWs = null, decodeWs = null, transport = null, transportFallback = false;
 let webrtcPc = null, webrtcDc = null, webrtcPollTimer = null, webrtcMsgId = 0;
 const wsReconnectTimers = new Set(), socketIntervals = new Set(), webrtcPartial = new Map();
 let latestVideoFrame = null, lastVideoVerificationId = null, lastVerifyData = { verified: null };
 let diffViewerEnabled = false, diffOverlayEnabled = true, lastOriginalFrameData = null, lastWatermarkedFrameData = null;
-let videoRecording = false, videoArchive = null;
+let videoRecording = false, videoArchive = null, videoArchiveGeneration = 0;
 function clearVideoVerification(text = 'Waiting for a signed frame') {
     lastVerifyData = { verified: null, status: text };
     $('verify-waiting').classList.add('hidden'); $('verify-result').classList.remove('hidden');
@@ -231,10 +232,16 @@ function clearVideoVerification(text = 'Waiting for a signed frame') {
     $('verify-status-icon').textContent = '…'; $('verify-status-text').textContent = text;
     ['field-frame-index', 'field-hash', 'field-sig-preview', 'field-backend', 'field-verify-latency'].forEach(id => { $(id).textContent = '—'; $(id).title = ''; });
 }
-function clearSigningRequest() {
-    ++signRequestId;
-    awaitingSignResponse = false; clearTimeout(signTimeout); signTimeout = null; pendingOriginalFrame = null;
+function clearSigningRequest(request = pendingVideoSign) {
+    if (request !== pendingVideoSign) return;
+    if (request) clearTimeout(request.timeout);
+    pendingVideoSign = null;
     $('sign-indicator').classList.add('hidden');
+}
+function invalidateVideoTarget(text) {
+    ++videoEncodeGeneration;
+    latestVideoFrame = null;
+    clearVideoVerification(text);
 }
 function updateConnectionStatus(connected, label) {
     $('status-dot').classList.toggle('connected', connected); $('status-dot').classList.toggle('disconnected', !connected);
@@ -255,7 +262,7 @@ function stopTransport() {
     }
     encodeWs = decodeWs = null; teardownWebRtcTransport(); transport = null; clearSigningRequest();
     updateConnectionStatus(false, 'Stopped');
-    clearVideoVerification('Transport stopped — previous results are historical');
+    invalidateVideoTarget('Transport stopped — previous results are historical');
 }
 function stopCamera() {
     ++cameraGeneration; cameraActive = false; clearInterval(signInterval); signInterval = null;
@@ -299,35 +306,48 @@ function startSigningInterval() { clearInterval(signInterval); signInterval = se
 function transportIsConnected() { return transport === 'webrtc' ? webrtcDc?.readyState === 'open' : encodeWs?.readyState === WebSocket.OPEN; }
 function sendFrameForSigning() {
     const video = $('webcam-video');
-    if (!cameraActive || awaitingSignResponse || !transportIsConnected() || video.readyState < 2) return;
-    const generation = cameraGeneration, transportEpoch = transportGeneration;
+    if (!cameraActive || pendingVideoSign || !transportIsConnected() || video.readyState < 2) return;
     const canvas = document.createElement('canvas'); canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d'); ctx.drawImage(video, 0, 0);
-    awaitingSignResponse = true; pendingOriginalFrame = diffViewerEnabled ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
-    const requestId = ++signRequestId;
+    const request = {
+        cameraGeneration, transportGeneration, encodeGeneration: videoEncodeGeneration,
+        original: diffViewerEnabled ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null,
+        archive: videoRecording ? videoArchive : null, archiveGeneration: videoArchiveGeneration,
+        rtcId: null, replyReceived: false, timeout: null,
+    };
+    pendingVideoSign = request;
+    const current = () => cameraActive && pendingVideoSign === request &&
+        request.cameraGeneration === cameraGeneration && request.transportGeneration === transportGeneration &&
+        request.encodeGeneration === videoEncodeGeneration;
     $('sign-indicator').classList.remove('hidden');
-    signTimeout = setTimeout(() => {
+    request.timeout = setTimeout(() => {
+        if (!current()) return;
         showToast('Signing timed out — reconnecting transport', 'error'); stopTransport(); if (cameraActive) connectTransport();
     }, 10000);
     // PNG input avoids JPEG motion/quantization being mislabeled as embedding differences.
     canvas.toBlob(async blob => {
-        const current = () => generation === cameraGeneration && transportEpoch === transportGeneration && awaitingSignResponse && requestId === signRequestId;
         if (!current()) return;
         try {
             if (!blob || blob.size > 4 * 1024 * 1024) throw new Error('Frame exceeds 4 MiB; choose a smaller resolution');
             const bytes = await blob.arrayBuffer(); if (!current()) return;
             if (!transportIsConnected()) throw new Error('Signing transport disconnected');
-            if (transport === 'webrtc') webRtcSendChunked(++webrtcMsgId, new TextEncoder().encode(JSON.stringify({
-                kind: 'encode', msg_id: webrtcMsgId, sent_unix_ms: Date.now(), jpeg_b64: btoa(bytesToChunks(new Uint8Array(bytes))),
-            })));
-            else encodeWs.send(bytes);
-        } catch (err) { if (current()) { clearSigningRequest(); showToast(err.message, 'error'); } }
+            if (transport === 'webrtc') {
+                request.rtcId = ++webrtcMsgId;
+                webRtcSendChunked(request.rtcId, new TextEncoder().encode(JSON.stringify({
+                    kind: 'encode', msg_id: request.rtcId, sent_unix_ms: Date.now(), jpeg_b64: btoa(bytesToChunks(new Uint8Array(bytes))),
+                })));
+            } else encodeWs.send(bytes);
+        } catch (err) { if (current()) { clearSigningRequest(request); showToast(err.message, 'error'); } }
     }, 'image/png');
 }
 function connectVideoSocket(kind) {
     if (!cameraActive) return;
     const generation = transportGeneration, socket = new WebSocket(wsUrl('/ws/' + kind));
     if (kind === 'encode') encodeWs = socket; else decodeWs = socket;
+    if (kind === 'encode') {
+        clearSigningRequest();
+        invalidateVideoTarget('Encode connected anew — waiting for a new signed frame; previous results are historical');
+    }
     let pollTimer = null;
     const current = () => cameraActive && generation === transportGeneration && socket === (kind === 'encode' ? encodeWs : decodeWs);
     socket.onopen = () => {
@@ -341,12 +361,19 @@ function connectVideoSocket(kind) {
     socket.onmessage = event => {
         if (!current()) return;
         try { const msg = JSON.parse(event.data); if (kind === 'encode') handleEncodeMessage(msg); else handleDecodeMessage(msg); }
-        catch (_) { if (kind === 'encode') clearSigningRequest(); }
+        catch (_) {
+            if (kind === 'encode') clearSigningRequest();
+            else clearVideoVerification('Invalid verification reply — no current verdict');
+        }
     };
     socket.onclose = () => {
         clearInterval(pollTimer); socketIntervals.delete(pollTimer);
         if (!current()) return;
-        clearSigningRequest(); clearVideoVerification('Disconnected — previous results are historical'); updateConnectionStatus(false);
+        if (kind === 'encode') {
+            clearSigningRequest();
+            invalidateVideoTarget('Encode disconnected — previous results are historical');
+            updateConnectionStatus(false);
+        } else clearVideoVerification('Verification channel disconnected — no current verdict');
         const timer = setTimeout(() => { wsReconnectTimers.delete(timer); if (current()) connectVideoSocket(kind); }, WS_RECONNECT_DELAY_MS);
         wsReconnectTimers.add(timer);
     };
@@ -365,7 +392,9 @@ function connectTransport() {
     else connectWsTransport();
 }
 function fallbackToWs(reason) {
+    ++transportGeneration;
     teardownWebRtcTransport(); clearSigningRequest();
+    invalidateVideoTarget('Transport changed — previous results are historical');
     if (!cameraActive) return;
     if (resolveTransportPreference() !== 'auto') {
         transport = null; updateConnectionStatus(false, 'Pinned WebRTC unavailable');
@@ -382,6 +411,7 @@ function parseIceServersForBrowser(urls) {
     });
 }
 async function connectWebRtcTransport() {
+    invalidateVideoTarget('WebRTC connecting — waiting for a new signed frame; previous results are historical');
     const generation = transportGeneration, current = () => cameraActive && generation === transportGeneration;
     let pc = null, answerTimer = null;
     try {
@@ -419,6 +449,9 @@ async function connectWebRtcTransport() {
     finally { clearTimeout(answerTimer); }
 }
 function webRtcSendChunked(id, bytes) {
+    if (bytes.byteLength > WEBRTC_MESSAGE_MAX_BYTES) {
+        throw new Error(`WebRTC transport limit: serialized request is ${fmtNum(bytes.byteLength)} bytes; maximum is ${fmtNum(WEBRTC_MESSAGE_MAX_BYTES)} bytes including JSON/base64. Choose a smaller camera resolution or select WebSocket transport.`);
+    }
     const count = Math.max(1, Math.ceil(bytes.length / WEBRTC_CHUNK_PAYLOAD_MAX));
     for (let index = 0; index < count; index++) {
         const slice = bytes.subarray(index * WEBRTC_CHUNK_PAYLOAD_MAX, (index + 1) * WEBRTC_CHUNK_PAYLOAD_MAX);
@@ -447,33 +480,41 @@ function handleWebRtcMessage(data) {
     }
     try {
         const msg = JSON.parse(payload);
-        if (['encoded_frame', 'metrics', 'error', 'encode_error'].includes(msg.type)) handleEncodeMessage(msg);
+        if (['encoded_frame', 'metrics', 'error', 'encode_error'].includes(msg.type) &&
+            pendingVideoSign?.rtcId === msg.msg_id) handleEncodeMessage(msg);
         else handleDecodeMessage(msg);
-    } catch (_) { clearSigningRequest(); }
+    } catch (_) { clearVideoVerification('Invalid transport reply — no current verdict'); }
 }
 async function handleEncodeMessage(msg) {
     if (msg.ots) window.OtsPanel?.applyMetrics(msg.ots);
     if (msg.data) applyMetrics(msg.data);
     if (['error', 'encode_error'].includes(msg.type)) {
+        if (!pendingVideoSign) return;
         clearSigningRequest(); clearVideoVerification('Encoding failed — no new signed frame');
         showToast(msg.message || msg.error || 'Encoding failed', 'error'); return;
     }
-    if (msg.type !== 'encoded_frame' || !cameraActive || !awaitingSignResponse) return;
-    const generation = cameraGeneration, epoch = transportGeneration, original = pendingOriginalFrame, requestId = signRequestId;
+    if (msg.type !== 'encoded_frame' || !cameraActive || !pendingVideoSign || pendingVideoSign.replyReceived) return;
+    const request = pendingVideoSign, original = request.original;
+    request.replyReceived = true;
+    const current = () => cameraActive && pendingVideoSign === request &&
+        request.cameraGeneration === cameraGeneration && request.transportGeneration === transportGeneration &&
+        request.encodeGeneration === videoEncodeGeneration;
     try {
         if (msg.image_mime !== 'image/png' || !msg.frame || !/^[\da-f]{64}$/i.test(msg.public_key || '') ||
             msg.frame_index == null || msg.cache_revision == null || !Number.isInteger(msg.lsb_bits)) throw new Error('Server did not return lossless signed media with extraction metadata');
         const bytes = decodeArchiveBase64(msg.frame), image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
-        if (generation !== cameraGeneration || epoch !== transportGeneration || requestId !== signRequestId) { image.close(); return; }
+        if (!current()) { image.close(); return; }
         const canvas = $('encode-canvas'); canvas.width = image.width; canvas.height = image.height;
         canvas.getContext('2d').drawImage(image, 0, 0); image.close();
-        latestVideoFrame = { frame_index: msg.frame_index, cache_revision: msg.cache_revision,
+        latestVideoFrame = { cameraGeneration, transportGeneration, encodeGeneration: videoEncodeGeneration,
+            frame_index: msg.frame_index, cache_revision: msg.cache_revision,
             public_key: msg.public_key, lsb_bits: msg.lsb_bits, stego_type: 'video', kernel: 'lsb', signing_backend: 'ed25519',
             width: msg.width, height: msg.height, payload: msg.payload, media_digest: msg.media_digest, received_at: new Date().toISOString() };
         $('identity-value').textContent = truncateIdentity(msg.public_key); $('identity-value').title = msg.public_key;
         $('footer-resolution-value').textContent = `${msg.width}×${msg.height}`;
         clearVideoVerification('Signed frame received — server verification pending');
-        if (videoRecording && !videoArchive.add(`frame-${msg.frame_index}-revision-${msg.cache_revision}.png`, bytes, latestVideoFrame)) {
+        if (videoRecording && request.archive === videoArchive && request.archiveGeneration === videoArchiveGeneration &&
+            !request.archive.add(`frame-${msg.frame_index}-revision-${msg.cache_revision}.png`, bytes, latestVideoFrame)) {
             showToast('Recording limit reached (64 MiB / 300 frames); archive stopped before next frame', 'error'); toggleVideoRecording();
         }
         if (diffViewerEnabled && original && original.width === canvas.width && original.height === canvas.height) {
@@ -481,20 +522,23 @@ async function handleEncodeMessage(msg) {
         }
         window.OtsPanel?.refreshStatus();
     } catch (err) {
-        if (generation === cameraGeneration && epoch === transportGeneration && requestId === signRequestId) {
+        if (current()) {
             clearVideoVerification('Signed artifact unavailable'); showToast(err.message, 'error');
         }
     }
-    finally { if (generation === cameraGeneration && epoch === transportGeneration && requestId === signRequestId) clearSigningRequest(); }
+    finally { if (current()) clearSigningRequest(request); }
 }
 function handleDecodeMessage(msg) {
     if (msg.ots) window.OtsPanel?.applyMetrics(msg.ots); if (msg.data) applyMetrics(msg.data);
     if (!cameraActive) return;
+    if (msg.type === 'error') { clearVideoVerification('Verification failed — no current verdict'); return; }
     if (msg.waiting || msg.verified_stale || msg.payload?.stale) { clearVideoVerification(msg.waiting ? 'Waiting for signed media' : 'Server verification pending'); return; }
     if (msg.type !== 'decoded_frame') return;
     if (typeof msg.verified !== 'boolean') { clearVideoVerification('Server verification pending'); return; }
     const id = msg.frame_index ?? msg.payload?.frame_index;
-    if (!latestVideoFrame || msg.cache_revision == null ||
+    if (!latestVideoFrame || latestVideoFrame.cameraGeneration !== cameraGeneration ||
+        latestVideoFrame.transportGeneration !== transportGeneration || latestVideoFrame.encodeGeneration !== videoEncodeGeneration ||
+        msg.cache_revision == null ||
         String(msg.cache_revision) !== String(latestVideoFrame.cache_revision) || String(id) !== String(latestVideoFrame.frame_index)) return;
     lastVerifyData = { frame_index: id, cache_revision: msg.cache_revision, verified: msg.verified, hash: msg.payload?.hash, backend: msg.backend, verify_us: msg.verify_us };
     $('verify-waiting').classList.add('hidden'); $('verify-result').classList.remove('hidden');
@@ -506,7 +550,8 @@ function handleDecodeMessage(msg) {
     $('field-backend').textContent = msg.backend || 'ed25519'; $('field-verify-latency').textContent = `${msg.verify_us || 0} μs`;
     if (lastVideoVerificationId !== String(msg.cache_revision)) {
         const entry = document.createElement('div'); entry.className = 'log-entry ' + (msg.verified ? 'log-ok' : 'log-fail');
-        entry.textContent = `${new Date().toLocaleTimeString()}  #${id}  ${msg.verified ? 'OK' : 'INVALID'} · ${msg.verify_us || 0} μs`;
+        entry.textContent = `History · ${new Date().toLocaleTimeString()}  #${id}  ${msg.verified ? 'OK' : 'INVALID'} · ${msg.verify_us || 0} μs`;
+        entry.title = 'Historical server-reported result, not the current encode target or independent archive verification.';
         $('verify-log').prepend(entry); while ($('verify-log').children.length > 20) $('verify-log').lastChild.remove();
         lastVideoVerificationId = String(msg.cache_revision);
     }
@@ -524,6 +569,7 @@ function toggleVideoRecording() {
     if (!cameraActive) { showToast('Start camera before recording signed snapshots', 'error'); return; }
     if (!serverVersion) { showToast('Wait for dashboard initialization before recording', 'error'); return; }
     videoArchive = createSignedArchive('video');
+    ++videoArchiveGeneration;
     videoRecording = true;
     $('record-video-btn').classList.add('recording');
     $('record-video-label').textContent = 'Stop & save ZIP';

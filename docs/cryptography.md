@@ -114,7 +114,26 @@ packet_id(16) || payload_kind:u16 BE || original_length:u64 BE
 
 This is not full-envelope authentication. Unknown critical fields/unsupported transforms and flag/transform inconsistencies fail closed; preserving unknown non-critical metadata does not authenticate it.
 
+Compression is admitted only for logical input at most 64 MiB in the shared
+transform APIs, and recorded only if DEFLATE shrinks it; configured CLI limits
+may be lower. Readers preflight stage order, versions, singleton descriptors
+and bounded work before credentials/KDF/body allocation, then enforce declared
+logical length and output limits during reversal. Locator keyed flags must
+agree with placement. For nested decoding, an identifiable parent-id field is
+the opt-in marker: mere `STG3` prefix bytes stay opaque. Once opted in, child
+framing, exact span, parent linkage, depth/aggregate bounds and cycles are strict.
+
 Generic CLI `decode`/`extract --trusted-signer <full-public-key-hex>` rejects unsigned packets and mismatched signing keys. Reports distinguish `signer_public_key` from `signer_trusted`. Without a trusted pin, a mathematically valid self-supplied signer is still untrusted.
+
+### Timestamp commitment scope
+
+Dedicated `ots stamp` / `ots verify` use exact-file SHA-256 (`sha256-file`);
+legacy optional encode/verify OTS hashes kernel-canonical media instead.
+Dashboard video hashes delivered PNG file bytes, while audio hashes raw signed
+PCM, not its export WAV wrapper. These scopes are not interchangeable.
+`verify_with_upgrade` returns optional changed proof bytes for append-only
+publication; completed Bitcoin proofs skip calendars but still require trusted
+explorer verification. Pending is not confirmed. See [OTS Integration](ots-integration.md).
 
 ### Frozen protocol-v1 vectors
 

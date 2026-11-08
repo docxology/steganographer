@@ -64,9 +64,22 @@ impl MediaInput {
     }
 }
 
+// Legacy spread shards retain their media extension before a bounded suffix.
+// Validation and every default read must use exactly the same naming policy.
+fn media_format_path(path: &str) -> &str {
+    path.rsplit_once('_')
+        .filter(|(_, suffix)| {
+            matches!(
+                *suffix,
+                "001" | "002" | "003" | "004" | "005" | "006" | "007" | "008"
+            )
+        })
+        .map_or(path, |(base, _)| base)
+}
+
 /// Infer the input representation from its extension and selected algorithm.
 pub fn detect_format(path: &str, stego_type: &str) -> String {
-    let lower = path.to_lowercase();
+    let lower = media_format_path(path).to_lowercase();
     if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         "image".to_string()
     } else if lower.ends_with(".wav") {
@@ -293,16 +306,7 @@ pub(crate) fn validate_media_output(
     media: &MediaInput,
     _stego_type: &str,
 ) -> anyhow::Result<()> {
-    let format_path = path
-        .rsplit_once('_')
-        .filter(|(_, suffix)| {
-            matches!(
-                *suffix,
-                "001" | "002" | "003" | "004" | "005" | "006" | "007" | "008"
-            )
-        })
-        .map_or(path, |(base, _)| base);
-    let extension = Path::new(format_path)
+    let extension = Path::new(media_format_path(path))
         .extension()
         .and_then(|v| v.to_str())
         .unwrap_or_default()

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 0.9.0 — 2026-11-08
+
+### Added
+
+- Exact sequential generic RGB/PCM CLI `capacity`, including public metadata,
+  optional real signing overhead and effective limits in the JSON envelope.
+
+### Fixed
+
+- Preserve unavailable statistical analysis as inconclusive; report detector,
+  traversal and decode budgets separately from positive evidence. Scan opens
+  are descriptor-relative/no-follow; revocation updates use a stable companion lock.
+- Bound adaptive selection to the framing-sized best prefix without changing
+  stable ordering. Enforce compression admission and locator/placement
+  consistency; nested decoding expands only explicit parent-linked children.
+- Guard native video spans against actual mapped memory before dependency
+  slice access. File helpers require explicit overwrite intent, reject aliases,
+  and privately stage output until successful EOS; output directories remain trusted.
+- Share OTS verification/upgrade lifecycle, avoid calendar contact for completed
+  Bitcoin proofs and preserve original receipts during upgrade publication.
+- Keep dashboard encode ownership across decode disconnects, reject stale
+  current-epoch cache results, bind archives at submission and count audio once.
+  RTC requests use bounded STGO-framed JSON/base64 with actionable pre-send errors.
+- Capture default release source bytes/modes from committed Git objects;
+  explicitly dirty snapshots are not commit-bound. Reject duplicate normalized
+  archive paths while retaining strict single-member gzip and no-clobber output.
+
+### Migration and qualification
+
+- `process_video_file` / `process_audio_file` require trailing `overwrite: bool`;
+  no compatibility overloads. See the compatibility and GStreamer guides.
+- Frozen generic protocol-v1 fixtures are unchanged. Historical release entries
+  remain historical. Release receipts identify exercised hosts/configurations;
+  they are not a general cross-platform or physical-device guarantee.
+
 ## 0.8.2 — 2026-11-07
 
 ### Fixed

@@ -922,6 +922,7 @@ fn process_audio_frame(
     state.metrics.record_embed_duration(embed_duration);
     state.metrics.record_verify_duration(verify_duration);
     state.metrics.record_verify_ok();
+    state.metrics.record_frame();
     Ok(reply)
 }
 
@@ -1076,6 +1077,12 @@ mod tests {
     async fn returned_pcm_is_independently_verifiable_and_high_bit_tamper_fails() {
         let state = state();
         let reply = audio_reply(&state, 17);
+        assert_eq!(state.metrics.frames_processed(), 1);
+        assert_eq!(state.metrics.frames_verified_ok(), 1);
+        assert_eq!(
+            state.metrics.avg_sign_latency_us(),
+            reply["sign_us"].as_u64().unwrap() as f64
+        );
         let pcm = base64_decode(reply["pcm_s16le"].as_str().unwrap()).unwrap();
         assert!(verify_returned_pcm(&reply, &pcm));
         let mut tampered = pcm;
@@ -1095,6 +1102,16 @@ mod tests {
             state.metrics.frames_verified_ok(),
             "polls must not count the same chunk again"
         );
+        assert_eq!(state.metrics.frames_processed(), 1);
+        assert!(process_audio_frame(&state, 18, r#"{"type":"audio_frame"}"#).is_err());
+        assert_eq!(state.metrics.frames_processed(), 1);
+        assert_eq!(
+            process_audio_poll(&state).await["cache_revision"],
+            reply["cache_revision"]
+        );
+        audio_reply(&state, 18);
+        assert_eq!(state.metrics.frames_processed(), 2);
+        assert_eq!(state.metrics.frames_verified_ok(), 2);
     }
 
     #[test]

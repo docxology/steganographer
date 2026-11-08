@@ -47,6 +47,11 @@ zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
 gstreamer = { version = "0.23", features = ["v1_22"], optional = true }
 tempfile = "3"
+cap-std = "4"
+cap-fs-ext = "4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 flate2 = "1"
