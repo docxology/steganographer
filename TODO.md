@@ -318,19 +318,18 @@ Current observed workspace totals are maintained only in root `AGENTS.md`.
 
 ### Remaining (owner-gated / measurement)
 
-- [ ] **JSON v1 envelope (SUR-003)** — schema v1 publication needs owner
-      sign-off; exit codes landed 2026-09-20.
-- [ ] **DOC-003 / DOC-004** — pptx/xlsx deep analysis (headers/footers,
-      embedded media) and PDF parser evaluation are owner-gated.
+- [x] **JSON v1 envelope (SUR-003)** — completed 2026-09-22 below; the
+      `steganographer.cli/v1` envelope and exit codes ship.
+- [x] **DOC-003 / DOC-004** — completed 2026-09-22 below; extended OOXML
+      analysis and the bounded PDF structural scan ship.
 - [ ] **Learned watermarking encoder** — owner intent required per backlog
       (training data licensing, model size budget); unchanged.
 - [ ] **WebRTC browser-side latency/fps measurement** — the transport is
       landed and in-process tests prove the pipeline; measuring ≥ 15 fps
       720p / < 500 ms end-to-end latency on localhost is now possible via a
       headless Chromium run against the dashboard and is owner-run.
-- [ ] **Golden-vector freeze** — owner materializes
-      `cargo test -p steganographer-core --test golden_vectors -- --ignored`
-      (alpha-provisional corpus, unchanged).
+- [x] **Golden-vector freeze** — completed 2026-09-22 below; vectors are
+      stable and the `immutability` job fails on drift.
 
 
 ---
