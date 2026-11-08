@@ -1557,5 +1557,3 @@ pub fn batch_process(
     }
     Ok(())
 }
-
-
