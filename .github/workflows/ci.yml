@@ -66,11 +66,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install GStreamer (Linux)
+      - name: Install GStreamer and ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
+          # ffmpeg (with libx264) backs the real-H264 learned test; without it the
+          # test returns before exercising a codec and cargo still reports success.
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good ffmpeg
 
       - name: Install GStreamer (macOS)
         if: runner.os == 'macOS'
