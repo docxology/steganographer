@@ -259,11 +259,7 @@ pub fn sample_pair_detect(data: &[u8]) -> DetectionResult {
     // We measure the "pair-value-pair (PVP) histogram" for pairs (2i, 2i+1)
     // within each byte and compute the imbalance.
 
-    // Reuse the chi-squared approach on the pair histogram of each byte
-    // to get a cleaner signal.
-    let _pair_hist = [0u64; 128]; // pair index = min(a,b)/2 concept
-                                  // Actually, SPA uses the "value pair" concept: (2i, 2i+1).
-                                  // We compute how many bytes fall into value 2i vs 2i+1.
+    // Histogram bytes into value pairs (2i, 2i+1) for the SPA imbalance.
     let mut val_hist = [0u64; 256];
     for &b in data {
         val_hist[b as usize] += 1;
@@ -278,11 +274,9 @@ pub fn sample_pair_detect(data: &[u8]) -> DetectionResult {
         let k1 = val_hist[2 * i + 1];
         let sum = k0 + k1;
         if sum > 0 {
-            let expected = sum as f64 / 2.0;
             let diff = (k0 as f64 - k1 as f64).abs();
             pair_imbalance += diff * diff / (sum as f64);
             pair_count += 1;
-            let _ = expected;
         }
     }
 

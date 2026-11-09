@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 0.9.1 — 2026-11-09
+
+### Added
+
+- OTS interval-bounds, configured proof-directory publication, and `OtsSettings`
+  conversion/validation regressions, including invalid settings that must not be
+  bypassed when the feature is disabled.
 
 ### Changed
 
@@ -14,12 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affecting the result (XOR is commutative).
 - CI runs with top-level `contents: read`, `persist-credentials: false` on every
   checkout, and `pull-requests: write` only on the gitleaks job.
+- CI helper installs pin `cargo-audit 0.22.2`, `cargo-deny 0.20.2` and
+  `cargo-fuzz 0.13.2` with `--locked`; the lint job explicitly installs stable.
+
+### Fixed
+
+- The real-H264 CI job installs ffmpeg (with libx264), so the learned test
+  exercises an actual codec instead of returning early. Dependabot now ignores
+  the `dtolnay/rust-toolchain` ref because it is the declared MSRV gate.
 
 ### Removed
 
 - Unused private CLI wrappers `encode_multi_frame_file` and `cmd_verify::run`,
   which duplicated signing/orchestration logic and emitted an older unwrapped
   result shape.
+- Dead SPA pair-histogram scaffold locals in `steganalysis`.
 
 ### Documentation
 

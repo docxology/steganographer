@@ -130,7 +130,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Run security audit
         run: |
@@ -145,8 +145,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable  # held: the ref carries the toolchain, so this channel is tracked deliberately; the pin form is @v1 with `with: toolchain: stable` — a deliberate edit, not a pin sweep; revisit 2027-02-01
+
       - name: Install cargo-deny
-        run: cargo install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Run cargo-deny (licenses + advisories)
         run: cargo deny --all-features check
@@ -184,7 +187,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly  # held: the ref carries the toolchain, so nightly is tracked deliberately; the pin form is @v1 with `with: toolchain: nightly`; revisit 2027-02-01
 
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
 
       - name: Run fuzz targets (60s each)
         run: |
