@@ -8,22 +8,22 @@
 
 | Path | Type | Description |
 | ---- | ---- | ----------- |
-| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed + interleaved placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate with public-key-only `MlDsaVerifier`/`HybridVerifier`, Hybrid), metrics, config, frequency-domain kernels, encryption (packet-id-derived AEAD nonce), ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms (incl. the `TRANSFORM_KDF_ARGON2ID` password-KDF transform, PKT-007), steganalysis, forensics with the stable detector registry + calibration corpus (FOR-001) and OOXML/ZIP container analysis (DOC-001/DOC-002), bounded nested decode (`decode_nested`, PKT-009), unicode-text detectors (FOR-005), and WASM inspection facade (31 modules + `forensics/ooxml` + `lib.rs`) |
+| `steganographer-core/` | Crate | Pure algorithms: generic packets/carriers (byte + PCM S16 LSB), keyed + interleaved placement, LSB video/audio, crypto, overlays, signing (Ed25519, Ethereum, real FIPS 204 ML-DSA via the RustCrypto `ml-dsa` crate with public-key-only `MlDsaVerifier`/`HybridVerifier`, Hybrid), metrics, config, frequency-domain kernels, encryption (packet-id-derived AEAD nonce), ECC, multi-frame, adaptive, hash-chain, KDF, password KDF, transforms (incl. the `TRANSFORM_KDF_ARGON2ID` password-KDF transform, PKT-007), steganalysis, forensics with the stable detector registry + calibration corpus (FOR-001) and OOXML/ZIP container analysis (DOC-001/DOC-002), bounded nested decode (`decode_nested`, PKT-009), unicode-text detectors (FOR-005), and WASM inspection facade (`lib.rs`, `forensics/ooxml`, and `src/` modules; file listings are authoritative) |
 | `steganographer-gst/` | Crate | AppSink/AppSrc bridges, exact RGB Matroska/whole-selection PCM WAV, `stegovideo`/`stegoaudio` elements and cdylib packaging |
-| `steganographer-cli/` | Crate | Shared `src/cli.rs` Clap schema: 16 top-level commands with GStreamer, including exact generic capacity, generated shell completions/manuals, atomic file I/O |
+| `steganographer-cli/` | Crate | Shared `src/cli.rs` Clap schema: top-level commands with GStreamer, including exact generic capacity, generated shell completions/manuals, atomic file I/O |
 | `steganographer-dashboard/` | Crate | Video/Audio/Docs GUI, authenticated HTTP/WebSocket and optional WebRTC, bounded work and actual signed PNG/WAV archives |
 | `steganographer-wasm/` | Crate | Native facade plus generated node/web bindings, numeric-safe controls and exact `steganographer.packet-report.v2` metadata |
 | `config/` | Config | Example TOML configuration files |
-| `docs/` | Docs | 18 user guides, documentation/planning indexes, seven platform-planning specifications and supporting metadata |
+| `docs/` | Docs | User guides, documentation/planning indexes, platform-planning specifications and supporting metadata (`scripts/status.sh` prints the live inventories) |
 | `steganographer.toml` | Config | Master configuration (fully documented) |
-| `run.sh` | Script | Interactive terminal menu (6 options: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info) |
+| `run.sh` | Script | Interactive terminal menu: Dashboard, CLI Tools, Live Pipelines, Quick Demo, Run Tests, System Info |
 
 ## File Counts
 
-- **Sources**: five workspace crates, eight fuzz targets, native integration tests and generated-binding regression scenarios. Use Cargo metadata/file listings instead of pinning a source-file count.
-- **Tests**: `cargo test --workspace --locked` = **808 passing tests** (default features); all-feature run: 862 passed; portable run: 701 passed. Each intentionally ignores only the immutable-fixture materializer. Parent-observed on macOS arm64, 2026-11-07; not Linux/Windows/hosted-CI qualification. This is the sole pinned count used by `scripts/status.sh`.
+- **Sources**: the Cargo workspace members, fuzz targets, native integration tests and generated-binding regression scenarios. Use `cargo metadata`/file listings; no source-file count is pinned here.
+- **Tests**: run `cargo test --workspace --locked` for the default count, `--all-features` for the full matrix, and the portable feature set for the GStreamer-free count. Each intentionally ignores only the immutable-fixture materializer. Observed matrices are recorded in the release `PROVENANCE.json` and CI runs; `scripts/status.sh` prints the live default count.
 - **Documentation**: `scripts/status.sh` derives top-level and platform-plan inventories; recursive documentation also includes image/manuscript metadata.
-- **Config files**: 2 TOML files (`steganographer.toml`, `config/example.toml`)
+- **Config files**: `steganographer.toml`, `config/example.toml`; `scripts/status.sh` prints the current inventory.
 
 ## Build & Test
 
@@ -33,7 +33,7 @@ cargo test -p steganographer-core --locked      # core only
 cargo test --workspace --locked                # default features; canonical count above
 ./run.sh                                       # Interactive menu
 ./scripts/status.sh                            # executable status: version, subcommand count, docs, git, test count
-./scripts/status.sh --check                    # exit 1 if the canonical test count in AGENTS.md drifts from cargo
+./scripts/status.sh --check                    # run the workspace tests; report the live count
 ```
 
 Minimum supported Rust: **1.91**. Check the locked workspace with all features

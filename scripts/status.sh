@@ -4,23 +4,20 @@
 #
 # Usage:
 #   ./scripts/status.sh           Print current workspace status
-#   ./scripts/status.sh --check   Exit 1 if the canonical test count in
-#                                 AGENTS.md disagrees with what cargo reports
+#   ./scripts/status.sh --check   Run the workspace tests and fail if they fail;
+#                                 counts are reported live, never pinned in prose
 #
-# This script is the verification path behind the status claims in
-# README.md ("Project Status") and the canonical Tests line in AGENTS.md.
+# This script derives the status claims; README/AGENTS signpost here instead of
+# locking counts.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-CHECK=0
 case "${1:-}" in
     "") [ "$#" -eq 0 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; } ;;
-    --check) [ "$#" -eq 1 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; }; CHECK=1 ;;
+    --check) [ "$#" -eq 1 ] || { printf 'Usage: %s [--check]\n' "$0" >&2; exit 2; } ;;
     *) printf 'Usage: %s [--check]\n' "$0" >&2; exit 2 ;;
 esac
-
-fail=0
 
 # Workspace version
 ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
@@ -37,6 +34,10 @@ docs=(docs/*.md)
 plans=(docs/plans/steganography-platform/*.md)
 printf 'docs: %s files in docs/ + %s in plans/steganography-platform/  (source: shell globs)\n' "${#docs[@]}" "${#plans[@]}"
 
+# Config inventory
+configs=(steganographer.toml config/example.toml)
+printf 'config files: %s  (source: explicit inventory)\n' "${configs[*]}"
+
 # Git state
 if [[ -e .git ]]; then
     up=$(git status -sb | head -1 | sed 's/^## //')
@@ -45,7 +46,7 @@ else
 fi
 printf 'git: %s\n' "$up"
 
-# Test count (slow; needs cargo). On --check this is the provenance gate.
+# Test count (slow; needs cargo). The count is reported live; no prose pins it.
 # Sum the "test result: ok. N passed" lines from every test binary and
 # doc-test target; retain complete diagnostics if any target fails.
 printf '\nrunning cargo test --workspace --locked (slow on cold caches) ...\n'
@@ -60,17 +61,4 @@ if [ "$tcount" = "0" ]; then
     exit 1
 fi
 
-# Canonical count home: root AGENTS.md Tests line
-canon=$(grep -m1 '^\- \*\*Tests\*\*' AGENTS.md | grep -oE '= \*\*[0-9]+ passing' | grep -oE '[0-9]+' || echo 0)
-printf 'canonical tests line (AGENTS.md): %s\n' "$canon"
-
-if [ "$CHECK" = "1" ] && [ "$tcount" != "$canon" ]; then
-    printf 'MISMATCH: actual %s != canonical %s — update the Tests line in AGENTS.md first, then defer elsewhere.\n' "$tcount" "$canon"
-    fail=1
-fi
-
-if [ "$CHECK" = "1" ] && [ "$subs" != "16" ]; then
-    printf 'NOTE: subcommand count is %s — docs that say "All 16 commands" may be stale.\n' "$subs"
-fi
-
-exit $fail
+exit 0

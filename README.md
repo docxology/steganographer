@@ -1,8 +1,8 @@
 # Steganographer
 
-Cryptographic media watermarking, bounded packet transport and forensic inspection in a five-crate Rust workspace.
+Cryptographic media watermarking, bounded packet transport and forensic inspection in a multi-crate Rust workspace.
 
-**v0.9.1**. Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
+[Latest release](https://github.com/docxology/steganographer/releases/latest). Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
 
 **Revoked historical identity:** [Git history retains an exposed signing key](docs/security.md#historical-signing-key-exposure). Managed signing and verification deny that identity; external applications must also retire its trust.
 
