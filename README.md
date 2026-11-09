@@ -2,7 +2,7 @@
 
 Cryptographic media watermarking, bounded packet transport and forensic inspection in a five-crate Rust workspace.
 
-**v0.9.0**. Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
+**v0.9.1**. Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
 
 ![Signed-media dashboard](docs/images/dashboard-video-tab.png)
 

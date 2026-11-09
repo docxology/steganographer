@@ -13,7 +13,7 @@ use std::{
 use steganographer_core::{
     crypto::{decode_hex, encode_hex},
     ots_client::{OTSClient, OTSError, OTSMethod, MAX_PROOF_BYTES},
-    ots_config::OtsConfig,
+    ots_config::{OtsConfig, OtsSettings},
     ots_handler,
 };
 const MAGIC: &[u8] = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94";
@@ -609,4 +609,136 @@ fn invalid_configuration_and_methods_never_fall_back() {
     }
     assert!(OTSMethod::from_tag(1).is_err());
     assert_eq!(OTSMethod::from_tag(0).unwrap(), OTSMethod::Bitcoin);
+}
+
+#[test]
+fn interval_bounds_are_validated_and_propagated() {
+    for value in [0, 86_401, u64::MAX] {
+        let cfg = OtsConfig {
+            interval_secs: value,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        assert!(OtsSettings::from_config(&cfg).is_err());
+        assert!(OtsSettings::try_from(&cfg).is_err());
+        assert!(OTSClient::from_config(&cfg).is_err());
+    }
+    for value in [1, 86_400] {
+        let cfg = OtsConfig {
+            interval_secs: value,
+            ..Default::default()
+        };
+        cfg.validate().unwrap();
+        assert_eq!(cfg.interval(), Duration::from_secs(value));
+        let settings = OtsSettings::from_config(&cfg).unwrap();
+        assert_eq!(settings.interval_secs, value);
+        assert_eq!(OtsSettings::try_from(&cfg).unwrap(), settings);
+    }
+    let default = OtsConfig::default();
+    default.validate().unwrap();
+    assert_eq!(default.interval(), Duration::from_secs(300));
+}
+
+#[tokio::test]
+async fn configured_proof_dir_is_validated_exposed_and_used() {
+    for value in ["", "bad\0dir"] {
+        let cfg = OtsConfig {
+            proof_dir: value.into(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+        assert!(OtsSettings::from_config(&cfg).is_err());
+        assert!(OTSClient::from_config(&cfg).is_err());
+    }
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("nested proof dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = OtsConfig {
+        proof_dir: dir.display().to_string(),
+        ..Default::default()
+    };
+    cfg.validate().unwrap();
+    let client = OTSClient::from_config(&cfg).unwrap();
+    assert_eq!(client.proof_dir(), dir.as_path());
+    let digest = [0x42u8; 32];
+    let proof = detached(&digest, &confirmed_tree());
+    let digest_hex = encode_hex(&digest);
+    let saved = client.save_proof(&proof, &digest_hex).await.unwrap();
+    assert_eq!(saved, dir.join(format!("{digest_hex}.ots")));
+    assert!(saved.is_file());
+}
+
+#[test]
+fn settings_conversion_matches_the_configuration() {
+    let configs = [
+        OtsConfig::default(),
+        OtsConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        OtsConfig {
+            interval_secs: 1,
+            ..Default::default()
+        },
+        OtsConfig {
+            interval_secs: 86_400,
+            ..Default::default()
+        },
+        OtsConfig {
+            method: "BiTcOiN".into(),
+            ..Default::default()
+        },
+    ];
+    for cfg in configs {
+        let from_config = OtsSettings::from_config(&cfg).unwrap();
+        let try_from = OtsSettings::try_from(&cfg).unwrap();
+        assert_eq!(from_config, try_from);
+        assert_eq!(from_config.enabled, cfg.enabled);
+        assert_eq!(from_config.interval_secs, cfg.interval_secs);
+        assert_eq!(from_config.method_tag, 0);
+        assert_eq!(from_config.method_name(), "bitcoin");
+        assert_eq!(from_config.is_disabled(), !cfg.enabled);
+    }
+    let unsupported = OtsSettings {
+        enabled: true,
+        interval_secs: 300,
+        method_tag: 1,
+    };
+    assert_eq!(unsupported.method_name(), "unsupported");
+    assert!(!unsupported.is_disabled());
+    assert!(OtsSettings {
+        enabled: false,
+        ..unsupported
+    }
+    .is_disabled());
+}
+
+#[test]
+fn settings_conversion_never_bypasses_validation() {
+    let invalid = [
+        OtsConfig {
+            method: "ethereum".into(),
+            ..Default::default()
+        },
+        OtsConfig {
+            interval_secs: 0,
+            ..Default::default()
+        },
+        OtsConfig {
+            timeout_secs: 0,
+            ..Default::default()
+        },
+        OtsConfig {
+            proof_dir: String::new(),
+            ..Default::default()
+        },
+        OtsConfig {
+            server_url: "file:///tmp/test".into(),
+            ..Default::default()
+        },
+    ];
+    for cfg in invalid {
+        assert!(OtsSettings::from_config(&cfg).is_err());
+        assert!(OtsSettings::try_from(&cfg).is_err());
+    }
 }
