@@ -9,3 +9,8 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+    ignore:
+      # This action's ref is the compiler version, and @1.91.0 is the declared
+      # MSRV gate (Cargo.toml rust-version = 1.91). Bumping it automatically
+      # would retire the locked minimum-compiler check; migrate deliberately.
+      - dependency-name: "dtolnay/rust-toolchain"
