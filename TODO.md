@@ -371,3 +371,7 @@ establish current release qualification. Current test totals live in root `AGENT
       fresh measurements on the delivered lossless-artifact path.
 - [ ] Learned-model real-codec robustness remains unqualified; see the current
       evaluation limits in `docs/algorithms.md`, not old synthetic score claims.
+
+## Workflowz review — 2026-11-10
+
+Coverage note: reviewed the supplied guidance, manifests, TODO history, and bounded source excerpts for concrete correctness, maintainability, documentation, validation, and dead-code improvements. No finding with both exact evidence and a defensible behavioral acceptance probe survived; no TODO items added. Coverage was limited to 11 project files and 5 source excerpts out of 236 files/105 source candidates, with no repository execution or full-file access. Re-review on a concrete failure or source change.
