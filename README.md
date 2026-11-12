@@ -1,5 +1,10 @@
 # Steganographer
 
+<p align="center">
+  <a href="https://github.com/docxology/steganographer/actions/workflows/ci.yml"><img alt="ci.yml workflow status on main" src="https://github.com/docxology/steganographer/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
 Cryptographic media watermarking, bounded packet transport and forensic inspection in a multi-crate Rust workspace.
 
 [Latest release](https://github.com/docxology/steganographer/releases/latest). Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
