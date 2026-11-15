@@ -141,7 +141,7 @@ Ed25519 is not quantum-resistant. Optional library ML-DSA-44/65/87 and hybrid Ed
 
 A compromised key can sign arbitrary attacker-chosen content under that identity. Neither a watermark nor prior possession of the public key prevents forgery after compromise. Rotate the key, revoke the old public key through a trusted policy, secure/delete old private material and tell verifiers which key is trusted. Revocation policy is external to the signature bytes.
 
-See [Key Rotation](key-rotation.md) for rotation steps and current CLI policy.
+See [Key Rotation and Revocation](key-rotation.md) for registry handling and replacement signer pinning.
 
 ---
 

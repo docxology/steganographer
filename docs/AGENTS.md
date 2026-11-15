@@ -25,7 +25,7 @@ Comprehensive documentation suite for the steganographer project, covering stega
 | `roadmap.md`              | Release sequence from v0.6.1 correctness baseline through v1.0 stable platform contracts             |
 | `faq.md`                  | 30+ Q&As on concepts, build, usage, crypto, dashboard, MetaMask, template placeholders, JSON output  |
 | `threat-model.md`         | Attacker models, LSB statistical detection, JPEG/MP3 robustness, countermeasures                     |
-| `key-rotation.md` | Signing-key rotation, revocation, and signer trust |
+| `key-rotation.md`         | Signer pinning, revocation policy, registry handling and key replacement                            |
 | `plans/steganography-platform/` | Seven-file implementation program covering protocol, carriers, formats, forensics, documents, product surfaces, validation, migration, and delivery |
 
 ## Cross-references

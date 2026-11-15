@@ -14,6 +14,19 @@ Keep these questions separate:
 
 Success at one step does not imply success at the others. See [Cryptography](cryptography.md) for byte-level contracts and [Threat Model](threat-model.md) for adversaries and residual risks.
 
+## Signer trust and revocation
+
+Obtain the expected public key through a trusted channel before accepting a
+signature. Independent pinning establishes which signer the verifier expects.
+The dashboard advertises the runtime key it uses for signing.
+
+Managed signing and verification enforce built-in revocations independently of
+the local registry. CLI verification and packet recovery also accept an
+additional registry. The raw core cryptographic primitives verify mathematical
+signatures. Library applications apply their own trust and revocation policies.
+See [Key Rotation and Revocation](key-rotation.md) for policy distribution and
+signer replacement.
+
 ## Integrity, authorship and coverage
 
 | Property | Implemented boundary |

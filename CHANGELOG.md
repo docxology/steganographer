@@ -132,9 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ZIP/OOXML/PDF/Unicode scanning handles adversarial offsets, comments, encodings,
   references and resource limits without claiming an incomplete scan is clean.
   RS analysis reports scoped synthetic evidence, not calibrated natural-image rates.
-- Secret scanning inherits provider rules without blanket documentation, workflow
-  or test-directory exemptions. Managed signing and verification enforce built-in
-  revocation, including with an empty local registry.
+- Secret scanning inherits provider rules across source, documentation,
+  workflows and tests. Managed signing and verification enforce built-in
+  revocations independently of the local registry. See [Security](docs/security.md).
 
 ### Media and interfaces
 

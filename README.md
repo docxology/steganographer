@@ -5,33 +5,52 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
-Cryptographic media watermarking, bounded packet transport and forensic inspection in a multi-crate Rust workspace.
+Steganographer is a Rust toolkit for signing and verifying media, embedding
+and recovering data in lossless carriers, and inspecting files for hidden content.
+It includes a command-line tool, a browser dashboard, and Rust and WASM libraries.
 
-[Latest release](https://github.com/docxology/steganographer/releases/latest). Release provenance records exact source and build variants; qualification is limited to the configurations actually exercised.
+[Getting started](docs/getting-started.md) · [CLI reference](docs/cli-reference.md) · [Documentation](docs/README.md) · [Releases](https://github.com/docxology/steganographer/releases)
 
-![Signed-media dashboard](docs/images/dashboard-video-tab.png)
+## Quickstart
 
-## Build and run
-
-Rust **1.91+**. Native GStreamer integration needs GStreamer 1.22+ development libraries; optional codec evaluation also needs a C++ compiler. See [Getting Started](docs/getting-started.md) and [Platforms](docs/platforms.md).
+With Rust **1.91+**, build the portable CLI and dashboard from a source checkout.
 
 ```bash
 git clone https://github.com/docxology/steganographer.git
 cd steganographer
-cargo build --workspace --all-features --locked
-cargo run -p steganographer-cli -- dashboard --transport websocket --port 8080
+cargo build -p steganographer-cli --no-default-features --locked
+target/debug/steganographer dashboard --transport websocket --port 8080
 ```
 
-Open `http://127.0.0.1:8080`. Camera/microphone access depends on browser permissions and a secure browser context. Remote binding requires authentication; keep public deployments behind suitable TLS and origin controls.
+Open <http://127.0.0.1:8080> and grant camera or microphone access to capture media.
+Dashboard recordings contain sampled, lossless signed artifacts. For command-line
+use, follow the [sign-and-verify walkthrough](docs/getting-started.md#2-sign-and-verify-a-raw-rgb-carrier)
+or see [CLI examples](#cli-examples) below.
 
-For the GStreamer-free CLI/dashboard:
+![Signed-media dashboard](docs/images/dashboard-video-tab.png)
+
+### Native GStreamer build
+
+Install the GStreamer 1.22+ development libraries for native video and audio.
+The optional codec evaluation also needs a C++ compiler. See
+[platform requirements](docs/platforms.md) before building the full workspace.
 
 ```bash
-cargo build -p steganographer-cli --no-default-features --locked
-cargo run -p steganographer-cli --no-default-features -- dashboard --transport websocket
+cargo build --workspace --all-features --locked
 ```
 
-`./run.sh` provides an interactive menu. [`config/example.toml`](config/example.toml) and [`steganographer.toml`](steganographer.toml) select explicit synthetic input by default, never an implicit camera fallback. Their example embedding keys are public fixtures, not production secrets.
+With the native build, run bounded synthetic video without opening a camera or
+display.
+
+```bash
+target/debug/steganographer --config config/example.toml video \
+  --sink 'fakesink sync=false' --max-frames 3
+```
+
+The [example configuration](config/example.toml) and [repository configuration](steganographer.toml)
+select synthetic input and contain public fixture embedding keys. See the [configuration
+reference](docs/configuration.md) for file and device sources. The interactive
+menu is available through `./run.sh`.
 
 ## Supported surfaces
 
@@ -40,22 +59,23 @@ cargo run -p steganographer-cli --no-default-features -- dashboard --transport w
 | Offline CLI | Encode, decode, extract and verify signatures or generic packets; explicit keys/password files, atomic outputs, semantic exit codes and JSON envelopes |
 | Dashboard | Ed25519 + BLAKE3 + LSB; delivered signed PNG/raw PCM over WebSocket, optional RTC JSON/base64 data-channel video; WAV wrappers for archive export |
 | Native pipelines | Single-kernel LSB/DCT signed video, LSB signed audio, literal file/device/network input routing and explicit caller-owned pipelines |
-| Native files | Exact RGB Matroska `.mkv`; whole-selection PCM `.wav` signed once at index 0, bounded to 64 MiB; atomic no-clobber publication after EOS |
+| Native files | Exact RGB Matroska `.mkv`; whole-selection PCM `.wav` signed once at index 0, bounded to 64 MiB; atomic publication after EOS, with no-clobber by default |
 | Forensics | Bounded byte, Unicode, ZIP/OOXML, PDF and statistical analysis, with explicit incomplete/budget results |
 | OpenTimestamps | Standard SHA-256 detached proofs, fresh nonce-blinded calendar submissions, upgrades and Bitcoin verification through a configured trusted Esplora provider |
 | WASM | Local packet/carrier/forensics facade; generated JavaScript bindings validate numbers before narrowing and report `u64` values as decimal strings |
 
-### Signed media is not a lossy preview
+### Record and independently verify signed media
 
-Dashboard **Record** downloads a ZIP containing the actual signed PNG/WAV artifacts plus per-artifact verification metadata. These are sampled artifacts, **not continuous signed video/audio**. H.264 previews, browser camera previews and original microphone input are not substitutes for those bytes.
+Dashboard **Record** downloads a ZIP of signed PNG snapshots or PCM WAV chunks
+with per-artifact metadata. The dashboard reports its own verification results.
+For independent verification, extract the entries, use the manifest's parameters,
+and verify against a public key obtained through a trusted channel. See
+[recording and verification](docs/faq.md#can-i-record-and-save-the-signed-videoaudio)
+and [key rotation and revocation](docs/key-rotation.md).
 
-- Pin the signer's public key independently. An embedded key or a dashboard's self-reported identity is not organizational provenance.
-- Encryption/ECC, Ethereum wallet signing and cryptographic QR overlays are not live dashboard capabilities; unavailable controls do not pretend otherwise.
-- Preview opacity is display-only. Lossy codecs, resizing, resampling, OBS and conferencing clients can invalidate invisible marks.
-- Native explicit sinks are caller-owned. A successful pre-sink signature check does not authenticate arbitrary downstream conversions.
-- Browser verdicts are server-reported, not independent archive verification.
-  Encode request/epoch ownership rejects stale current verdicts; archives own
-  requests at submission, not reply arrival. Independently verify exports.
+Keep the downloaded media lossless. Transcoding, resizing, and resampling can
+invalidate the mark. H.264 previews and opacity controls affect the preview.
+Native explicit sinks are caller-owned and may apply downstream conversions.
 
 ## Cryptographic binding
 
@@ -79,33 +99,25 @@ See [Cryptography](docs/cryptography.md), [Algorithms](docs/algorithms.md), [Sec
 
 ## CLI examples
 
+From the repository root, use the built binary with fresh output paths.
+The packet examples use an existing lossless cover image and PDF.
+
 ```bash
-# Generate a signing-key pair; paths/public key are printed, not private key bytes.
-steganographer keygen --output mykey
+target/debug/steganographer keygen --output mykey
 
-# Exact sequential generic payload bound; match metadata/signing policy at encode.
-steganographer capacity --input cover.png --bits 2 \
+target/debug/steganographer capacity --input cover.png --bits 2 \
   --filename report.pdf --mime-type application/pdf --format json
-
-# Generic bytes in a lossless image carrier.
-steganographer encode --input cover.png --output packed.png \
+target/debug/steganographer encode --input cover.png --output packed.png \
   --payload-file report.pdf --mime-type application/pdf --bits 2
-steganographer decode --input packed.png --output recovered.pdf --bits auto
+target/debug/steganographer decode --input packed.png --output recovered.pdf --bits auto
 
-# Argon2id-derived packet encryption; protect the password file separately.
-steganographer encode --input cover.png --output encrypted.png \
-  --payload-file report.pdf --password-file secret.txt --bits 2
-steganographer decode --input encrypted.png --output recovered-secret.pdf \
-  --password-file secret.txt --bits auto
-
-# Structural/forensic inspection, not a proof that undetected data is absent.
-steganographer scan --input exports --format json
-steganographer --config config/example.toml config check --format json
-
-# Finite native synthetic smoke; no camera or display opened.
-steganographer --config config/example.toml video \
-  --sink 'fakesink sync=false' --max-frames 3
+target/debug/steganographer scan --input packed.png --format json
+target/debug/steganographer --config config/example.toml config check --format json
 ```
+
+Keep the generated private key in protected storage. The
+[password-protected packet walkthrough](docs/getting-started.md#4-password-protect-a-generic-packet)
+shows how to encrypt a packet using a separate password file.
 
 Use [CLI Reference](docs/cli-reference.md) for trusted-signer verification, raw geometry, encryption key precedence, exit codes and generated completions/manuals. Existing outputs are not silently truncated; JSON never contains generated secrets.
 
@@ -148,7 +160,9 @@ Release validation uses synthetic media and public test keys. Physical cameras/m
 
 ## Release artifacts
 
-Run from a clean source checkout on macOS or Linux with Rust, `tar`, `gitleaks`,
+The release workflow records the exact source and build variants in its
+provenance. To build and check a release locally, run from a clean source
+checkout on macOS or Linux with Rust, `tar`, `gitleaks`,
 Node.js, Python 3.12+, the `wasm32-unknown-unknown` target and a `wasm-bindgen`
 generator matching `Cargo.lock`. Native builds also need GStreamer 1.22+.
 

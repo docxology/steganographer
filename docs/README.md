@@ -52,7 +52,7 @@ Dashboard signed visual overlays/QR, MetaMask and Ethereum modes are unavailable
 | [Compatibility](compatibility.md) | Compatibility & deprecation policy: SemVer semantics, wire-format rules, golden-vector stability, MSRV, and platform matrix |
 | [Steganography Platform Plan](plans/steganography-platform/README.md) | Composable v0.6.x–v1.0 program for generic packets, carriers, formats, forensics, documents, CLI/WASM, validation, and migration |
 | [FAQ](faq.md) | 30+ Q&As on concepts, build, usage, crypto, dashboard, and configuration |
-| [Key Rotation](key-rotation.md) | Signing-key rotation, independent trust pinning, and revocation policy |
+| [Key Rotation](key-rotation.md) | Independent signer pinning, registry behavior and signer replacement |
 
 ## Quick Links
 
@@ -60,7 +60,7 @@ Dashboard signed visual overlays/QR, MetaMask and Ethereum modes are unavailable
 - **Dashboard**: `./run.sh` → option `1` (launches web GUI at `http://localhost:8080`)
 - **Build**: `cargo build --workspace`
 - **Test**: `cargo test --workspace` (count: canonical Tests line in root `AGENTS.md`; verify with the command itself)
-- **CLI**: `cargo run -p steganographer-cli -- --help`
+- **CLI**: `cargo run -p steganographer-cli --no-default-features --locked -- --help`
 - **Config**: [`steganographer.toml`](../steganographer.toml) (master config)
 - **Example**: [`config/example.toml`](../config/example.toml)
 
