@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Release consumer checks reject WASM packages and native GStreamer plugins
   whose embedded versions differ from release provenance, even when archive
-  checksums match. CI now runs the release-checker safety regressions.
+  checksums match. CI runs the release-checker safety regressions without writing
+  bytecode into the clean source snapshot needed by archive assembly.
 
 ## 0.9.1 — 2026-11-09
 
