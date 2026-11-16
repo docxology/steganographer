@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Release consumer checks reject WASM packages and native GStreamer plugins
+  whose embedded versions differ from release provenance, even when archive
+  checksums match. CI runs the release-checker safety regressions without writing
+  bytecode into the clean source snapshot needed by archive assembly.
+
 ## 0.9.1 — 2026-11-09
 
 ### Added

@@ -99,6 +99,9 @@ Archives contain exactly one complete gzip member; truncated trailers,
 concatenated members and trailing padding reject. The checker rejects duplicate
 **normalized** member paths before inventory-map construction/extraction, plus
 file/directory collisions. Checksums do not make an unsafe archive safe.
+The consumer checks also require both Node/web package versions and the discovered
+GStreamer plugin version to match release provenance; refreshed checksums cannot
+hide mixed-version bundles.
 
 CLI generation uses the single Clap schema for native and portable manuals and
 five shell completions. Manuals identify the actual package version and omit

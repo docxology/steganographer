@@ -51,6 +51,21 @@ def archive_members(tar):
     return members, next(iter(roots))
 
 
+def check_plugin_version(inspection, version, element):
+    versions = [
+        line.strip().split(maxsplit=1)[1]
+        for line in inspection.splitlines()
+        if line.strip().startswith("Version ")
+    ]
+    require(versions == [version], f"{element} plugin version differs from provenance")
+
+
+def check_wasm_versions(package, version):
+    for target in ("node", "web"):
+        metadata = json.loads((package / target / "package.json").read_text())
+        require(metadata.get("version") == version, f"{target} WASM package version differs from provenance")
+
+
 def check(directory):
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
@@ -120,7 +135,9 @@ def check(directory):
                             and Path(filenames[0]).resolve(strict=True) == expected_library,
                             f"{element} was not loaded from the packaged plugin",
                         )
+                        check_plugin_version(inspection, version, element)
             elif kind == "wasm":
+                check_wasm_versions(package, version)
                 subprocess.run(["node", str(root / "steganographer-wasm/tests/bindings.cjs"), str(package / "node/steganographer_wasm.js")], check=True)
                 subprocess.run(["node", "--input-type=module", "-e", """
 import assert from 'node:assert/strict';
