@@ -341,7 +341,9 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Exercise release safety boundaries
-        run: cargo test -p steganographer-cli --example release --no-default-features --locked
+        run: |
+          cargo test -p steganographer-cli --example release --no-default-features --locked
+          python3 steganographer-cli/tests/release_checker_safety.py
 
       - name: Assemble actual host and WASM artifacts
         run: |

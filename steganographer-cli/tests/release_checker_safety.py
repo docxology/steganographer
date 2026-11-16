@@ -51,6 +51,29 @@ class ReleaseCheckerSafetyTests(unittest.TestCase):
             self.make_release(directory, [("package/", None), ("package/file", b"good")])
             CHECKER.check(directory)
 
+    def test_refuses_mixed_wasm_package_versions(self):
+        for stale in ("node", "web"):
+            with self.subTest(stale=stale), tempfile.TemporaryDirectory() as temporary:
+                package = Path(temporary)
+                for target in ("node", "web"):
+                    (package / target).mkdir()
+                    (package / target / "package.json").write_text(json.dumps({"version": "0.9.1"}))
+                CHECKER.check_wasm_versions(package, "0.9.1")
+                (package / stale / "package.json").write_text(json.dumps({"version": "0.8.0"}))
+                with self.assertRaisesRegex(ValueError, f"{stale} WASM package version differs"):
+                    CHECKER.check_wasm_versions(package, "0.9.1")
+
+    def test_refuses_stale_missing_or_ambiguous_plugin_version(self):
+        for element in ("stegovideo", "stegoaudio"):
+            with self.subTest(element=element):
+                inspection = "Plugin Details:\n  Name                     steganographer\n  Version                  0.9.1\n"
+                CHECKER.check_plugin_version(inspection, "0.9.1", element)
+                for versions in ("", "  Version                  0.8.0\n",
+                                 "  Version                  0.9.1\n  Version                  0.8.0\n"):
+                    with self.subTest(versions=versions):
+                        with self.assertRaisesRegex(ValueError, f"{element} plugin version differs"):
+                            CHECKER.check_plugin_version("Plugin Details:\n" + versions, "0.9.1", element)
+
     def test_refuses_duplicate_files_before_inventory_collapse(self):
         for duplicate in ("package/file", "package/./file", "package//file", "./package/file"):
             with self.subTest(duplicate=duplicate), tempfile.TemporaryDirectory() as temporary:
