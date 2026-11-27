@@ -1,4 +1,5 @@
-# AGENTS.md — `docs/manuscript/`
+# Verification manuscript maintenance
 
-- Only `MANUSCRIPT_STATUS.md` (verified 2026-08-29); update it if
-  publication-track artifacts appear.
+Keep the numbered source sections and references in this directory. Update
+conclusions when the documented cryptography tests or trust model change.
+Use the [render recipe](README.md) to regenerate figures from the tests.

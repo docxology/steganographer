@@ -6,7 +6,7 @@ These docs target proposed 0.9.0; version metadata/publication are separate.
 Before 1.0, a minor release may make
 breaking Rust/API or legacy format changes with an explicit migration note;
 patch releases do not change wire contracts or MSRV. Generic packet protocol
-versioning is independent of the crate version. See [CHANGELOG](../CHANGELOG.md)
+versioning is independent of the crate version. See [release history](releases/CHANGELOG.md)
 for release changes and [CLI Reference](cli-reference.md) for current flags.
 
 ## 0.8 to proposed 0.9 cutover

@@ -1,0 +1,19 @@
+paper:
+  title: "Verifying signed media with a separately trusted key"
+  subtitle: "Controlled checks of the Steganographer Rust cryptography API"
+  version: "0.9.1"
+authors:
+  - name: Steganographer Contributors
+publication:
+  repository_url: https://github.com/docxology/steganographer
+  github_repository: docxology/steganographer
+metadata:
+  license: MIT
+  language: en
+render:
+  formats:
+    pdf: true
+    html: true
+    slides: false
+    docx: false
+    epub: false
