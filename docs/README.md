@@ -8,6 +8,10 @@ The dashboard returns lossless signed PNG snapshots and signed PCM WAV chunks in
 
 Dashboard signed visual overlays/QR, MetaMask and Ethereum modes are unavailable. Preview opacity is display-only. Core library backend availability does not imply dashboard or legacy-media support.
 
+## Manuscript
+
+The [verification manuscript](manuscript/README.md) documents and reproduces the local cryptographic controls. [Release history](releases/CHANGELOG.md)
+
 ## Table of Contents
 
 ### Theory & Foundations

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Steganographer 0.9.0** provides bounded generic packets/forensics, domain-separated signed media, native GStreamer integration and a sampled signed-artifact web dashboard. Surface capabilities are explicit: live Ed25519/LSB is not the full set of optional core signing/kernel APIs. Version metadata and publication are separate release-owner steps.
+**Steganographer 0.9.1** provides bounded generic packets/forensics, domain-separated signed media, native GStreamer integration and a sampled signed-artifact web dashboard. Surface capabilities are explicit: live Ed25519/LSB is not the full set of optional core signing/kernel APIs. Version metadata and publication are separate release-owner steps.
 
 ## Directory Structure
 

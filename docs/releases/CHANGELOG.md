@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [Unreleased]
 
 ### Fixed
 
@@ -869,7 +869,7 @@ contracts and migration requirements are in README and docs/compatibility.md.
 - **132 Tests** — 56 core unit + 58 core integration + 12 dashboard + 1 GStreamer + 5 Ethereum (feature-gated)
 - **17 Documentation Files** — architecture, cryptography, algorithms, CLI, config, GStreamer, platforms, API, security, threat model, theory, contributing, roadmap, FAQ
 
-[Unreleased]: https://github.com/docxology/steganographer/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/docxology/steganographer/compare/v0.9.1...HEAD
 [0.4.0]: https://github.com/docxology/steganographer/releases/tag/v0.4.0
 [0.3.0]: https://github.com/docxology/steganographer/releases/tag/v0.3.0
 [0.2.0]: https://github.com/docxology/steganographer/releases/tag/v0.2.0

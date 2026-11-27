@@ -68,6 +68,6 @@ clap_mangen = "0.2"
 tag = true
 tag-name = "v{{version}}"
 pre-release-replacements = [
-    { file = "../CHANGELOG.md", search = "(?m)^## \\[Unreleased\\]$", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
-    { file = "../CHANGELOG.md", search = "(?m)^\\[Unreleased\\]:.*$", replace = "[Unreleased]: {{repository}}/compare/v{{version}}...HEAD\n[{{version}}]: {{repository}}/releases/tag/v{{version}}", exactly = 1 },
+    { file = "../docs/releases/CHANGELOG.md", search = "(?m)^## \\[Unreleased\\]$", replace = "## [Unreleased]\n\n## [{{version}}] — {{date}}", exactly = 1 },
+    { file = "../docs/releases/CHANGELOG.md", search = "(?m)^\\[Unreleased\\]:.*$", replace = "[Unreleased]: {{repository}}/compare/v{{version}}...HEAD\n[{{version}}]: {{repository}}/releases/tag/v{{version}}", exactly = 1 },
 ]

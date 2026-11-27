@@ -9,7 +9,7 @@ Steganographer is a Rust toolkit for signing and verifying media, embedding
 and recovering data in lossless carriers, and inspecting files for hidden content.
 It includes a command-line tool, a browser dashboard, and Rust and WASM libraries.
 
-[Getting started](docs/getting-started.md) · [CLI reference](docs/cli-reference.md) · [Documentation](docs/README.md) · [Releases](https://github.com/docxology/steganographer/releases)
+[Getting started](docs/getting-started.md) · [CLI reference](docs/cli-reference.md) · [Documentation](docs/README.md) · [Verification manuscript](docs/manuscript/README.md) · [Releases](https://github.com/docxology/steganographer/releases)
 
 ## Quickstart
 
@@ -200,7 +200,7 @@ inventory/extraction. See [Scripts](scripts/README.md) for the complete contract
   Whole chunks are ≤16 KiB; complete serialized requests must fit 4 MiB.
   Oversize errors advise smaller resolution or WebSocket selection.
 
-See [Compatibility](docs/compatibility.md), [CHANGELOG](CHANGELOG.md), [API Reference](docs/api-reference.md), [OTS Integration](docs/ots-integration.md) and the [documentation index](docs/README.md). Planned work is tracked in [TODO.md](TODO.md) and [Roadmap](docs/roadmap.md), not advertised as implemented functionality.
+See [Compatibility](docs/compatibility.md), [Release history](docs/releases/CHANGELOG.md), [API Reference](docs/api-reference.md), [OTS Integration](docs/ots-integration.md) and the [documentation index](docs/README.md). Planned work is tracked in [Project notes](docs/archive/project-notes.md) and [Roadmap](docs/roadmap.md), not advertised as implemented functionality.
 
 ## License
 

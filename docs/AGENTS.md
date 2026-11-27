@@ -4,7 +4,7 @@
 
 Comprehensive documentation suite for the steganographer project, covering steganographic theory, cryptographic foundations, system architecture, dashboard operations, and user guides.
 
-## Contents (26 files)
+## Contents
 
 | File                      | Topic                                                                                                |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -36,7 +36,7 @@ Comprehensive documentation suite for the steganographer project, covering stega
 - The `steganography-theory.md` references foundational papers — verify citations when expanding
 - The steganography-platform plan is modular: update the owning specification and
   its work-package/acceptance entries rather than duplicating detailed scope in
-  `roadmap.md` or `TODO.md`
+  `roadmap.md` or the retained `archive/project-notes.md`. Keep the verification paper in `manuscript/`
 
 ## Maintenance
 

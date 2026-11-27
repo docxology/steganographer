@@ -3,7 +3,7 @@
 This is a historical planning sequence, not a current release or qualification
 schedule. Proposed 0.9.0 delivered behavior is documented in the user/API guides;
 version selection and publication remain separate release-owner steps.
-Historical release contents live in [`CHANGELOG.md`](../CHANGELOG.md).
+Historical release contents live in [release history](releases/CHANGELOG.md).
 
 The [Steganography Platform Expansion Plan](plans/steganography-platform/README.md)
 retains design contracts and work-package IDs; planned acceptance criteria
@@ -159,7 +159,7 @@ These remain independent, experimental tracks:
 ## Parallel maintenance backlog
 
 The platform sequence does not replace maintenance and distribution work in
-[`TODO.md`](../TODO.md). Crates.io and `cargo install` support, Windows CI, a
+[retained project notes](archive/project-notes.md). Crates.io and `cargo install` support, Windows CI, a
 native GStreamer transform,
 Homebrew distribution, certificate chains, and related research can proceed
 when they do not destabilize an active protocol/format vertical slice.
